@@ -838,6 +838,16 @@ function warehouseQty(productId) {
   return Math.max(0, (p?.stock || 0) + open - held);
 }
 app.get('/api/custody', auth(...STAFF), wrap((req, res) => res.json({ drivers: custodyOf(null) })));
+// Lo que hay en el almacén para asignar: equipos con S/N que nadie trae y productos sin S/N con su cantidad disponible
+app.get('/api/custody/available', auth(...STAFF), wrap((req, res) => {
+  const prods = db.prepare('SELECT id, name, sku, unit, serialized, location FROM products ORDER BY name').all();
+  const sn = db.prepare(`SELECT s.product_id, s.serial, s.status, o.tracking_code, c.name customer FROM serials s LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id
+    WHERE s.holder_id IS NULL AND s.status IN ('disponible','asignado') ORDER BY s.status DESC, s.serial`).all();
+  res.json({
+    serialized: prods.filter((p) => p.serialized).map((p) => ({ ...p, serials: sn.filter((s) => s.product_id === p.id) })).filter((p) => p.serials.length),
+    plain: prods.filter((p) => !p.serialized).map((p) => ({ ...p, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
+  });
+}));
 app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
   const [me] = custodyOf(req.user.id);
   const log = db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
@@ -879,12 +889,16 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
         serialEvent(s.id, 'repartidor', s.order_id, req.user.id, `Entregado a ${d.name}${ref ? ' · ' + ref : ''}`);
         custodyLog(d.id, s.product_id, 1, 'asignado', req.user.id, { serial: sn, reference: ref });
       }
-    } else {
-      const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(b.product_id));
+    }
+    // productos sin S/N por cantidad: items:[{product_id, qty}] (varios a la vez) o product_id + qty (uno)
+    const items = Array.isArray(b.items) ? b.items : b.product_id ? [{ product_id: b.product_id, qty: b.qty }] : [];
+    if (!items.length && !(Array.isArray(b.serials) && b.serials.length)) throw new HttpError(400, 'Elige al menos un producto o equipo');
+    for (const it of items) {
+      const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(it.product_id));
       if (!p) throw new HttpError(400, 'Elige el producto');
-      if (p.serialized) throw new HttpError(400, `${p.name} se controla por número de serie: escanea o pega los S/N`);
-      const qty = Math.trunc(Number(b.qty));
-      if (!(qty > 0)) throw new HttpError(400, 'Escribe la cantidad');
+      if (p.serialized) throw new HttpError(400, `${p.name} se controla por número de serie: elige o escanea sus S/N`);
+      const qty = Math.trunc(Number(it.qty));
+      if (!(qty > 0)) throw new HttpError(400, `Escribe la cantidad de ${p.name}`);
       const avail = warehouseQty(p.id);
       if (qty > avail) throw new HttpError(409, `Solo hay ${avail} ${p.unit || 'pza'} de ${p.name} en el almacén`);
       results.push({ product: p.name, qty, ok: true });
@@ -896,7 +910,8 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
     }
   });
   const ok = results.filter((r) => r.ok);
-  if (!dry && ok.length) audit(req, 'inventario.asignar', `${d.name}: ${ok.length && ok[0].serial ? ok.length + ' equipos con S/N' : ok.map((r) => `${r.qty} ${r.product}`).join(', ')}`);
+  const nSn = ok.filter((r) => r.serial).length;
+  if (!dry && ok.length) audit(req, 'inventario.asignar', `${d.name}: ${[nSn ? `${nSn} equipos con S/N` : '', ...ok.filter((r) => !r.serial).map((r) => `${r.qty} ${r.product}`)].filter(Boolean).join(', ')}`);
   res.json({ dry_run: dry, driver: d.name, assigned: ok.reduce((a, r) => a + (r.qty || 1), 0), results, errors: results.filter((r) => !r.ok) });
 }));
 // Devolver al almacén: { driver_id, serials:[...] } | { driver_id, product_id, qty } | { driver_id, all: true }

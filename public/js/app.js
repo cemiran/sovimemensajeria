@@ -1590,27 +1590,93 @@ function receiveSerials(products, preselect) {
 function assignToDriver(drivers, products, preDriver) {
   const act = drivers.filter((d) => d.active);
   if (!act.length) return toast('Primero da de alta repartidores en Usuarios', 'bad');
-  const plain = products.filter((p) => !p.serialized);
   const m = modal('Asignar inventario a repartidor', `<div class="stack">
     <div class="grid g2"><label class="f">Repartidor<select id="adDrv">${act.map((d) => `<option value="${d.id}" ${d.id === preDriver ? 'selected' : ''}>${esc(d.name)}${d.total ? ` (ya trae ${d.total})` : ''}</option>`).join('')}</select></label>
       <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, turno…" maxlength="80" /></label></div>
-    <div class="pill-tabs" id="adMode"><button class="on" data-m="sn">${icon('tag')} Equipos con S/N</button>${plain.length ? `<button data-m="qty">${icon('inv')} Por cantidad</button>` : ''}</div>
-    <div data-p="sn" class="stack">
+    <div class="pill-tabs" id="adMode"><button class="on" data-m="pick">${icon('check')} Elegir del almacén</button><button data-m="sn">${icon('scan')} Escanear o pegar S/N</button></div>
+    <div data-p="pick" class="stack">
+      <div class="row"><input id="adQ" class="grow" placeholder="Buscar producto, S/N, pedido o cliente" /><button class="btn sm" id="adNone">Quitar selección</button></div>
+      <div id="adAvail" class="stack" style="max-height:48vh;overflow:auto"><p class="muted">Cargando inventario disponible…</p></div>
+      <div class="row between assign-bar" style="position:sticky;bottom:0;background:var(--surface);padding-top:8px;border-top:1px solid var(--border)">
+        <small id="adSel" class="muted">Nada seleccionado</small><button class="btn primary" id="adPick" disabled>${icon('truck')} Asignar</button></div></div>
+    <div data-p="sn" class="stack" hidden>
       <div class="row"><button class="btn primary grow" id="adScan">${icon('scan')} Escanear equipos</button></div>
       <label class="f">…o pega los números de serie (uno por línea, desde Excel)<textarea id="adList" rows="5" placeholder="HWTCDE3CE28A&#10;HWTCDE31818A"></textarea></label>
       <div class="row"><button class="btn" id="adPaste">Asignar lista</button><small class="muted" id="adCount"></small></div></div>
-    <div data-p="qty" class="stack" hidden>
-      <div class="grid g2"><label class="f">Producto<select id="adProd">${plain.map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select></label>
-        <label class="f">Cantidad<input id="adQty" type="number" min="1" value="1" /></label></div>
-      <div><button class="btn primary" id="adGo">Asignar</button></div></div>
     <div class="scan-log" id="adLog"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Listo</button>', onClose: () => render() });
   const drv = () => $('#adDrv', m.el).value;
+  const drvName = () => $('#adDrv', m.el).selectedOptions[0].text.replace(/ \(ya trae.*$/, '');
   const ref = () => $('#adRef', m.el).value;
   const log = (ok, txt) => $('#adLog', m.el).insertAdjacentHTML('afterbegin', `<div style="${ok ? '' : 'color:var(--bad)'}">${ok ? '✅' : '⛔'} ${txt}</div>`);
   $$('#adMode button', m.el).forEach((b) => (b.onclick = () => { $$('#adMode button', m.el).forEach((x) => x.classList.toggle('on', x === b)); $$('[data-p]', m.el).forEach((p) => (p.hidden = p.dataset.p !== b.dataset.m)); }));
+
+  // --- Elegir del almacén: varios productos y equipos a la vez ---
+  let avail = { serialized: [], plain: [] };
+  const box = $('#adAvail', m.el);
+  const selSN = new Set();
+  const selQty = new Map(); // product_id -> qty
+  const updateBar = () => {
+    const nP = [...selQty.values()].reduce((a, q) => a + q, 0);
+    const parts = [selSN.size ? `${selSN.size} equipo${selSN.size === 1 ? '' : 's'} con S/N` : '', nP ? `${nP} pieza${nP === 1 ? '' : 's'} de ${selQty.size} producto${selQty.size === 1 ? '' : 's'}` : ''].filter(Boolean);
+    $('#adSel', m.el).innerHTML = parts.length ? `<b>${parts.join(' + ')}</b>` : 'Nada seleccionado';
+    const btn = $('#adPick', m.el);
+    btn.disabled = !parts.length;
+    btn.innerHTML = `${icon('truck')} Asignar a ${esc(drvName())}`;
+  };
+  const draw = () => {
+    const q = normH($('#adQ', m.el).value);
+    const hit = (...t) => !q || t.some((x) => normH(x).includes(q));
+    const ser = avail.serialized.map((p) => ({ ...p, list: hit(p.name, p.sku) ? p.serials : p.serials.filter((s) => hit(s.serial, s.tracking_code, s.customer)) })).filter((p) => p.list.length);
+    const pl = avail.plain.filter((p) => hit(p.name, p.sku));
+    box.innerHTML = (ser.map((p) => {
+      const on = p.list.filter((s) => selSN.has(s.serial)).length;
+      return `<div class="card" style="padding:10px 12px"><div class="row between"><label class="row"><input type="checkbox" data-allp="${p.id}" ${on === p.list.length ? 'checked' : ''} /> <b>${esc(p.name)}</b> <small class="muted">${esc(p.sku)}</small></label>
+        <div class="row"><small class="muted">${on}/${p.list.length}</small><input type="number" min="1" max="${p.list.length}" placeholder="Cant." style="width:80px" data-firstn="${p.id}" title="Seleccionar los primeros N" /><button class="btn sm" data-firstgo="${p.id}">Elegir</button></div></div>
+        <div style="max-height:220px;overflow:auto;margin-top:6px">${p.list.map((s) => `<label class="row" style="padding:5px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" ${selSN.has(s.serial) ? 'checked' : ''} /> <span class="mono grow">${esc(s.serial)}</span>
+          <small class="muted">${s.status === 'asignado' ? `Pedido ${esc(s.tracking_code || '')}${s.customer ? ' · ' + esc(s.customer) : ''}` : 'Libre'}</small></label>`).join('')}</div></div>`;
+    }).join('') + (pl.length ? `<div class="card" style="padding:10px 12px"><b>Productos por cantidad</b><div class="table-wrap"><table><tbody>${pl.map((p) => `<tr><td><label class="row"><input type="checkbox" data-pp="${p.id}" ${selQty.has(p.id) ? 'checked' : ''} /> <span><b>${esc(p.name)}</b><br><small class="muted">${esc(p.sku)} · disponibles: ${p.available} ${esc(p.unit || 'pza')}</small></span></label></td>
+        <td class="r"><input type="number" min="1" max="${p.available}" value="${selQty.get(p.id) || 1}" style="width:90px" data-pq="${p.id}" /></td></tr>`).join('')}</tbody></table></div></div>` : '')) ||
+      `<p class="muted">${q ? 'Nada coincide con la búsqueda.' : 'No hay inventario disponible en el almacén para asignar.'}</p>`;
+    $$('[data-sn]', box).forEach((c) => (c.onchange = () => { c.checked ? selSN.add(c.dataset.sn) : selSN.delete(c.dataset.sn); draw(); }));
+    $$('[data-allp]', box).forEach((c) => (c.onchange = () => { const p = ser.find((x) => x.id === Number(c.dataset.allp)); p.list.forEach((s) => (c.checked ? selSN.add(s.serial) : selSN.delete(s.serial))); draw(); }));
+    $$('[data-firstgo]', box).forEach((b) => (b.onclick = () => {
+      const p = ser.find((x) => x.id === Number(b.dataset.firstgo));
+      const n = Math.min(p.list.length, Number($(`[data-firstn="${p.id}"]`, box).value) || 0);
+      if (!n) return toast('Escribe cuántos equipos', 'bad');
+      p.list.forEach((s) => selSN.delete(s.serial));
+      // primero los libres, luego los ya ligados a un pedido
+      [...p.list].sort((a, z) => (a.status === 'disponible' ? 0 : 1) - (z.status === 'disponible' ? 0 : 1)).slice(0, n).forEach((s) => selSN.add(s.serial));
+      draw();
+    }));
+    const setQ = (id) => { const pr = avail.plain.find((x) => x.id === id); const inp = $(`[data-pq="${id}"]`, box); let v = Math.trunc(Number(inp.value)) || 1; v = Math.max(1, Math.min(pr.available, v)); inp.value = v; return v; };
+    $$('[data-pp]', box).forEach((c) => (c.onchange = () => { const id = Number(c.dataset.pp); c.checked ? selQty.set(id, setQ(id)) : selQty.delete(id); updateBar(); }));
+    $$('[data-pq]', box).forEach((i) => (i.oninput = () => { const id = Number(i.dataset.pq); if (!selQty.has(id)) { selQty.set(id, 1); $(`[data-pp="${id}"]`, box).checked = true; } selQty.set(id, setQ(id)); updateBar(); }));
+    updateBar();
+  };
+  const load = async () => { try { avail = await GET('/api/custody/available'); draw(); } catch (e) { box.innerHTML = `<p class="muted">⚠️ ${esc(e.message)}</p>`; } };
+  $('#adQ', m.el).oninput = draw;
+  $('#adNone', m.el).onclick = () => { selSN.clear(); selQty.clear(); draw(); };
+  $('#adDrv', m.el).onchange = updateBar;
+  $('#adPick', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    const nTot = selSN.size + [...selQty.values()].reduce((a, q) => a + q, 0);
+    if (!(await confirmDlg(`¿Asignar ${nTot} unidad${nTot === 1 ? '' : 'es'} a ${drvName()}?`))) return;
+    btn.disabled = true;
+    try {
+      const r = await POST('/api/custody/assign', { driver_id: drv(), serials: [...selSN], items: [...selQty].map(([product_id, qty]) => ({ product_id, qty })), reference: ref() });
+      for (const x of r.results) log(x.ok, x.serial ? `<b class="mono">${esc(x.serial)}</b>${x.ok ? ` → ${esc(r.driver)}${x.note ? ' · ' + esc(x.note) : ''}` : ' · ' + esc(x.error)}` : `${x.qty} × ${esc(x.product)} → ${esc(r.driver)}`);
+      toast(`${r.assigned} unidades asignadas a ${r.driver}${r.errors.length ? `, ${r.errors.length} con error` : ''}`, r.errors.length ? '' : 'ok');
+      selSN.clear(); selQty.clear();
+      await load();
+    } catch (er) { toast(er.message, 'bad'); updateBar(); }
+  };
+  load();
+
+  // --- Escanear o pegar S/N ---
   const sendSN = async (list) => {
     const r = await POST('/api/custody/assign', { driver_id: drv(), serials: list, reference: ref() });
     for (const x of r.results) log(x.ok, `<b class="mono">${esc(x.serial)}</b>${x.ok ? ` → ${esc(r.driver)}${x.note ? ' · ' + esc(x.note) : ''}` : ' · ' + esc(x.error)}`);
+    load();
     return r;
   };
   $('#adList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#adCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
@@ -1622,15 +1688,8 @@ function assignToDriver(drivers, products, preDriver) {
   };
   $('#adScan', m.el).onclick = () => openScanner({
     title: 'Asignar equipos', continuous: true,
-    hint: `Repartidor: ${$('#adDrv', m.el).selectedOptions[0].text}. Cada lectura le asigna un equipo.`,
+    hint: `Repartidor: ${drvName()}. Cada lectura le asigna un equipo.`,
     onCode: async (code) => { const r = await sendSN([code]); if (!r.assigned) throw new Error(r.errors[0]?.error || 'No asignado'); return `asignado a ${r.driver}`; },
-  });
-  $('#adGo', m.el)?.addEventListener('click', async () => {
-    try {
-      const r = await POST('/api/custody/assign', { driver_id: drv(), product_id: $('#adProd', m.el).value, qty: $('#adQty', m.el).value, reference: ref() });
-      log(true, `${r.results[0].qty} × ${esc(r.results[0].product)} → ${esc(r.driver)}`);
-      toast('Asignado', 'ok');
-    } catch (e) { toast(e.message, 'bad'); }
   });
 }
 
