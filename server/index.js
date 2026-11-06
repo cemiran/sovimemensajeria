@@ -2266,6 +2266,49 @@ app.get(
 );
 app.get('/c/:token', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'cert.html')));
 
+
+// ---------- Guía del administrador (en vivo: se llena con los datos actuales) ----------
+app.get(
+  '/api/guide',
+  auth(...STAFF),
+  wrap(async (req, res) => {
+    const s = getSettings();
+    const tpl = fs.readFileSync(path.join(__dirname, 'docs', 'guia-administrador.html'), 'utf8');
+    const n = (sql, ...a) => db.prepare(sql).get(...a).n;
+    const url = notify.baseUrl(s);
+    const qr = (await require('qrcode').toDataURL(url, { margin: 1, width: 340, color: { dark: '#1d5a96', light: '#ffffff' } })).split(',')[1];
+    const staffN = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role<>'admin'");
+    const drivers = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role='repartidor'");
+    const noLoc = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND geo_quality='no_encontrada'");
+    const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia')");
+    const pendingGeo = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='')");
+    const serialZero = db.prepare("SELECT name, stock FROM products WHERE serialized=1 AND stock<=0").all();
+    const vehicles = n('SELECT COUNT(*) n FROM vehicles WHERE active=1');
+    const adminDemo = n("SELECT COUNT(*) n FROM users WHERE role='admin' AND email LIKE '%@demo.com'");
+    const e = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const item = (done, title, text) => `<li class="${done ? 'done' : ''}">${done ? '✅' : '☐'} <b>${e(title)}:</b> ${text}</li>`;
+    const pend = [
+      item(!(Number(s.depot_lat) === 19.4326 && Number(s.depot_lng) === -99.1332), 'Almacén', 'ubicarlo en <i>Configuración → General</i>; las rutas salen de ahí.'),
+      item(drivers > 0, 'Equipo', drivers ? `${staffN} usuario(s) activos (${drivers} repartidores).` : 'dar de alta despachadores y repartidores en <i>Usuarios</i>.'),
+      item(!serialZero.length, 'Existencia de equipos con S/N', serialZero.length ? `${serialZero.map((p) => e(p.name)).join(', ')} en ${serialZero.map((p) => p.stock).join(', ')}: registra tu conteo real y recibe los S/N.` : 'con existencia registrada.'),
+      item(!adminDemo, 'Correo del administrador', adminDemo ? 'cambiar <code>admin@demo.com</code> por tu correo en <i>Usuarios</i>.' : 'actualizado.'),
+      item(!!s.company_legal_name && vehicles > 0, 'Cumplimiento', `${s.company_legal_name ? 'datos de la empresa listos' : 'faltan datos de la empresa'} · ${vehicles} unidad(es) registradas.`),
+      item(!noLoc && !pendingGeo, 'Domicilios en el mapa', pendingGeo ? `ubicando ${pendingGeo} domicilio(s)…` : noLoc ? `${noLoc} sin ubicar y ${approx} aproximados: ábrelos en <i>Clientes</i> y toca el mapa.` : `todos ubicados${approx ? ` (${approx} aproximados por calle o colonia: conviene revisarlos)` : ''}.`),
+    ].join('');
+    const html = tpl
+      .replace('{{FECHA}}', new Date().toLocaleString('es-MX', { timeZone: process.env.TZ || 'America/Tijuana', dateStyle: 'long', timeStyle: 'short' }))
+      .replace('{{CLIENTES}}', n('SELECT COUNT(*) n FROM customers'))
+      .replace('{{PEDIDOS}}', n("SELECT COUNT(*) n FROM orders WHERE status IN ('pendiente','asignado','cargado')"))
+      .replace('{{UBICADOS}}', `${n('SELECT COUNT(*) n FROM customers WHERE lat IS NOT NULL')}/${n('SELECT COUNT(*) n FROM customers')}`)
+      .replace('{{MODO_PRUEBA}}', s.notif_test_to || s.notif_test_email ? 'encendido (los clientes no reciben avisos)' : 'apagado (los avisos van a los clientes)')
+      .replace('{{PENDIENTES}}', pend)
+      .replace('{{QR}}', qr)
+      .replaceAll('https://sovime.srv1901867.hstgr.cloud', e(url));
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('html').send(html);
+  })
+);
+
 // Página pública de rastreo y comprobante para el cliente final (enlace con token aleatorio, no adivinable)
 app.get(
   '/api/public/t/:token',

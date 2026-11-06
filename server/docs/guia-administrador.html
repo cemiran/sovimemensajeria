@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Guía del administrador · Sovime Mensajería</title>
+<style>
+  :root { --azul: #1d5a96; --naranja: #e5612a; --gris: #5f6b7a; --borde: #dde3ea; --suave: #f3f6fa; --ok: #1f8a4c; --alerta: #b5561a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #eef2f7; color: #1b2430; font: 15px/1.55 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+  .doc { max-width: 980px; margin: 0 auto; background: #fff; padding: 36px 40px 48px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 20px; border-bottom: 4px solid var(--azul); padding-bottom: 16px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 1.7rem; color: var(--azul); }
+  header p { margin: 4px 0 0; color: var(--gris); }
+  .logo { font-family: Georgia, serif; font-style: italic; line-height: 1; text-align: right; }
+  .logo b { font-size: 2rem; color: var(--azul); } .logo span { font-size: 2rem; color: #6b6c6e; }
+  .logo em { display: block; font-size: 1.05rem; font-weight: 700; color: var(--naranja); }
+  h2 { color: var(--azul); font-size: 1.25rem; margin: 30px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--borde); }
+  h3 { margin: 18px 0 6px; font-size: 1.02rem; }
+  .grid { display: grid; gap: 12px; } .g2 { grid-template-columns: 1fr 1fr; } .g3 { grid-template-columns: repeat(3, 1fr); } .g4 { grid-template-columns: repeat(4, 1fr); }
+  .card { border: 1px solid var(--borde); border-radius: 12px; padding: 12px 14px; background: #fff; }
+  .card h4 { margin: 0 0 4px; font-size: .95rem; color: var(--azul); }
+  .card p, .card ul { margin: 0; font-size: .9rem; }
+  .kpi b { display: block; font-size: 1.6rem; color: var(--azul); line-height: 1.1; } .kpi small { color: var(--gris); }
+  .flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; margin: 10px 0; }
+  .flow div { flex: 1 1 120px; background: var(--suave); border: 1px solid var(--borde); border-radius: 10px; padding: 10px; font-size: .85rem; position: relative; }
+  .flow div b { display: block; color: var(--azul); font-size: .9rem; }
+  .flow div:not(:last-child)::after { content: "➜"; position: absolute; right: -11px; top: 50%; transform: translateY(-50%); color: var(--naranja); font-weight: 800; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--borde); vertical-align: top; }
+  th { background: var(--suave); color: #1b2430; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: .75rem; font-weight: 700; background: var(--suave); color: var(--azul); }
+  .warn { background: #fdf0e3; border-left: 4px solid var(--naranja); padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
+  .ok { background: #e6f5ec; border-left: 4px solid var(--ok); padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
+  ol, ul { padding-left: 20px; } li { margin: 3px 0; }
+  .check li { list-style: none; margin-left: -18px; } .check li::before { content: "☐ "; color: var(--azul); }
+  .live-list { padding-left: 0; } .live-list li { list-style: none; margin: 5px 0; } .live-list .done { color: var(--gris); } .live-list .done b { text-decoration: line-through; }
+  .qr { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .qr img { width: 170px; height: 170px; border: 1px solid var(--borde); border-radius: 12px; }
+  code { background: var(--suave); padding: 1px 6px; border-radius: 6px; font-size: .85em; }
+  .muted { color: var(--gris); font-size: .85rem; }
+  footer { margin-top: 30px; border-top: 1px solid var(--borde); padding-top: 10px; color: var(--gris); font-size: .8rem; }
+  @media (max-width: 760px) { .doc { padding: 20px 16px; } .g2, .g3, .g4 { grid-template-columns: 1fr; } .flow div::after { display: none; } }
+  @media print { body { background: #fff; } .doc { padding: 0; max-width: none; } h2 { break-after: avoid; } .card, table, .flow { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="doc">
+<header>
+  <div><h1>Guía del administrador</h1><p>Panorama general de la operación · actualizada el {{FECHA}}</p></div>
+  <div class="logo"><b>S</b><span>ovime</span><em>Mensajería</em></div>
+</header>
+
+<h2>1. El panorama en una mirada</h2>
+<p>Sovime es la plataforma con la que se planea, ejecuta y comprueba cada entrega: desde la base de clientes que recibes hasta la evidencia firmada que llega al cliente y a tu hoja de Google.</p>
+<div class="flow">
+  <div><b>1 · Base de clientes</b>Excel diario → <i>Clientes → Importar Excel</i>. Crea clientes y pedidos.</div>
+  <div><b>2 · Mapa</b>La app ubica cada domicilio. Corriges los que queden aproximados.</div>
+  <div><b>3 · Rutas</b><i>Rutas → Auto-planificar</i> reparte y ordena por zona y horario.</div>
+  <div><b>4 · Salida</b>Checklist de unidad y carga por escaneo (guía o S/N).</div>
+  <div><b>5 · En camino</b>GPS en vivo y navegación. El cliente recibe aviso.</div>
+  <div><b>6 · Entrega</b>Firma, foto, S/N del equipo, temperatura y sello.</div>
+  <div><b>7 · Cierre</b>Comprobante al cliente, fila en Google Sheets, análisis.</div>
+</div>
+
+<div class="grid g4">
+  <div class="card kpi"><b>{{CLIENTES}}</b><small>clientes cargados</small></div>
+  <div class="card kpi"><b>{{PEDIDOS}}</b><small>pedidos por entregar</small></div>
+  <div class="card kpi"><b>{{UBICADOS}}</b><small>domicilios ubicados en el mapa</small></div>
+  <div class="card kpi"><b>3</b><small>canales de aviso: WhatsApp, SMS y correo</small></div>
+</div>
+
+<h2>2. Dónde vive cada cosa</h2>
+<table>
+  <tr><th>Pieza</th><th>Dónde</th><th>Para qué</th></tr>
+  <tr><td><b>App en producción</b></td><td><code>https://sovime.srv1901867.hstgr.cloud</code></td><td>La usan administrador, despacho y repartidores (web y teléfono).</td></tr>
+  <tr><td><b>Servidor</b></td><td>VPS Hostinger <code>srv1901867</code> (junto a n8n), carpeta <code>/docker/sovime</code></td><td>Funciona 24/7 con https automático. Se reinicia solo si falla.</td></tr>
+  <tr><td><b>Código</b></td><td>GitHub <code>cemiran/sovimemensajeria</code></td><td>Versiones de la app. No contiene datos ni contraseñas.</td></tr>
+  <tr><td><b>Respaldos</b></td><td>Diario 3:15 a. m. en <code>/docker/sovime/data/respaldos</code> (14 días)</td><td>Recuperar la base si algo sale mal. Recomendado: activar también las copias de Hostinger.</td></tr>
+  <tr><td><b>WhatsApp</b></td><td>Tu número vinculado por QR (Dispositivos vinculados: “Mac OS”)</td><td>Avisos a clientes. No lo desvincules ni lo vincules en otro sistema.</td></tr>
+  <tr><td><b>SMS</b></td><td>Teléfono Android con SMS Gateway (modo nube)</td><td>Avisos por SMS desde tu chip. Mantenerlo cargado y con internet.</td></tr>
+  <tr><td><b>Correo</b></td><td><code>mail.sovimemensajeria.com</code></td><td>Avisos y comprobantes por correo.</td></tr>
+  <tr><td><b>Google Sheets</b></td><td>Hoja “Ont_Anderns”, pestaña “Entregas”</td><td>Cada entrega se registra en línea; tu Dashboard se actualiza solo. Siempre activo.</td></tr>
+  <tr><td><b>Copia de práctica</b></td><td>En tu computadora: <code>npm run practica</code> → puerto 3100</td><td>Capacitar y probar sin tocar producción (franja naranja).</td></tr>
+</table>
+
+<h2>3. Quién hace qué (roles)</h2>
+<div class="grid g3">
+  <div class="card"><h4>Administrador</h4><ul><li>Todo lo del despacho</li><li>Usuarios y permisos</li><li>Configuración, canales de aviso, Google Sheets</li><li>Cumplimiento y certificado</li><li>Bitácora de actividad</li></ul></div>
+  <div class="card"><h4>Despachador</h4><ul><li>Importar clientes y crear pedidos</li><li>Planificar y asignar rutas</li><li>Inventario y números de serie</li><li>Mapa en vivo, recepciones, mensajes</li><li>Entrega en mostrador</li></ul></div>
+  <div class="card"><h4>Repartidor (teléfono)</h4><ul><li>Checklist de su unidad</li><li>Cargar paquetes escaneando</li><li>Navegar a cada parada</li><li>Registrar entrega con firma, foto y S/N</li><li>Registrar intento fallido con motivo</li></ul></div>
+</div>
+
+<h2>4. Rutina diaria del administrador</h2>
+<div class="grid g3">
+  <div class="card"><h4>🌅 Antes de salir (6–9 a. m.)</h4><ul class="check">
+    <li>Importar la base del día (<i>Clientes → Importar Excel</i>), sin avisar a clientes</li>
+    <li>Revisar clientes “sin ubicación” o “aproximados” y fijarlos en el mapa</li>
+    <li>Recibir módems por S/N (<i>Números de serie → Recibir equipos</i>)</li>
+    <li><i>Rutas → Auto-planificar</i> con los repartidores del día</li>
+    <li>Confirmar que cada repartidor llenó su checklist de unidad</li></ul></div>
+  <div class="card"><h4>🚚 Durante el día</h4><ul class="check">
+    <li><i>Mapa en vivo</i>: dónde va cada repartidor y su recorrido</li>
+    <li><i>Mensajes</i>: avisos enviados o con error (reintentar)</li>
+    <li><i>Recepciones</i>: firmas y fotos conforme llegan</li>
+    <li>Reprogramar intentos fallidos (<i>Pedidos → Reprogramar</i>)</li>
+    <li>Atender entregas en mostrador</li></ul></div>
+  <div class="card"><h4>🌙 Al cierre</h4><ul class="check">
+    <li><i>Análisis</i>: % de éxito, a tiempo, km y entregas por hora</li>
+    <li>Revisar la hoja “Entregas” y el Dashboard</li>
+    <li>Conciliar módems: entregados vs. existencia y S/N</li>
+    <li>Revisar incidencias (temperatura, sello, motivos de no entrega)</li>
+    <li><i>Cumplimiento</i>: documentos por vencer</li></ul></div>
+</div>
+
+<h2>5. Qué recibe el cliente y cuándo</h2>
+<table>
+  <tr><th>Momento</th><th>Cuándo sale</th><th>Canales</th></tr>
+  <tr><td>Pedido registrado</td><td>Al crear el pedido (en importaciones grandes se puede apagar)</td><td>WhatsApp, correo</td></tr>
+  <tr><td>En camino</td><td>Cuando el repartidor escanea el paquete al cargar</td><td>WhatsApp, SMS</td></tr>
+  <tr><td>Repartidor cerca</td><td>Al iniciar la navegación a esa parada o al terminar la anterior (una vez)</td><td>WhatsApp, SMS</td></tr>
+  <tr><td>Entregado</td><td>Al registrar la recepción: incluye enlace al comprobante con firma, foto y S/N</td><td>WhatsApp, SMS, correo</td></tr>
+  <tr><td>No entregado</td><td>Al registrar un intento fallido, con el motivo</td><td>WhatsApp, SMS, correo</td></tr>
+</table>
+<p class="muted">Textos y canales se cambian en <i>Configuración → Notificaciones</i>. El “modo de prueba” desvía todo a un número de prueba: hoy está <b>{{MODO_PRUEBA}}</b>.</p>
+
+<h2>6. Mapa de la app (menú del administrador)</h2>
+<table>
+  <tr><th>Sección</th><th>Para qué sirve</th></tr>
+  <tr><td>Tablero</td><td>Resumen del día: pedidos, en ruta, entregados, fallidos y mapa de rutas.</td></tr>
+  <tr><td>Pedidos</td><td>Alta, búsqueda, detalle con evidencias, S/N, avisos, etiqueta imprimible, cancelar o reprogramar.</td></tr>
+  <tr><td>Rutas</td><td>Auto-planificación por zonas y capacidad, ruta manual, re-optimizar, abrir en Google Maps.</td></tr>
+  <tr><td>Mapa en vivo</td><td>Posición GPS de cada repartidor y su recorrido del día.</td></tr>
+  <tr><td>Recepciones</td><td>Galería de entregas con firma y foto; comprobante imprimible; entrega en mostrador.</td></tr>
+  <tr><td>Mensajes</td><td>Bitácora de WhatsApp, SMS y correos enviados, con reintento.</td></tr>
+  <tr><td>Inventario</td><td>Productos, entradas y salidas por escaneo, importación desde Excel o Sheets.</td></tr>
+  <tr><td>Números de serie</td><td>Cada módem por su S/N: recibido → asignado → entregado; devoluciones y bajas.</td></tr>
+  <tr><td>Clientes</td><td>Ficha y ubicación de cada cliente; importación masiva con geolocalización.</td></tr>
+  <tr><td>Cumplimiento</td><td>Unidades (placas, seguro, fumigación), recurso confiable, checklists, prácticas médicas y certificado con QR.</td></tr>
+  <tr><td>Análisis</td><td>Éxito, puntualidad, km, ahorro por optimización, desempeño por repartidor y zona.</td></tr>
+  <tr><td>Usuarios / Actividad / Configuración</td><td>Accesos y roles, bitácora de quién hizo qué, parámetros y canales.</td></tr>
+</table>
+
+<h2>7. Pendientes para arrancar <span class="tag">en vivo</span></h2>
+<ul class="live-list">{{PENDIENTES}}</ul>
+
+<h2>8. Descarga de la app</h2>
+<div class="qr">
+  <img src="data:image/png;base64,{{QR}}" alt="QR para abrir Sovime" />
+  <div>
+    <p><b>https://sovime.srv1901867.hstgr.cloud</b></p>
+    <p><b>Android (Chrome):</b> abre el enlace → menú ⋮ → <b>Instalar app</b>.<br>
+    <b>iPhone (Safari):</b> abre el enlace → Compartir → <b>Agregar a pantalla de inicio</b>.<br>
+    <b>Computadora:</b> ícono “Sovime Mensajería” en el escritorio, o Chrome → ⊕ Instalar.</p>
+    <p class="muted">Al primer uso acepta los permisos de ubicación y cámara. Cada persona entra con su propio usuario.</p>
+  </div>
+</div>
+
+<h2>9. Reglas de oro</h2>
+<div class="warn"><b>No hagas:</b> vincular el mismo WhatsApp en otro sistema · encender la copia local como producción · compartir tu contraseña · cargar pruebas en producción (usa la copia de práctica).</div>
+<div class="ok"><b>Sí haz:</b> importar con avisos apagados en cargas grandes · revisar Mensajes y Recepciones durante el día · mantener vigentes seguros, fumigación y certificados · activar las copias de Hostinger.</div>
+
+<h2>10. Soporte técnico (para quien administra el servidor)</h2>
+<table>
+  <tr><th>Necesidad</th><th>Cómo</th></tr>
+  <tr><td>Actualizar a la última versión</td><td><code>cd /docker/sovime && git pull && docker compose up -d --build</code></td></tr>
+  <tr><td>Ver registros</td><td><code>docker logs -f sovime</code></td></tr>
+  <tr><td>Respaldo manual</td><td><code>/docker/sovime/respaldo.sh</code></td></tr>
+  <tr><td>Revivir WhatsApp</td><td><i>Configuración → Notificaciones → WhatsApp → Mostrar QR</i> y escanear desde el teléfono del negocio.</td></tr>
+</table>
+
+<footer>Sovime Mensajería · Guía interna del administrador · Contiene direcciones del sistema: compártela solo con tu equipo.</footer>
+</div>
+</body>
+</html>

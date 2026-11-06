@@ -679,7 +679,7 @@ const NAV_GROUPS = [
   ['Catálogos', [['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
-  ['Administración', [['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
+  ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
 const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'plus'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
@@ -1474,6 +1474,20 @@ const complianceHTML = (c) => {
     ${c.check ? `Checklist de unidad ${fmtD(c.check.date)}: ${c.check.passed ? 'aprobado' : 'con observaciones'}<br>` : ''}
     ${c.trusted ? `Recurso confiable: folio ${esc(c.trusted.folio)}${c.trusted.valid ? '' : ' (vencido)'}` : ''}</dd>`;
 };
+
+// ================= Guía del administrador (en vivo) =================
+async function viewGuide(v) {
+  const r = await fetch('/api/guide', { headers: { Authorization: 'Bearer ' + store.token } });
+  if (!r.ok) throw new Error('No se pudo cargar la guía');
+  const html = await r.text();
+  v.innerHTML = topbar('Guía del administrador', `<button class="btn" id="gOpen">${icon('ext')} Abrir en ventana</button><button class="btn primary" id="gPrint">${icon('print')} Imprimir / PDF</button>`,
+    'Panorama general de la operación, con los datos de este momento.') + '<iframe id="gFrame" class="guide-frame" title="Guía del administrador"></iframe>';
+  const f = $('#gFrame');
+  f.srcdoc = html;
+  f.onload = () => { try { f.style.height = f.contentDocument.documentElement.scrollHeight + 20 + 'px'; } catch {} };
+  $('#gPrint').onclick = () => f.contentWindow.print();
+  $('#gOpen').onclick = () => { const u = URL.createObjectURL(new Blob([html], { type: 'text/html' })); window.open(u, '_blank'); setTimeout(() => URL.revokeObjectURL(u), 60000); };
+}
 
 // ================= Números de serie =================
 const SN_STATUS = { disponible: ['En almacén', 'ok'], asignado: ['Asignado a pedido', 'warn'], entregado: ['Entregado', ''], baja: ['Baja', 'off'] };
@@ -3334,7 +3348,7 @@ async function render() {
   const driver = store.user.role === 'repartidor';
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
-    : { profile: viewProfile, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());
