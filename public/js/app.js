@@ -175,7 +175,7 @@ function confirmDlg(msg) {
 // ================= Mapas =================
 function makeMap(el, center, zoom = 12) {
   const map = L.map(el, { zoomControl: true }).setView(center || [Number(SETTINGS.depot_lat) || 19.43, Number(SETTINGS.depot_lng) || -99.13], zoom);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  baseTiles(map);
   const fitAfter = map.fitBounds.bind(map);
   map.fitBounds = (b, o) => { o = { ...o, animate: false }; map._lastFit = [b, o]; return fitAfter(b, o); };
   setTimeout(() => { map.invalidateSize(); if (map._lastFit) fitAfter(...map._lastFit); }, 150);
@@ -3446,3 +3446,15 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $$('.modal
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 detectLogo().finally(render);
 outbox.flush();
+
+function baseTiles(map) {
+  // OpenStreetMap exige que se identifique el sitio (Referer); si aun así rechaza, se cambia a CARTO (mismos datos de OSM)
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '© OpenStreetMap' });
+  let fails = 0;
+  osm.on('tileerror', () => {
+    if (++fails !== 3) return;
+    map.removeLayer(osm);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' }).addTo(map);
+  });
+  return osm.addTo(map);
+}

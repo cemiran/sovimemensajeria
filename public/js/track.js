@@ -76,7 +76,7 @@
         <button class="btn block" style="margin-top:12px" onclick="window.print()">Imprimir o guardar comprobante</button></section>` : ''}`;
     if ($('#tmap')) {
       map = L.map('tmap', { zoomControl: true, attributionControl: true }).setView([d.destination.lat, d.destination.lng], 14);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+      baseTiles(map);
       destMk = L.marker([d.destination.lat, d.destination.lng], { icon: L.divIcon({ className: '', html: '<div class="pin" style="background:#e5612a"><span>🏠</span></div>', iconSize: [28, 28], iconAnchor: [14, 28] }) }).addTo(map);
       if (d.driver_position) {
         drvMk = L.marker([d.driver_position.lat, d.driver_position.lng], { icon: L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] }) }).addTo(map);
@@ -88,3 +88,15 @@
   }
   load();
 })();
+
+function baseTiles(map) {
+  // OpenStreetMap exige que se identifique el sitio (Referer); si aun así rechaza, se cambia a CARTO (mismos datos de OSM)
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '© OpenStreetMap' });
+  let fails = 0;
+  osm.on('tileerror', () => {
+    if (++fails !== 3) return;
+    map.removeLayer(osm);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' }).addTo(map);
+  });
+  return osm.addTo(map);
+}

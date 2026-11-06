@@ -30,7 +30,8 @@ app.use(compression());
 app.use(express.json({ limit: '12mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Referrer-Policy', 'same-origin');
+  // solo el dominio (nunca la ruta con tokens) a sitios externos: OpenStreetMap lo exige para servir el mapa
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
 
