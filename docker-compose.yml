@@ -1,4 +1,6 @@
-# Sovime Mensajería en el VPS (junto a n8n). Los datos quedan en ./data del servidor.
+# Sovime Mensajería en el VPS de Hostinger (junto a n8n), publicado por Traefik con https.
+# Los datos (base, fotos, firmas, sesión de WhatsApp) quedan en ./data del servidor.
+# Variables en .env: APP_HOST, JWT_SECRET, TZ (ver .env.example)
 services:
   sovime:
     build: .
@@ -10,6 +12,14 @@ services:
       - TRUST_PROXY=1
     volumes:
       - ./data:/app/data
-    # Solo accesible desde el propio servidor; el proxy con https (Traefik/Nginx) lo publica en el dominio
-    ports:
-      - "127.0.0.1:3000:3000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.sovime.rule=Host(`${APP_HOST}`)
+      - traefik.http.routers.sovime.entrypoints=websecure
+      - traefik.http.routers.sovime.tls.certresolver=letsencrypt
+      - traefik.http.services.sovime.loadbalancer.server.port=3000
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

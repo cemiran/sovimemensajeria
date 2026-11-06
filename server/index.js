@@ -2112,6 +2112,14 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
+  // Esta base ya se migró a otro servidor: no arrancar aquí (evita desvincular WhatsApp en producción)
+  const movedTo = getSettings().moved_to;
+  if (movedTo && process.env.ALLOW_MOVED !== '1') {
+    console.error(`Esta copia ya NO es la producción: la app se movió a ${movedTo}`);
+    console.error('No se inicia para no desconectar WhatsApp ni duplicar registros. Usa la dirección de producción.');
+    console.error('Para práctica usa: npm run practica');
+    process.exit(1);
+  }
   notify.start();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
