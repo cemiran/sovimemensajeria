@@ -1,0 +1,22 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ultima-milla",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "start"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "practica",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "practica"
+      ],
+      "port": 3100
+    }
+  ]
+}

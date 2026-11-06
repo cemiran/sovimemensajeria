@@ -1,0 +1,20 @@
+# Dependencias
+node_modules/
+
+# Datos y secretos: base de datos, fotos, firmas, sesión de WhatsApp, respaldos, clave JWT.
+# Nunca se suben a GitHub.
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+
+# Configuración local del editor / Claude Code
+.claude/settings.local.json
+
+# Sistema
+.DS_Store
+Thumbs.db
+npm-debug.log*

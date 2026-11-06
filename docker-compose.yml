@@ -1,0 +1,15 @@
+# Sovime Mensajería en el VPS (junto a n8n). Los datos quedan en ./data del servidor.
+services:
+  sovime:
+    build: .
+    container_name: sovime
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATA_DIR=/app/data
+      - TRUST_PROXY=1
+    volumes:
+      - ./data:/app/data
+    # Solo accesible desde el propio servidor; el proxy con https (Traefik/Nginx) lo publica en el dominio
+    ports:
+      - "127.0.0.1:3000:3000"

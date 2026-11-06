@@ -1,0 +1,30 @@
+.trk { max-width: 620px; margin: 0 auto; padding: 18px 16px 40px; display: flex; flex-direction: column; gap: 14px; }
+.trk-head { display: flex; justify-content: center; padding: 6px 0 4px; }
+.trk-head .logo-img { max-height: 70px; }
+.trk-foot { text-align: center; color: var(--muted); font-size: .8rem; }
+#trk { display: flex; flex-direction: column; gap: 14px; }
+.trk-hero h1 { font-size: 1.7rem; margin: 6px 0 2px; }
+.trk-hero p { margin: 0; color: var(--muted); }
+.trk-hero.entregado h1 { color: var(--ok); }
+.trk-hero.fallido h1 { color: var(--bad); }
+.trk-eta { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: var(--primary-soft); color: var(--primary); }
+.trk-eta b { font-size: 1.5rem; }
+.trk-note { margin-top: 10px !important; color: var(--text) !important; }
+.trk-note.bad { color: var(--bad) !important; }
+.trk-steps { list-style: none; padding: 0; margin: 18px 0 0; display: grid; gap: 0; }
+.trk-steps li { position: relative; padding: 0 0 16px 30px; color: var(--muted); }
+.trk-steps li::before { content: ""; position: absolute; left: 6px; top: 4px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border); background: var(--surface); }
+.trk-steps li::after { content: ""; position: absolute; left: 12px; top: 20px; bottom: 0; width: 2px; background: var(--border); }
+.trk-steps li:last-child::after { display: none; }
+.trk-steps li b { display: block; }
+.trk-steps li small { color: var(--muted); }
+.trk-steps li.done, .trk-steps li.now { color: var(--text); }
+.trk-steps li.done::before { background: var(--ok); border-color: var(--ok); }
+.trk-steps li.done::after { background: var(--ok); }
+.trk-steps li.now::before { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
+.trk-steps li.bad::before { background: var(--bad); border-color: var(--bad); }
+.trk .map { height: 300px; }
+@media print {
+  .trk-head, .trk-proof, .trk-proof * { visibility: visible; }
+  .trk > *:not(.trk-head):not(#trk), #trk > :not(.trk-proof), .trk-proof .btn { display: none !important; }
+}

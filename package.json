@@ -1,0 +1,26 @@
+{
+  "name": "ultima-milla",
+  "version": "1.0.0",
+  "description": "Plataforma de mensajería de última milla: repartidores, inventario con escaneo, clientes, evidencia de entrega y optimización de rutas",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "seed": "node --disable-warning=ExperimentalWarning server/seed.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "seed:reset": "node --disable-warning=ExperimentalWarning server/seed.js --reset",
+    "practica": "node --disable-warning=ExperimentalWarning server/practica.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "10.2.1",
+    "qrcode": "1.5.4"
+  }
+}
