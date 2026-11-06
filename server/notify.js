@@ -202,10 +202,14 @@ async function sendEmail(s, to, subject, body) {
       host: s.smtp_host, port: Number(s.smtp_port) || 587, secure: s.smtp_secure === '1',
       auth: s.smtp_user ? { user: s.smtp_user, pass: s.smtp_pass } : undefined,
       connectionTimeout: 15000, disableFileAccess: true, disableUrlAccess: true,
+      // se presenta con el nombre público del servidor (no "127.0.0.1"): los filtros de spam lo revisan
+      name: (() => { try { return new URL(baseUrl(s)).hostname; } catch { return undefined; } })(),
     });
     mailerKey = key;
   }
-  const info = await mailer.sendMail({ from: s.smtp_from, to, subject, text: body, html: emailHtml(s, subject, body) });
+  // remitente con nombre de la empresa: "Sovime Mensajería <telnor@…>" (Gmail desconfía menos que de una dirección sola)
+  const from = s.smtp_from.includes('<') ? s.smtp_from : { name: s.company_name || 'Sovime Mensajería', address: s.smtp_from };
+  const info = await mailer.sendMail({ from, replyTo: s.company_email || undefined, to, subject, text: body, html: emailHtml(s, subject, body) });
   return { ref: info.messageId };
 }
 async function deliver(s, m, { direct = false } = {}) {
