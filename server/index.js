@@ -912,6 +912,223 @@ app.put(
     res.json({ ok: true });
   })
 );
+
+// ---------- Importación masiva de clientes (Excel/CSV) con pedido de entrega opcional ----------
+// El navegador (o un script en el servidor) manda filas normalizadas. Con dry_run calcula todo sin guardar.
+// Por defecto NO avisa a los clientes al crear los pedidos (evita una ráfaga de WhatsApp/correos).
+const CUST_IMPORT_MAX = 3000;
+const cleanTxt = (v, max = 200) => (v == null ? '' : String(v).replace(/\s+/g, ' ').trim().slice(0, max));
+const digits = (v) => String(v ?? '').replace(/\D/g, '');
+function normCustomerRow(r) {
+  const street = cleanTxt(r.street, 150);
+  const number = cleanTxt(r.number, 20);
+  const colonia = cleanTxt(r.colonia, 100);
+  const address = cleanTxt(r.address, 250) || [[street, number].filter(Boolean).join(' '), colonia ? `Col. ${colonia}` : ''].filter(Boolean).join(', ');
+  const phone = [r.phone, r.phone2, r.phone3, r.phone_line].map(digits).find((d) => d.length >= 10) || '';
+  const alt = [r.phone_alt, r.phone_line].map(digits).find((d) => d.length >= 10 && d !== phone) || '';
+  const email = cleanTxt(r.email, 120).toLowerCase();
+  const lat = r.lat === '' || r.lat == null ? null : Number(r.lat);
+  const lng = r.lng === '' || r.lng == null ? null : Number(r.lng);
+  return {
+    external_id: cleanTxt(r.external_id, 60) || null,
+    name: cleanTxt(r.name, 150),
+    phone: phone || null,
+    phone_alt: alt || null,
+    email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
+    address, colonia: colonia || null,
+    city: cleanTxt(r.city, 80) || null,
+    zip: cleanTxt(r.zip, 10) || null,
+    reference: cleanTxt(r.reference, 200) || null,
+    notes: cleanTxt(r.notes, 1000) || null,
+    lat: Number.isFinite(lat) && Math.abs(lat) <= 90 ? lat : null,
+    lng: Number.isFinite(lng) && Math.abs(lng) <= 180 ? lng : null,
+  };
+}
+app.post(
+  '/api/customers/import',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (!rows.length) throw new HttpError(400, 'No hay filas para importar');
+    if (rows.length > CUST_IMPORT_MAX) throw new HttpError(400, `Máximo ${CUST_IMPORT_MAX} clientes por importación`);
+    const o = req.body.orders || {};
+    const makeOrders = !!o.create;
+    const product = makeOrders && o.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(Number(o.product_id)) : null;
+    if (makeOrders && o.product_id && !product) throw new HttpError(400, 'Producto no encontrado');
+    const qty = Math.max(1, Math.trunc(Number(o.qty) || 1));
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(o.scheduled_date || '') ? o.scheduled_date : today();
+    const stype = ['general', 'medicamento', 'muestra', 'dispositivo', 'refrigerado'].includes(o.shipment_type) ? o.shipment_type : 'general';
+    const notifyNow = !!o.notify;
+    const updateExisting = req.body.update_existing !== false;
+    const skipDupOrders = o.skip_if_open !== false;
+    const dry = !!req.body.dry_run;
+    const results = [];
+    const seen = new Map();
+    const created = [];
+    let stockNeeded = 0;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      rows.forEach((raw, i) => {
+        const line = Number(raw.__line) || i + 2;
+        const c = normCustomerRow(raw);
+        const out = { line, name: c.name, phone: c.phone ? c.phone.replace(/.(?=.{4})/g, '•') : '', address: c.address };
+        try {
+          if (!c.name) throw new Error('Falta el nombre');
+          if (!c.address) throw new Error('Falta el domicilio');
+          const key = (c.external_id || `${c.name}|${c.address}`).toLowerCase();
+          if (seen.has(key)) throw new Error(`Repetido en el archivo (fila ${seen.get(key)})`);
+          seen.set(key, line);
+          db.exec('SAVEPOINT cli');
+          try {
+            let ex = c.external_id ? db.prepare('SELECT * FROM customers WHERE external_id=?').get(c.external_id) : null;
+            if (!ex && c.phone) ex = db.prepare('SELECT * FROM customers WHERE phone=? AND lower(name)=lower(?)').get(c.phone, c.name);
+            let cid;
+            if (ex) {
+              cid = ex.id;
+              if (updateExisting) {
+                const sameAddr = (ex.address || '') === c.address;
+                db.prepare(`UPDATE customers SET external_id=COALESCE(?, external_id), name=?, phone=COALESCE(?, phone), phone_alt=COALESCE(?, phone_alt), email=COALESCE(?, email),
+                  address=?, colonia=COALESCE(?, colonia), city=COALESCE(?, city), zip=COALESCE(?, zip), reference=COALESCE(?, reference), notes=COALESCE(?, notes),
+                  lat=?, lng=?, geo_quality=? WHERE id=?`).run(
+                  c.external_id, c.name, c.phone, c.phone_alt, c.email, c.address, c.colonia, c.city, c.zip, c.reference, c.notes,
+                  c.lat ?? (sameAddr ? ex.lat : null), c.lng ?? (sameAddr ? ex.lng : null),
+                  c.lat != null ? 'archivo' : sameAddr ? ex.geo_quality : null, cid
+                );
+                out.action = 'actualizado';
+              } else out.action = 'existente';
+            } else {
+              cid = Number(db.prepare(`INSERT INTO customers (external_id, name, phone, phone_alt, email, address, colonia, city, zip, reference, notes, lat, lng, geo_quality)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(c.external_id, c.name, c.phone, c.phone_alt, c.email, c.address, c.colonia, c.city, c.zip, c.reference, c.notes,
+                c.lat, c.lng, c.lat != null ? 'archivo' : null).lastInsertRowid);
+              out.action = 'nuevo';
+            }
+            out.customer_id = cid;
+            if (makeOrders) {
+              const open = db.prepare("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);
+              if (open && skipDupOrders) out.order = `ya tiene ${open.tracking_code}`;
+              else {
+                const code = genTracking();
+                const oid = Number(db.prepare(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
+                  VALUES (?,?,?,?,?,?,?,?)`).run(code, cid, date, 'normal', cleanTxt(o.notes, 300) || null, req.user.id, crypto.randomBytes(12).toString('hex'), stype).lastInsertRowid);
+                if (product) {
+                  db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
+                  moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
+                  stockNeeded += qty;
+                }
+                out.order = code;
+                created.push(oid);
+              }
+            }
+            db.exec('RELEASE cli');
+          } catch (e) {
+            db.exec('ROLLBACK TO cli');
+            db.exec('RELEASE cli');
+            throw e;
+          }
+        } catch (e) {
+          out.action = 'error';
+          out.error = e.message;
+        }
+        results.push(out);
+      });
+      db.exec(dry ? 'ROLLBACK' : 'COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw e;
+    }
+    const n = (a) => results.filter((x) => x.action === a).length;
+    const summary = { total: results.length, nuevos: n('nuevo'), actualizados: n('actualizado'), existentes: n('existente'), errores: n('error'),
+      pedidos: results.filter((x) => x.order && !String(x.order).startsWith('ya tiene')).length,
+      sin_ubicacion: 0, stock_disponible: product ? db.prepare('SELECT stock FROM products WHERE id=?').get(product.id).stock : null, stock_necesario: stockNeeded };
+    if (!dry) {
+      summary.sin_ubicacion = db.prepare('SELECT COUNT(*) n FROM customers WHERE lat IS NULL').get().n;
+      if (notifyNow) for (const id of created) notify.queueEvent('registrado', id);
+      audit(req, 'clientes.importar', `${summary.nuevos} nuevos, ${summary.actualizados} actualizados, ${summary.pedidos} pedidos${notifyNow ? ' (con aviso)' : ' (sin aviso)'}`);
+      setImmediate(geocodePending);
+    }
+    res.json({ dry_run: dry, summary, results });
+  })
+);
+
+// ---------- Geolocalización de domicilios (OpenStreetMap / Nominatim, 1 consulta por segundo) ----------
+const geoCityCache = {};
+const geo = { running: false, done: 0, found: 0, approx: 0, failed: 0, last: null };
+async function nominatim(q, bias) {
+  const p = new URLSearchParams({ format: 'jsonv2', limit: '1', countrycodes: 'mx', q, addressdetails: '0' });
+  if (bias) { p.set('viewbox', bias); p.set('bounded', '1'); }
+  const r = await fetch('https://nominatim.openstreetmap.org/search?' + p, {
+    headers: { 'User-Agent': `SovimeMensajeria/1.0 (${notify.baseUrl(getSettings())})`, 'Accept-Language': 'es' },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (r.status === 429) throw new Error('rate');
+  if (!r.ok) return null;
+  const j = await r.json();
+  return j[0] ? { lat: Number(j[0].lat), lng: Number(j[0].lon) } : null;
+}
+async function geocodePending() {
+  if (geo.running) return;
+  geo.running = true;
+  try {
+    const s = getSettings();
+    const dl = Number(s.depot_lat), dg = Number(s.depot_lng);
+    for (;;) {
+      const c = db.prepare("SELECT * FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='') ORDER BY id LIMIT 1").get();
+      if (!c) break;
+      const city = c.city || 'Tijuana';
+      // Caja de búsqueda alrededor de la ciudad del cliente (o del almacén) para no confundir calles homónimas de otras ciudades
+      let bias = null;
+      try {
+        if (!(city in geoCityCache)) { geoCityCache[city] = await nominatim(`${city}, México`); await new Promise((r) => setTimeout(r, 1100)); }
+        const cc = geoCityCache[city];
+        const ctr = cc || (Number.isFinite(dl) ? { lat: dl, lng: dg } : null);
+        if (ctr) bias = `${ctr.lng - 0.35},${ctr.lat + 0.3},${ctr.lng + 0.35},${ctr.lat - 0.3}`;
+      } catch {}
+      const street = String(c.address || '').split(',')[0];
+      const tries = [
+        [`${street}, ${c.colonia ? c.colonia + ', ' : ''}${city}, México`, 'exacta'],
+        [`${street.replace(/\s+\d+[A-Za-z-]*$/, '')}, ${c.colonia ? c.colonia + ', ' : ''}${city}, México`, 'calle'],
+        ...(c.colonia ? [[`${c.colonia}, ${city}, México`, 'colonia']] : []),
+      ];
+      let hit = null;
+      for (const [q, quality] of tries) {
+        try {
+          const g = await nominatim(q, bias);
+          await new Promise((r) => setTimeout(r, 1100));
+          if (g) { hit = { ...g, quality }; break; }
+        } catch (e) {
+          if (e.message === 'rate') { await new Promise((r) => setTimeout(r, 30000)); }
+        }
+      }
+      if (hit) db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(hit.lat, hit.lng, hit.quality, c.id);
+      else db.prepare("UPDATE customers SET geo_quality='no_encontrada' WHERE id=?").run(c.id);
+      geo.done++;
+      if (hit?.quality === 'exacta') geo.found++; else if (hit) geo.approx++; else geo.failed++;
+      geo.last = new Date().toISOString();
+    }
+  } catch (e) {
+    console.error('geocode', e.message);
+  } finally {
+    geo.running = false;
+  }
+}
+app.get(
+  '/api/customers/geocode',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const st = Object.fromEntries(db.prepare("SELECT COALESCE(geo_quality, CASE WHEN lat IS NULL THEN 'pendiente' ELSE 'manual' END) q, COUNT(*) n FROM customers GROUP BY q").all().map((r) => [r.q, r.n]));
+    res.json({ running: geo.running, stats: st, session: geo });
+  })
+);
+app.post(
+  '/api/customers/geocode',
+  auth(...STAFF),
+  wrap((req, res) => {
+    if (req.body?.retry_failed) db.prepare("UPDATE customers SET geo_quality=NULL WHERE geo_quality='no_encontrada' AND lat IS NULL").run();
+    setImmediate(geocodePending);
+    res.json({ ok: true });
+  })
+);
+
 app.get(
   '/api/customers/:id',
   auth(),
@@ -2121,6 +2338,7 @@ if (require.main === module) {
     process.exit(1);
   }
   notify.start();
+  setTimeout(geocodePending, 5000);
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }

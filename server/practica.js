@@ -13,4 +13,5 @@ for (const [k, v] of [['practice_mode', '1'], ['sheets_enabled', '0'], ['sheets_
 
 const app = require('./index');
 require('./notify').start();
+// la geolocalización arranca sola con el servidor de producción; en práctica se llama al importar
 app.listen(Number(process.env.PORT), () => console.log(`COPIA DE PRÁCTICA en http://localhost:${process.env.PORT} (datos en data/practica)`));

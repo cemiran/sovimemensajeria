@@ -998,20 +998,29 @@ function customerForm(c, done) {
 async function viewCustomers(v) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
   const r = await GET('/api/customers?limit=300&q=' + encodeURIComponent(q));
-  v.innerHTML = topbar('Clientes', `<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
+  const staffC = store.user.role !== 'repartidor';
+  const geoSt = staffC ? await GET('/api/customers/geocode').catch(() => null) : null;
+  const pend = geoSt ? (geoSt.stats.pendiente || 0) : 0;
+  const notFound = geoSt ? (geoSt.stats.no_encontrada || 0) : 0;
+  v.innerHTML = topbar('Clientes', `${staffC ? `<button class="btn" id="impC">${icon('upload')} Importar Excel</button>` : ''}<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
+  ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
+  ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Teléfono</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}"><td><b>${esc(c.name)}</b>${c.lat == null ? ' <span class="badge b-fallido">sin GPS</span>' : ''}</td><td>${esc(c.phone || '')}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}</td></tr>`).join('')}
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}"><td><b>${esc(c.name)}</b>${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${esc(c.phone || '')}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
   $('#cq').onsubmit = (e) => { e.preventDefault(); location.hash = '#/customers?q=' + encodeURIComponent(e.target.q.value); };
   $('#newC').onclick = () => customerForm(null, () => render());
+  $('#impC')?.addEventListener('click', importCustomers);
+  $('#geoRetry')?.addEventListener('click', async () => { await POST('/api/customers/geocode', { retry_failed: true }); toast('Reintentando…', 'ok'); setTimeout(render, 1500); });
+  if (pend) setTimeout(() => { if (location.hash.startsWith('#/customers')) render(); }, 15000);
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.id), () => render())));
   const map = makeMap($('#cmapall'));
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
-  const pts = r.rows.filter((c) => c.lat != null).map((c) => { L.circleMarker([c.lat, c.lng], { radius: 6, color: '#0f6b5c', fillOpacity: 0.6 }).addTo(map).bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address)}`); return [c.lat, c.lng]; });
+  const pts = r.rows.filter((c) => c.lat != null).map((c) => { L.circleMarker([c.lat, c.lng], { radius: 6, color: ['calle', 'colonia'].includes(c.geo_quality) ? '#e5612a' : '#1d5a96', fillOpacity: 0.6 }).addTo(map).bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address)}`); return [c.lat, c.lng]; });
   if (pts.length) map.fitBounds(pts, { padding: [20, 20] });
 }
 
@@ -1595,6 +1604,141 @@ async function viewSerials(v) {
   $('#snFind').onclick = () => openScanner({ title: 'Buscar número de serie', onCode: async (c) => { await serialDetail(c); } });
   if (snState.q) { const i = f.q; i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
 }
+
+// ================= Importación de clientes (Excel / CSV / Sheets) =================
+const CUST_FIELDS = [
+  ['name', 'Nombre', ['nombre completo', 'nombre', 'cliente', 'razon social', 'titular linea', 'titular']],
+  ['phone', 'Celular (WhatsApp/SMS)', ['contacto sugerido', 'celular', 'cel registro', 'movil', 'whatsapp', 'telefono celular']],
+  ['phone2', 'Celular 2 (si falta el 1)', ['cel registro', 'cel ivr', 'cel queja']],
+  ['phone_line', 'Teléfono fijo / línea', ['telefono', 'tel registro', 'linea', 'telefono fijo']],
+  ['phone_alt', 'Teléfono alterno', ['contacto alterno', 'telefono alterno']],
+  ['email', 'Correo', ['correo sugerido', 'correo', 'email', 'e mail']],
+  ['street', 'Calle', ['calle']],
+  ['number', 'Número', ['numero', 'num', 'no exterior', 'numero exterior']],
+  ['colonia', 'Colonia', ['colonia', 'colonia bdci', 'colonia p c']],
+  ['address', 'Domicilio completo (si viene en una sola columna)', ['domicilio', 'direccion', 'address']],
+  ['city', 'Ciudad', ['ciudad nombre', 'ciudad', 'municipio']],
+  ['zip', 'C.P.', ['cp', 'codigo postal', 'c p']],
+  ['reference', 'Referencias', ['referencia', 'referencias', 'entre calles']],
+  ['external_id', 'Identificador único (evita duplicados)', ['telefono', 'linea', 'cuenta', 'id cliente', 'folio']],
+  ['lat', 'Latitud', ['latitud', 'lat']],
+  ['lng', 'Longitud', ['longitud', 'lng', 'lon']],
+];
+const NOTE_HINTS = ['modem serie', 'modem modelo', 'paquete', 'ont inc', 'telefono', 'wifi apagado', 'modelo actual', 'quejas'];
+function guessCustMap(headers) {
+  const n = headers.map(normH);
+  const map = {};
+  const used = new Set();
+  for (const pass of ['exact', 'partial']) for (const [k, , syn] of CUST_FIELDS) {
+    if (map[k] != null) continue;
+    const i = n.findIndex((h, idx) => (!used.has(idx) || k === 'external_id' || k === 'phone_line') && h && syn.some((sy) => (pass === 'exact' ? h === sy : h.startsWith(sy) && sy.length > 3)));
+    if (i >= 0) { map[k] = i; if (!['external_id', 'phone_line'].includes(k)) used.add(i); }
+  }
+  return map;
+}
+
+function importCustomers() {
+  let table = null;
+  let sourceName = '';
+  const m = modal('Importar clientes', '<div class="stack" id="ciBody"></div>', { wide: true });
+  const body = $('#ciBody', m.el);
+  const filled = (r) => r && r.some((x) => String(x ?? '').trim() !== '');
+  const step1 = () => {
+    body.innerHTML = `<label class="drop" id="ciDrop">${icon('upload')}<b>Arrastra aquí el Excel de clientes o toca para elegirlo</b><small class="muted">Excel (.xlsx, .xls), CSV o la base que te envían · hasta 3,000 clientes</small>
+      <input type="file" id="ciFile" accept=".xlsx,.xls,.xlsm,.ods,.csv,.txt" hidden /></label><div id="ciSheet"></div>
+      <small class="muted">Los clientes se identifican por la columna que elijas como identificador (p. ej. el teléfono de la línea) para no duplicarlos si vuelves a cargar la base.</small>`;
+    const drop = $('#ciDrop', body);
+    drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) read(e.dataTransfer.files[0]); };
+    $('#ciFile', body).onchange = (e) => e.target.files[0] && read(e.target.files[0]);
+  };
+  async function read(file) {
+    sourceName = file.name;
+    try {
+      if (/\.(csv|txt)$/i.test(file.name)) { table = parseCSVFull(await file.text()); return step2(); }
+      const X = await loadXLSX();
+      const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      const pick = (nm) => { table = X.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: true, defval: '', blankrows: true }).map((r) => r.map(cellStr)); sourceName = `${file.name} · ${nm}`; step2(); };
+      if (wb.SheetNames.length === 1) return pick(wb.SheetNames[0]);
+      $('#ciSheet', body).innerHTML = `<label class="f">¿Qué hoja tiene los clientes?<select id="ciSel">${wb.SheetNames.map((s) => `<option>${esc(s)}</option>`).join('')}</select></label><div><button class="btn primary" id="ciGo">Continuar</button></div>`;
+      $('#ciGo', body).onclick = () => pick($('#ciSel', body).value);
+    } catch (e) { toast(e.message || 'No se pudo leer el archivo', 'bad'); }
+  }
+  const step2 = async () => {
+    if (!table || table.filter(filled).length < 2) return toast('No se encontraron datos', 'bad');
+    let hr = table.findIndex(filled);
+    for (let i = 0; i < Math.min(12, table.length); i++) if (filled(table[i]) && Object.keys(guessCustMap(table[i])).length >= 3) { hr = i; break; }
+    const headers = table[hr];
+    const map = guessCustMap(headers);
+    const data = table.slice(hr + 1);
+    const nh = headers.map(normH);
+    const noteCols = nh.map((h, i) => (NOTE_HINTS.includes(h) ? i : -1)).filter((i) => i >= 0);
+    const products = (await GET('/api/products?limit=500')).rows;
+    const tomorrow = new Date(Date.now() + 864e5).toLocaleDateString('en-CA');
+    const opt = (k) => `<option value="">— No usar —</option>${headers.map((h, i) => `<option value="${i}" ${map[k] === i ? 'selected' : ''}>${esc(h || 'Columna ' + (i + 1))}</option>`).join('')}`;
+    body.innerHTML = `<div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} clientes · encabezados en la fila ${hr + 1}</small></div><button class="btn sm" id="ciBack">Cambiar archivo</button></div>
+      <h3 style="margin:4px 0 0">¿Qué columna corresponde a cada dato?</h3>
+      <div class="map-grid">${CUST_FIELDS.map(([k, l]) => `<label class="f">${l}<select data-cm="${k}">${opt(k)}</select></label>`).join('')}</div>
+      <details class="card" style="padding:10px 12px"><summary><b>Columnas que se guardan en notas del cliente</b> <small class="muted">(${noteCols.length} elegidas)</small></summary>
+        <div class="note-cols">${headers.map((h, i) => (h ? `<label class="check-pill"><input type="checkbox" data-note="${i}" ${noteCols.includes(i) ? 'checked' : ''} /> ${esc(h)}</label>` : '')).join('')}</div></details>
+      <fieldset><legend>${icon('box')} Pedido de entrega para cada cliente</legend>
+        <label class="row"><input type="checkbox" id="ciOrd" checked /> Crear un pedido por cliente</label>
+        <div class="grid g3" id="ciOrdBox">
+          <label class="f">Producto a entregar<select id="ciProd"><option value="">— Sin producto —</option>${products.map((p) => `<option value="${p.id}">${esc(p.name)}${p.serialized ? ' (con S/N)' : ''} · existencia ${p.stock}</option>`).join('')}</select></label>
+          <label class="f">Cantidad por cliente<input id="ciQty" type="number" min="1" value="1" /></label>
+          <label class="f">Fecha de entrega<input id="ciDate" type="date" value="${tomorrow}" /></label></div>
+        <label class="f">Nota para el repartidor<input id="ciNote" placeholder="Ej. Cambio de módem: recoger el equipo anterior" /></label>
+        <label class="switch"><input type="checkbox" id="ciNotify" /><span></span><div><b>Avisar a los clientes ahora</b><br><small class="muted">Apagado: no se envía nada al crear; reciben sus avisos cuando el repartidor cargue y salga a entregar. Recomendado para cargas grandes o fuera de horario.</small></div></label></fieldset>
+      <div class="row" style="justify-content:flex-end"><button class="btn primary" id="ciPrev">${icon('search')} Revisar antes de importar</button></div>`;
+    $('#ciBack', body).onclick = step1;
+    $('#ciOrd', body).onchange = (e) => ($('#ciOrdBox', body).hidden = !e.target.checked);
+    $('#ciPrev', body).onclick = async (e) => {
+      const mp = Object.fromEntries($$('[data-cm]', body).filter((s) => s.value !== '').map((s) => [s.dataset.cm, Number(s.value)]));
+      if (mp.name == null) return toast('Elige la columna del nombre', 'bad');
+      if (mp.street == null && mp.address == null) return toast('Elige la columna de calle o de domicilio', 'bad');
+      const notesIdx = $$('[data-note]:checked', body).map((x) => Number(x.dataset.note));
+      const rows = data.map((r, i) => {
+        if (!filled(r)) return null;
+        const o = { __line: hr + i + 2 };
+        for (const [k, idx] of Object.entries(mp)) o[k] = r[idx] ?? '';
+        const extra = notesIdx.map((idx) => (String(r[idx] ?? '').trim() ? `${headers[idx]}: ${String(r[idx]).trim()}` : '')).filter(Boolean);
+        if (extra.length) o.notes = extra.join(' · ');
+        return o;
+      }).filter(Boolean);
+      const orders = $('#ciOrd', body).checked ? { create: true, product_id: $('#ciProd', body).value || null, qty: $('#ciQty', body).value, scheduled_date: $('#ciDate', body).value, notes: $('#ciNote', body).value, notify: $('#ciNotify', body).checked } : { create: false };
+      e.currentTarget.disabled = true;
+      try { step3(rows, orders, await POST('/api/customers/import', { rows, orders, dry_run: true })); }
+      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+    };
+  };
+  const ACT = { nuevo: ['Nuevo', 'ok'], actualizado: ['Actualizar', 'warn'], existente: ['Ya existe', ''], error: ['Error', 'off'] };
+  const step3 = (rows, orders, r, done = false) => {
+    const s = r.summary;
+    const shortStock = orders.product_id && s.stock_disponible != null && done === false && s.stock_disponible < 0;
+    body.innerHTML = `${done ? `<div class="info-bar" style="background:var(--ok-soft);color:var(--ok)">${icon('check')} <b>Importación terminada.</b> ${s.sin_ubicacion ? `Se están ubicando en el mapa ${s.sin_ubicacion} domicilio(s) en segundo plano (≈1 por segundo).` : ''}</div>` : `<div class="info-bar">${icon('info')} Vista previa: todavía no se ha guardado nada.</div>`}
+      <div class="imp-sum"><div class="kpi card"><div class="label">Filas</div><div class="value">${s.total}</div></div><div class="kpi card"><div class="label">Nuevos</div><div class="value" style="color:var(--ok)">${s.nuevos}</div></div>
+        <div class="kpi card"><div class="label">Actualizar</div><div class="value" style="color:var(--warn)">${s.actualizados}</div></div><div class="kpi card"><div class="label">Pedidos</div><div class="value">${s.pedidos}</div></div>
+        <div class="kpi card"><div class="label">Errores</div><div class="value" style="color:${s.errores ? 'var(--bad)' : 'inherit'}">${s.errores}</div></div></div>
+      ${orders.create && orders.product_id ? `<small class="muted">Existencia del producto después de importar: <b>${s.stock_disponible}</b> (se usan ${s.stock_necesario}).</small>` : ''}
+      ${orders.create && !orders.notify ? '<small class="muted">🔕 No se avisará a los clientes al crear los pedidos.</small>' : ''}
+      <div class="table-wrap" style="max-height:320px"><table><thead><tr><th>Fila</th><th>Cliente</th><th>Domicilio</th><th>Resultado</th><th>Pedido</th></tr></thead><tbody>
+        ${r.results.slice(0, 300).map((x) => `<tr><td class="num">${x.line}</td><td><b>${esc(x.name || '')}</b><br><small class="muted">${esc(x.phone || '')}</small></td><td><small>${esc(x.address || '')}</small></td>
+          <td><span class="chip ${ACT[x.action][1]}">${ACT[x.action][0]}</span>${x.error ? `<br><small style="color:var(--bad)">${esc(x.error)}</small>` : ''}</td><td><small class="mono">${esc(x.order || '')}</small></td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="row" style="justify-content:flex-end">${done ? '<button class="btn primary" data-close>Listo</button>' : `<button class="btn" id="ciBack2">Volver</button><button class="btn primary" id="ciDo" ${s.nuevos + s.actualizados + s.pedidos ? '' : 'disabled'}>${icon('upload')} Importar</button>`}</div>`;
+    $('#ciBack2', body)?.addEventListener('click', step2);
+    $('#ciDo', body)?.addEventListener('click', async (e) => {
+      e.currentTarget.disabled = true; e.currentTarget.textContent = 'Importando…';
+      try { const res = await POST('/api/customers/import', { rows, orders, dry_run: false }); toast(`${res.summary.nuevos} clientes nuevos, ${res.summary.pedidos} pedidos`, 'ok'); step3(rows, orders, res, true); m.el.dataset.done = '1'; }
+      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; e.currentTarget.textContent = 'Importar'; }
+    });
+    if (shortStock) toast('La existencia del producto no alcanza', 'bad');
+  };
+  m.el.addEventListener('click', (e) => { if (m.el.dataset.done && (e.target === m.el || e.target.closest('[data-close]'))) setTimeout(render, 50); });
+  step1();
+}
+const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle', 'warn'], colonia: ['Aprox. por colonia', 'warn'], no_encontrada: ['No encontrada', 'off'], archivo: ['Del archivo', 'ok'], manual: ['Manual', 'ok'], pendiente: ['Buscando…', ''] };
 
 // ================= Importación masiva de inventario =================
 const IMP_FIELDS = [
@@ -2184,7 +2328,7 @@ function importUsers() {
 const ACTION = {
   login: 'Inició sesión', perfil: 'Actualizó su perfil', password: 'Cambió su contraseña', 'usuario.alta': 'Creó usuario', 'usuario.importar': 'Importó usuarios',
   'usuario.edicion': 'Editó usuario', 'usuario.reset': 'Restableció contraseña', 'usuario.cerrar_sesion': 'Cerró sesiones de', 'usuario.baja': 'Eliminó usuario',
-  'pedido.cancelar': 'Canceló pedido', 'unidad.alta': 'Registró unidad', 'unidad.edicion': 'Editó unidad', 'personal.confiable': 'Actualizó recurso confiable', 'checklist.unidad': 'Llenó checklist de unidad', 'certificado.emitir': 'Emitió certificado', 'certificado.revocar': 'Revocó certificado', 'series.recibir': 'Recibió equipos por S/N', 'series.baja': 'Dio de baja un S/N', 'series.reingreso': 'Reingresó un S/N', 'series.devolucion': 'Registró devolución de S/N', 'inventario.importar': 'Importó inventario', configuracion: 'Cambió configuración', 'recepcion.mostrador': 'Entregó en mostrador',
+  'pedido.cancelar': 'Canceló pedido', 'clientes.importar': 'Importó clientes', 'unidad.alta': 'Registró unidad', 'unidad.edicion': 'Editó unidad', 'personal.confiable': 'Actualizó recurso confiable', 'checklist.unidad': 'Llenó checklist de unidad', 'certificado.emitir': 'Emitió certificado', 'certificado.revocar': 'Revocó certificado', 'series.recibir': 'Recibió equipos por S/N', 'series.baja': 'Dio de baja un S/N', 'series.reingreso': 'Reingresó un S/N', 'series.devolucion': 'Registró devolución de S/N', 'inventario.importar': 'Importó inventario', configuracion: 'Cambió configuración', 'recepcion.mostrador': 'Entregó en mostrador',
   'notificacion.manual': 'Envió aviso al cliente', 'whatsapp.vincular': 'Vinculó WhatsApp por QR', 'whatsapp.desvincular': 'Desvinculó WhatsApp', integraciones: 'Cambió notificaciones / Sheets', 'sheets.reenviar': 'Reenvió filas a Google Sheets',
 };
 async function viewActivity(v) {
