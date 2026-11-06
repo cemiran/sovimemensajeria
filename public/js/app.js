@@ -1767,7 +1767,9 @@ const IMP_FIELDS = [
   ['location', 'Ubicación', ['ubicacion', 'almacen', 'rack', 'pasillo', 'location', 'anaquel']],
   ['weight_kg', 'Peso (kg)', ['peso', 'peso kg', 'kg', 'weight', 'peso unitario']],
 ];
-const SN_LIKE = /^(S\/?N[:\s]*)?[A-Z0-9]{2,}[A-Z0-9._/-]{4,62}$/i;
+// prefijos de fabricante de ONT/módems (Huawei, ZTE, Nokia/Alcatel, FiberHome, TP-Link, Sercomm…)
+const ONT_SN = /^(S\/?N[:\s]*)?(HWTC|ZTEG|ZTE|ALCL|NOKG|FHTT|TPLG|SCOM|GPON|ZNTS|MSTC|CIOT|DSNW|ITBS|UBNT|VSOL|HALN)[A-Z0-9-]{4,}$/i;
+const SN_LIKE =/^(S\/?N[:\s]*)?[A-Z0-9]{2,}[A-Z0-9._/-]{4,62}$/i;
 const normH = (h) => String(h ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 function guessMap(headers) {
   const n = headers.map(normH);
@@ -1921,6 +1923,24 @@ function importInventory() {
       headers = headers.map((_, i) => 'Columna ' + (i + 1));
       hr = -1;
     }
+    // columna de S/N reconocida por su contenido (HWTC…, ZTEG…): valores únicos con prefijo de fabricante de ONT
+    if (map.serial == null) {
+      const rowsF = data.filter(filled);
+      for (let i = 0; i < headers.length && rowsF.length >= 2; i++) {
+        const vals = rowsF.map((r) => String(r[i] ?? '').trim()).filter(Boolean);
+        if (vals.length < Math.max(2, rowsF.length * 0.8)) continue;
+        const sn = vals.filter((x) => ONT_SN.test(x)).length;
+        if (sn >= vals.length * 0.8 && new Set(vals).size >= vals.length * 0.9) {
+          map.serial = i;
+          for (const k of Object.keys(map)) if (k !== 'serial' && map[k] === i) delete map[k];
+          break;
+        }
+      }
+    }
+    // producto al que pertenecen las series: el valor más común de "Categoría" / "Producto" / nombre
+    const catIdx = headers.findIndex((h) => /\b(categoria|producto|tipo de equipo)\b/.test(normH(h)));
+    const catCol = catIdx >= 0 ? catIdx : map.name;
+    const catGuess = catCol == null ? '' : Object.entries(data.filter(filled).reduce((a, r) => { const v = normH(r[catCol]); if (v) a[v] = (a[v] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
     const colOpts = (k) => `<option value="">— No importar —</option>${headers.map((h, i) => `<option value="${i}" ${map[k] === i ? 'selected' : ''}>${esc(h || 'Columna ' + (i + 1))}</option>`).join('')}`;
     body.innerHTML = `
       <div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} filas de datos · ${hr < 0 ? 'lista sin encabezados' : `encabezados en la fila ${hr + 1}`}</small></div><button class="btn sm" id="back">Cambiar archivo</button></div>
@@ -1946,8 +1966,10 @@ function importInventory() {
       $('#prev', body).innerHTML = on ? `${icon('search')} Revisar series` : `${icon('search')} Revisar antes de importar`;
       if (on && !$('#snProd', body).options.length) {
         const ps = (await GET('/api/products?limit=500')).rows;
-        const ser = ps.filter((p) => p.serialized);
-        $('#snProd', body).innerHTML = (ser.length ? ser : ps).map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})${p.serialized ? '' : ' · se activará el control por S/N'}</option>`).join('');
+        const list = [...ps.filter((p) => p.serialized), ...ps.filter((p) => !p.serialized && !p.stock)];
+        $('#snProd', body).innerHTML = list.map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})${p.serialized ? '' : ' · se activará el control por S/N'}</option>`).join('');
+        const hit = catGuess && list.find((p) => normH(p.name) === catGuess || normH(p.sku) === catGuess);
+        if (hit) $('#snProd', body).value = hit.id;
       }
     };
     snSel.onchange = syncMode;
