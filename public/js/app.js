@@ -2134,8 +2134,13 @@ function productForm(p) {
       <label class="switch"><input type="checkbox" name="serialized" ${p.serialized ? 'checked' : ''} /><span></span><div><b>Controlar por número de serie</b><br><small class="muted">Para equipos como módems: cada unidad se registra por su S/N al recibirla y se liga al pedido y al cliente que la recibe.</small></div></label>
       ${p.id ? `<p class="muted">Stock actual: <b>${p.stock}</b>${p.serialized ? ` · con S/N en almacén: <b>${p.serials_available ?? 0}</b>` : ''}. Para cambiarlo usa entradas/salidas (queda registro).</p>` : ''}
       ${p.barcode ? '<div class="label-print"><svg id="pbc"></svg></div>' : ''}
-    </form>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="saveP">Guardar</button>' });
+    </form>`, { footer: `${p.id ? `<button class="btn bad" id="delP" style="margin-right:auto">${icon('trash')} Eliminar</button>` : ''}<button class="btn" data-close>Cancelar</button><button class="btn primary" id="saveP">Guardar</button>` });
   const f = $('#pf', m.el);
+  $('#delP', m.el)?.addEventListener('click', async () => {
+    if (!(await confirmDlg(`¿Eliminar el producto "${p.name}" (${p.sku})? Esta acción no se puede deshacer.`))) return;
+    try { await api('DELETE', '/api/products/' + p.id); toast('Producto eliminado', 'ok'); m.close(); render(); }
+    catch (e) { toast(e.message, 'bad'); }
+  });
   if (p.barcode) try { JsBarcode($('#pbc', m.el), p.barcode, { format: /^\d{13}$/.test(p.barcode) ? 'EAN13' : 'CODE128', height: 50 }); } catch {}
   $('#pscan', m.el).onclick = () => openScanner({ title: 'Leer código del producto', onCode: async (c) => { f.barcode.value = c; } });
   $('#saveP', m.el).onclick = async () => {

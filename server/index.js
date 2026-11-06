@@ -465,6 +465,26 @@ app.put(
     res.json({ ok: true });
   })
 );
+// Eliminar producto: solo si nunca se usó en pedidos ni tiene números de serie y su existencia es 0 (p. ej. creado por error)
+app.delete(
+  '/api/products/:id',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+    if (!p) throw new HttpError(404, 'No encontrado');
+    const used = db.prepare('SELECT COUNT(*) n FROM order_items WHERE product_id=?').get(p.id).n;
+    if (used) throw new HttpError(409, `No se puede eliminar: ${p.name} está en ${used} pedido(s).`);
+    const sn = db.prepare('SELECT COUNT(*) n FROM serials WHERE product_id=?').get(p.id).n;
+    if (sn) throw new HttpError(409, `No se puede eliminar: ${p.name} tiene ${sn} número(s) de serie registrados.`);
+    if (p.stock) throw new HttpError(409, `Primero deja la existencia en 0 (tiene ${p.stock}).`);
+    tx(() => {
+      db.prepare('DELETE FROM inventory_movements WHERE product_id=?').run(p.id);
+      db.prepare('DELETE FROM products WHERE id=?').run(p.id);
+    });
+    audit(req, 'producto.eliminar', `${p.sku} · ${p.name}`);
+    res.json({ ok: true });
+  })
+);
 
 function moveStock(productId, type, qty, reference, userId) {
   const p = db.prepare('SELECT id, stock, name FROM products WHERE id = ?').get(productId);
