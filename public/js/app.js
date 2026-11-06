@@ -2191,7 +2191,8 @@ function userFields(u) {
     <label class="f">Notas internas<textarea name="notes" placeholder="Turno, zona, contacto de emergencia…">${esc(u.notes)}</textarea></label>`;
 }
 function wireRole(f) {
-  const upd = () => f.classList.toggle('is-driver', f.role.value === 'repartidor');
+  // los datos del vehículo solo aplican a repartidores: ocultos se desactivan para que no bloqueen el "Guardar"
+  const upd = () => { const d = f.role.value === 'repartidor'; f.classList.toggle('is-driver', d); $$('.driver-only', f).forEach((x) => (x.disabled = !d)); };
   $$('input[name=role]', f).forEach((r) => (r.onchange = upd));
   upd();
 }
