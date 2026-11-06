@@ -980,8 +980,9 @@ app.post(
           seen.set(key, line);
           db.exec('SAVEPOINT cli');
           try {
+            // Con identificador (p. ej. la línea telefónica) cada identificador es un cliente distinto, aunque compartan nombre y celular
             let ex = c.external_id ? db.prepare('SELECT * FROM customers WHERE external_id=?').get(c.external_id) : null;
-            if (!ex && c.phone) ex = db.prepare('SELECT * FROM customers WHERE phone=? AND lower(name)=lower(?)').get(c.phone, c.name);
+            if (!ex && !c.external_id && c.phone) ex = db.prepare('SELECT * FROM customers WHERE phone=? AND lower(name)=lower(?) AND address=?').get(c.phone, c.name, c.address);
             let cid;
             if (ex) {
               cid = ex.id;
