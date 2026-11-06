@@ -1756,9 +1756,10 @@ const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle',
 
 // ================= Importación masiva de inventario =================
 const IMP_FIELDS = [
-  ['sku', 'SKU / clave', ['sku', 'clave', 'codigo interno', 'cve', 'clave producto', 'id producto', 'codigo producto', 'numero de parte', 'no parte', 'codigo']],
+  ['serial', 'Número de serie (S/N)', ['numero de serie', 'num serie', 'no serie', 'no de serie', 'n serie', 'serie', 's n', 'sn', 'serial', 'serial number', 'serie equipo', 'ns']],
+  ['sku', 'SKU / clave', ['sku', 'clave', 'codigo interno', 'cve', 'clave producto', 'id producto', 'codigo producto', 'numero de parte', 'no parte', 'codigo', 'material']],
   ['barcode', 'Código de barras', ['codigo de barras', 'cod barras', 'codigobarras', 'barcode', 'ean', 'upc', 'ean13', 'gtin']],
-  ['name', 'Nombre', ['nombre', 'producto', 'nombre producto', 'articulo', 'name', 'descripcion corta']],
+  ['name', 'Nombre', ['nombre', 'producto', 'nombre producto', 'articulo', 'name', 'descripcion corta', 'modelo', 'texto breve', 'equipo']],
   ['description', 'Descripción', ['descripcion', 'detalle', 'description', 'descripcion larga']],
   ['unit', 'Unidad', ['unidad', 'um', 'u m', 'unidad de medida', 'unit']],
   ['stock', 'Existencia', ['existencia', 'existencias', 'stock', 'cantidad', 'inventario', 'qty', 'piezas', 'disponible', 'stock actual']],
@@ -1766,6 +1767,7 @@ const IMP_FIELDS = [
   ['location', 'Ubicación', ['ubicacion', 'almacen', 'rack', 'pasillo', 'location', 'anaquel']],
   ['weight_kg', 'Peso (kg)', ['peso', 'peso kg', 'kg', 'weight', 'peso unitario']],
 ];
+const SN_LIKE = /^(S\/?N[:\s]*)?[A-Z0-9]{2,}[A-Z0-9._/-]{4,62}$/i;
 const normH = (h) => String(h ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 function guessMap(headers) {
   const n = headers.map(normH);
@@ -1773,9 +1775,9 @@ function guessMap(headers) {
   const used = new Set();
   // primero coincidencias exactas, luego parciales (y "código de barras" antes que "código")
   for (const pass of ['exact', 'partial']) {
-    for (const [k, , syn] of [...IMP_FIELDS].sort((a, b) => (a[0] === 'barcode' ? -1 : b[0] === 'barcode' ? 1 : 0))) {
+    for (const [k, , syn] of [...IMP_FIELDS].sort((a, b) => ({ serial: 0, barcode: 1 }[a[0]] ?? 2) - ({ serial: 0, barcode: 1 }[b[0]] ?? 2))) {
       if (map[k] != null) continue;
-      const i = n.findIndex((h, idx) => !used.has(idx) && h && syn.some((sy) => (pass === 'exact' ? h === sy : h.includes(sy) && sy.length > 2)));
+      const i = n.findIndex((h, idx) => !used.has(idx) && h && syn.some((sy) => (pass === 'exact' ? h === sy : sy.length > 2 && (' ' + h + ' ').includes(' ' + sy + ' '))));
       if (i >= 0) { map[k] = i; used.add(i); }
     }
   }
@@ -1908,15 +1910,27 @@ function importInventory() {
     let hr = 0;
     hr = table.findIndex(filled);
     for (let i = 0; i < Math.min(12, table.length); i++) if (filled(table[i]) && Object.keys(guessMap(table[i])).length >= 2) { hr = i; break; }
-    const headers = table[hr];
+    let headers = table[hr];
     const map = guessMap(headers);
-    const data = table.slice(hr + 1);
+    let data = table.slice(hr + 1);
+    // lista de S/N sin encabezado (p. ej. HWTCDE411BBA en la primera fila): todo son datos
+    const only = headers.filter((x) => String(x).trim());
+    if (!Object.keys(map).length && only.length === 1 && SN_LIKE.test(String(only[0]).trim())) {
+      map.serial = headers.findIndex((x) => String(x).trim());
+      data = table.slice(hr);
+      headers = headers.map((_, i) => 'Columna ' + (i + 1));
+      hr = -1;
+    }
     const colOpts = (k) => `<option value="">— No importar —</option>${headers.map((h, i) => `<option value="${i}" ${map[k] === i ? 'selected' : ''}>${esc(h || 'Columna ' + (i + 1))}</option>`).join('')}`;
     body.innerHTML = `
-      <div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} filas de datos · encabezados en la fila ${hr + 1}</small></div><button class="btn sm" id="back">Cambiar archivo</button></div>
+      <div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} filas de datos · ${hr < 0 ? 'lista sin encabezados' : `encabezados en la fila ${hr + 1}`}</small></div><button class="btn sm" id="back">Cambiar archivo</button></div>
       <h3 style="margin:4px 0 0">¿Qué columna corresponde a cada dato?</h3>
       <div class="map-grid">${IMP_FIELDS.map(([k, l]) => `<label class="f">${l}${k === 'name' ? ' <small class="muted">(obligatorio en nuevos)</small>' : k === 'sku' ? ' <small class="muted">(o código de barras)</small>' : ''}<select data-map="${k}">${colOpts(k)}</select></label>`).join('')}</div>
-      <fieldset><legend>${icon('inv')} Existencias</legend>
+      <fieldset id="snBox" hidden><legend>${icon('tag')} Números de serie</legend>
+        <p class="muted" style="margin:0">Cada S/N se registra como un equipo en el almacén y suma 1 a la existencia del producto.</p>
+        <label class="f">¿A qué producto pertenecen estas series?<select id="snProd"></select></label>
+        <label class="f">Referencia<input id="snRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label></fieldset>
+      <fieldset id="stBox"><legend>${icon('inv')} Existencias</legend>
         <label class="radio"><input type="radio" name="sm" value="reemplazar" checked /> <span><b>Reemplazar</b> por la cantidad del archivo <small class="muted">(conteo físico; se registra un ajuste por la diferencia)</small></span></label>
         <label class="radio"><input type="radio" name="sm" value="sumar" /> <span><b>Sumar</b> la cantidad del archivo <small class="muted">(llegada de mercancía; se registra una entrada)</small></span></label>
         <label class="radio"><input type="radio" name="sm" value="ignorar" /> <span><b>No tocar</b> existencias <small class="muted">(solo catálogo: nombres, ubicaciones, mínimos…)</small></span></label>
@@ -1924,9 +1938,33 @@ function importInventory() {
         <label class="f">Referencia del movimiento<input id="impRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label></fieldset>
       <div class="row" style="justify-content:flex-end"><button class="btn primary" id="prev">${icon('search')} Revisar antes de importar</button></div>`;
     $('#back', body).onclick = step1;
+    // modo series: si hay columna de S/N, se reciben equipos en vez de crear productos
+    const snSel = $('[data-map=serial]', body);
+    const syncMode = async () => {
+      const on = snSel.value !== '';
+      $('#snBox', body).hidden = !on; $('#stBox', body).hidden = on;
+      $('#prev', body).innerHTML = on ? `${icon('search')} Revisar series` : `${icon('search')} Revisar antes de importar`;
+      if (on && !$('#snProd', body).options.length) {
+        const ps = (await GET('/api/products?limit=500')).rows;
+        const ser = ps.filter((p) => p.serialized);
+        $('#snProd', body).innerHTML = (ser.length ? ser : ps).map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})${p.serialized ? '' : ' · se activará el control por S/N'}</option>`).join('');
+      }
+    };
+    snSel.onchange = syncMode;
+    syncMode();
     $('#prev', body).onclick = async (e) => {
       const mp = Object.fromEntries($$('[data-map]', body).filter((s) => s.value !== '').map((s) => [s.dataset.map, Number(s.value)]));
-      if (mp.sku == null && mp.barcode == null) return toast('Elige la columna de SKU o la de código de barras', 'bad');
+      if (mp.serial != null) {
+        const serials = data.map((r) => String(r[mp.serial] ?? '').trim()).filter(Boolean);
+        if (!serials.length) return toast('La columna de S/N está vacía', 'bad');
+        const opts = { product_id: $('#snProd', body).value, reference: $('#snRef', body).value, enable_serial: true };
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try { stepSerials(serials, opts, await POST('/api/serials/receive', { serials, ...opts, dry_run: true })); }
+        catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+        return;
+      }
+      if (mp.sku == null && mp.barcode == null) return toast('Elige la columna de SKU o la de código de barras (o la de número de serie si es una lista de equipos)', 'bad');
       const rows = data.map((r, i) => {
         const o = { __line: hr + i + 2 };
         for (const [k, idx] of Object.entries(mp)) o[k] = r[idx] ?? '';
@@ -1937,6 +1975,31 @@ function importInventory() {
       try { step3(rows, opts, await POST('/api/products/import', { rows, ...opts, dry_run: true })); }
       catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
     };
+  };
+
+  // Paso 3 (series): vista previa y recepción de equipos
+  const stepSerials = (serials, opts, r, done = false) => {
+    const bad = r.results.filter((x) => !x.ok);
+    const okN = r.results.length - bad.length;
+    body.innerHTML = `
+      ${done ? `<div class="info-bar" style="background:var(--ok-soft);color:var(--ok)">${icon('check')} <b>Listo: ${r.received} equipos recibidos.</b> Existencia actual de ${esc(r.product)}: <b>${r.stock}</b>.</div>` : `<div class="info-bar">${icon('info')} Vista previa: todavía no se ha guardado nada.</div>`}
+      <div class="imp-sum"><div class="kpi card"><div class="label">Series en el archivo</div><div class="value">${r.results.length}</div></div>
+        <div class="kpi card"><div class="label">${done ? 'Recibidas' : 'Se recibirán'}</div><div class="value" style="color:var(--ok)">${done ? r.received : okN}</div></div>
+        <div class="kpi card"><div class="label">Con error</div><div class="value" style="color:${bad.length ? 'var(--bad)' : 'inherit'}">${bad.length}</div></div></div>
+      <p class="muted" style="margin:0">Producto: <b>${esc(r.product)}</b>${r.will_enable ? ' · se activará el control por número de serie' : ''}</p>
+      ${bad.length ? `<div class="table-wrap" style="max-height:260px"><table><thead><tr><th>S/N</th><th>Motivo</th></tr></thead><tbody>${bad.slice(0, 300).map((x) => `<tr><td class="mono">${esc(x.serial)}</td><td style="color:var(--bad)">${esc(x.error)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      <div class="row" style="justify-content:flex-end">${done ? '<button class="btn primary" data-close>Listo</button>' : `<button class="btn" id="back3">Volver</button><button class="btn primary" id="doSn" ${okN ? '' : 'disabled'}>${icon('upload')} Recibir ${okN} equipo${okN === 1 ? '' : 's'}</button>`}</div>`;
+    $('#back3', body)?.addEventListener('click', step2);
+    $('#doSn', body)?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = 'Registrando…';
+      try {
+        const res = await POST('/api/serials/receive', { serials, ...opts });
+        toast(`${res.received} equipos recibidos`, 'ok');
+        stepSerials(serials, opts, res, true);
+        m.onDone = true;
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    });
   };
 
   // Paso 3: vista previa calculada por el servidor (sin guardar) y confirmación

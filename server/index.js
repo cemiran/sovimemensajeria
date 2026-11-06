@@ -748,13 +748,18 @@ app.post(
   wrap((req, res) => {
     const p = db.prepare('SELECT * FROM products WHERE id = ?').get(Number(req.body?.product_id));
     if (!p) throw new HttpError(404, 'Elige el producto');
-    if (!p.serialized) throw new HttpError(409, `Activa "Controlar por número de serie" en ${p.name}`);
+    const dry = !!req.body.dry_run;
+    // desde la importación de Excel se puede activar el control por S/N si el producto aún no lo tenía (y no tiene existencia sin serie)
+    const enable = !p.serialized && req.body.enable_serial === true;
+    if (!p.serialized && !enable) throw new HttpError(409, `Activa "Controlar por número de serie" en ${p.name}`);
+    if (enable && p.stock > 0) throw new HttpError(409, `${p.name} tiene ${p.stock} piezas sin número de serie. Ajusta su existencia a 0 o elige otro producto.`);
     const list = (Array.isArray(req.body.serials) ? req.body.serials : []).map(normSerial).filter(Boolean);
     if (!list.length) throw new HttpError(400, 'No hay números de serie');
     if (list.length > 2000) throw new HttpError(400, 'Máximo 2,000 series por recepción');
     const ref = String(req.body.reference || '').trim().slice(0, 80);
     const results = [];
     const seen = new Set();
+    if (enable && !dry) db.prepare('UPDATE products SET serialized=1 WHERE id=?').run(p.id);
     tx(() => {
       for (const sn of list) {
         if (seen.has(sn)) { results.push({ serial: sn, ok: false, error: 'Repetido en la lista' }); continue; }
@@ -762,16 +767,18 @@ app.post(
         if (!SERIAL_RE.test(sn)) { results.push({ serial: sn, ok: false, error: 'Formato no válido' }); continue; }
         const ex = db.prepare('SELECT s.status, p.name FROM serials s JOIN products p ON p.id=s.product_id WHERE s.serial = ?').get(sn);
         if (ex) { results.push({ serial: sn, ok: false, error: `Ya registrado (${ex.name}, ${ex.status})` }); continue; }
+        if (dry) { results.push({ serial: sn, ok: true }); continue; }
         const r = db.prepare('INSERT INTO serials (product_id, serial, reference) VALUES (?,?,?)').run(p.id, sn, ref || null);
         serialEvent(Number(r.lastInsertRowid), 'recibido', null, req.user.id, ref || null);
         results.push({ serial: sn, ok: true });
       }
-      const n = results.filter((r) => r.ok).length;
+      const n = dry ? 0 : results.filter((r) => r.ok).length;
       if (n) moveStock(p.id, 'entrada', n, `Recepción de ${n} S/N${ref ? ' · ' + ref : ''}`, req.user.id);
     });
+    if (dry) return res.json({ dry_run: true, received: 0, errors: results.filter((r) => !r.ok), results, product: p.name, will_enable: enable, stock: p.stock });
     const ok = results.filter((r) => r.ok).length;
     if (ok) audit(req, 'series.recibir', `${ok} S/N de ${p.name}${ref ? ' · ' + ref : ''}`);
-    res.json({ received: ok, errors: results.filter((r) => !r.ok), results, stock: db.prepare('SELECT stock FROM products WHERE id=?').get(p.id).stock });
+    res.json({ received: ok, errors: results.filter((r) => !r.ok), results, product: p.name, stock: db.prepare('SELECT stock FROM products WHERE id=?').get(p.id).stock });
   })
 );
 app.post(
