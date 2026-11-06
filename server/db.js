@@ -234,6 +234,8 @@ CREATE INDEX IF NOT EXISTS idx_sheet_status ON sheet_sync(status, next_try_at);
   const up = db.prepare('UPDATE orders SET public_token=? WHERE id=?');
   for (const r of db.prepare('SELECT id FROM orders WHERE public_token IS NULL').all()) up.run(crypto.randomBytes(12).toString('hex'), r.id);
 }
+// ---- Inventario en manos de repartidores (custodia) ----
+// Se crea después de la tabla serials (ver más abajo): serials.holder_id = repartidor que trae el equipo; NULL = en almacén.
 // ---- Control por número de serie (cada equipo por su S/N) ----
 addCols('products', [['serialized', 'INTEGER NOT NULL DEFAULT 0']]);
 db.exec(`
@@ -379,5 +381,31 @@ function tx(fn) {
     throw e;
   }
 }
+
+// ---- Inventario asignado a repartidores ----
+addCols('serials', [['holder_id', 'INTEGER REFERENCES users(id)'], ['held_at', 'TEXT']]);
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_serials_holder ON serials(holder_id);
+CREATE TABLE IF NOT EXISTS driver_stock (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  qty INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, product_id)
+);
+CREATE TABLE IF NOT EXISTS custody_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  driver_id INTEGER NOT NULL REFERENCES users(id),
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  qty INTEGER NOT NULL,
+  serial TEXT,
+  action TEXT NOT NULL CHECK (action IN ('asignado','devuelto','entregado')),
+  order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+  by_user INTEGER REFERENCES users(id),
+  reference TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_custody_driver ON custody_log(driver_id, created_at);
+`);
 
 module.exports = { db, tx, getSettings, DATA_DIR, UPLOAD_DIR };

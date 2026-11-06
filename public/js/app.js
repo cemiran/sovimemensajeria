@@ -681,7 +681,7 @@ const NAV_GROUPS = [
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
-const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'plus'], ['history', 'Historial', 'history']];
+const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'plus'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
@@ -1492,7 +1492,7 @@ async function viewGuide(v) {
 // ================= Números de serie =================
 const SN_STATUS = { disponible: ['En almacén', 'ok'], asignado: ['Asignado a pedido', 'warn'], entregado: ['Entregado', ''], baja: ['Baja', 'off'] };
 const snChip = (st) => `<span class="chip ${SN_STATUS[st]?.[1] || ''}">${SN_STATUS[st]?.[0] || esc(st)}</span>`;
-const SN_EVENT = { recibido: 'Recibido en almacén', alta: 'Registrado al asignar', asignado: 'Asignado al pedido', liberado: 'Liberado del pedido', entregado: 'Entregado al cliente', baja: 'Dado de baja', reingreso: 'Reingresado', devolucion: 'Devuelto por el cliente' };
+const SN_EVENT = { recibido: 'Recibido en almacén', alta: 'Registrado al asignar', asignado: 'Asignado al pedido', liberado: 'Liberado del pedido', entregado: 'Entregado al cliente', baja: 'Dado de baja', reingreso: 'Reingresado', devolucion: 'Devuelto por el cliente', repartidor: 'Entregado a repartidor', almacen: 'Devuelto al almacén por el repartidor' };
 
 // Escanear los S/N que le faltan a un pedido (despacho, mostrador o repartidor)
 function ensureSerials(order, onDone) {
@@ -1586,6 +1586,82 @@ function receiveSerials(products, preselect) {
   });
 }
 
+// ================= Inventario asignado a repartidores =================
+function assignToDriver(drivers, products, preDriver) {
+  const act = drivers.filter((d) => d.active);
+  if (!act.length) return toast('Primero da de alta repartidores en Usuarios', 'bad');
+  const plain = products.filter((p) => !p.serialized);
+  const m = modal('Asignar inventario a repartidor', `<div class="stack">
+    <div class="grid g2"><label class="f">Repartidor<select id="adDrv">${act.map((d) => `<option value="${d.id}" ${d.id === preDriver ? 'selected' : ''}>${esc(d.name)}${d.total ? ` (ya trae ${d.total})` : ''}</option>`).join('')}</select></label>
+      <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, turno…" maxlength="80" /></label></div>
+    <div class="pill-tabs" id="adMode"><button class="on" data-m="sn">${icon('tag')} Equipos con S/N</button>${plain.length ? `<button data-m="qty">${icon('inv')} Por cantidad</button>` : ''}</div>
+    <div data-p="sn" class="stack">
+      <div class="row"><button class="btn primary grow" id="adScan">${icon('scan')} Escanear equipos</button></div>
+      <label class="f">…o pega los números de serie (uno por línea, desde Excel)<textarea id="adList" rows="5" placeholder="HWTCDE3CE28A&#10;HWTCDE31818A"></textarea></label>
+      <div class="row"><button class="btn" id="adPaste">Asignar lista</button><small class="muted" id="adCount"></small></div></div>
+    <div data-p="qty" class="stack" hidden>
+      <div class="grid g2"><label class="f">Producto<select id="adProd">${plain.map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select></label>
+        <label class="f">Cantidad<input id="adQty" type="number" min="1" value="1" /></label></div>
+      <div><button class="btn primary" id="adGo">Asignar</button></div></div>
+    <div class="scan-log" id="adLog"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Listo</button>', onClose: () => render() });
+  const drv = () => $('#adDrv', m.el).value;
+  const ref = () => $('#adRef', m.el).value;
+  const log = (ok, txt) => $('#adLog', m.el).insertAdjacentHTML('afterbegin', `<div style="${ok ? '' : 'color:var(--bad)'}">${ok ? '✅' : '⛔'} ${txt}</div>`);
+  $$('#adMode button', m.el).forEach((b) => (b.onclick = () => { $$('#adMode button', m.el).forEach((x) => x.classList.toggle('on', x === b)); $$('[data-p]', m.el).forEach((p) => (p.hidden = p.dataset.p !== b.dataset.m)); }));
+  const sendSN = async (list) => {
+    const r = await POST('/api/custody/assign', { driver_id: drv(), serials: list, reference: ref() });
+    for (const x of r.results) log(x.ok, `<b class="mono">${esc(x.serial)}</b>${x.ok ? ` → ${esc(r.driver)}${x.note ? ' · ' + esc(x.note) : ''}` : ' · ' + esc(x.error)}`);
+    return r;
+  };
+  $('#adList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#adCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
+  $('#adPaste', m.el).onclick = async () => {
+    const list = $('#adList', m.el).value.split(/[\r\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
+    if (!list.length) return toast('Pega al menos una serie', 'bad');
+    try { const r = await sendSN(list); toast(`${r.assigned} equipos asignados a ${r.driver}${r.errors.length ? `, ${r.errors.length} con error` : ''}`, r.errors.length ? '' : 'ok'); $('#adList', m.el).value = ''; $('#adCount', m.el).textContent = ''; }
+    catch (e) { toast(e.message, 'bad'); }
+  };
+  $('#adScan', m.el).onclick = () => openScanner({
+    title: 'Asignar equipos', continuous: true,
+    hint: `Repartidor: ${$('#adDrv', m.el).selectedOptions[0].text}. Cada lectura le asigna un equipo.`,
+    onCode: async (code) => { const r = await sendSN([code]); if (!r.assigned) throw new Error(r.errors[0]?.error || 'No asignado'); return `asignado a ${r.driver}`; },
+  });
+  $('#adGo', m.el)?.addEventListener('click', async () => {
+    try {
+      const r = await POST('/api/custody/assign', { driver_id: drv(), product_id: $('#adProd', m.el).value, qty: $('#adQty', m.el).value, reference: ref() });
+      log(true, `${r.results[0].qty} × ${esc(r.results[0].product)} → ${esc(r.driver)}`);
+      toast('Asignado', 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+  });
+}
+
+function custodyDetail(d) {
+  const m = modal(`Inventario de ${d.name}`, `<div class="stack">
+    <div class="row between"><b>${d.total} unidades</b><div class="row"><button class="btn sm" id="cdAdd">${icon('plus')} Asignar más</button><button class="btn sm bad" id="cdAll">Devolver todo al almacén</button></div></div>
+    ${d.items.map((it) => `<div class="card" style="padding:12px"><div class="row between"><div><b>${esc(it.name)}</b> <small class="muted">${esc(it.sku)}</small></div><b>${it.qty}</b></div>
+      ${it.serialized ? `<div class="table-wrap" style="max-height:220px"><table><tbody>${it.serials.map((s) => `<tr><td class="mono">${esc(s.serial)}</td><td><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Sin pedido'} · desde ${fmtDT(s.since)}</small></td><td class="r"><button class="btn sm" data-ret-sn="${esc(s.serial)}">Devolver</button></td></tr>`).join('')}</tbody></table></div>`
+        : `<div class="row" style="margin-top:8px"><input type="number" min="1" max="${it.qty}" value="${it.qty}" style="width:90px" data-ret-qty="${it.product_id}" /><button class="btn sm" data-ret-p="${it.product_id}">Devolver al almacén</button></div>`}</div>`).join('')}
+    <div><h3>Movimientos</h3><div class="timeline" id="cdLog"><p class="muted">Cargando…</p></div></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>', onClose: () => render() });
+  const ret = async (body, msg) => { try { const r = await POST('/api/custody/return', { driver_id: d.id, ...body }); toast(`${r.returned} ${msg}`, 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } };
+  $('#cdAll', m.el).onclick = async () => { if (await confirmDlg(`¿${d.name} devolvió al almacén todo lo que traía (${d.total} unidades)?`)) ret({ all: true }, 'unidades devueltas al almacén'); };
+  $('#cdAdd', m.el).onclick = async () => { m.close(); const [c, p] = await Promise.all([GET('/api/custody'), GET('/api/products?limit=500')]); assignToDriver(c.drivers, p.rows, d.id); };
+  $$('[data-ret-sn]', m.el).forEach((b) => (b.onclick = () => ret({ serials: [b.dataset.retSn] }, 'equipo devuelto al almacén')));
+  $$('[data-ret-p]', m.el).forEach((b) => (b.onclick = () => ret({ product_id: b.dataset.retP, qty: $(`[data-ret-qty="${b.dataset.retP}"]`, m.el).value }, 'unidades devueltas al almacén')));
+  GET(`/api/custody/${d.id}/log`).then((l) => { $('#cdLog', m.el).innerHTML = custodyLogHtml(l); }).catch(() => {});
+}
+const CUST_ACT = { asignado: ['Recibió', 'ok'], devuelto: ['Devolvió al almacén', ''], entregado: ['Entregó al cliente', 'warn'] };
+const custodyLogHtml = (l) => l.map((x) => `<div><b>${CUST_ACT[x.action]?.[0] || esc(x.action)}</b> ${x.serial ? `<span class="mono">${esc(x.serial)}</span>` : `${x.qty} ×`} ${esc(x.product_name)}${x.tracking_code ? ` · pedido <span class="mono">${esc(x.tracking_code)}</span>` : ''}<br><small class="muted">${fmtDT(x.created_at)}${x.by_name ? ' · ' + esc(x.by_name) : ''}${x.reference ? ' · ' + esc(x.reference) : ''}</small></div>`).join('') || '<p class="muted">Sin movimientos</p>';
+
+// Repartidor: lo que trae consigo
+async function viewMyStock(v) {
+  const r = await GET('/api/my/custody');
+  v.innerHTML = topbar('Mi inventario', '', 'Equipos y productos que te entregó el almacén. Al entregar un pedido se descuentan solos.') + `
+    <div class="grid g2"><div class="card kpi"><div class="label">Unidades que traes</div><div class="value">${r.total || 0}</div></div>
+      <div class="card kpi"><div class="label">Productos</div><div class="value">${r.items?.length || 0}</div></div></div>
+    ${(r.items || []).map((it) => `<div class="card" style="margin-top:12px"><div class="row between"><div><b>${esc(it.name)}</b><br><small class="muted">${esc(it.sku)}</small></div><b style="font-size:22px">${it.qty}</b></div>
+      ${it.serialized ? `<div class="sn-list" style="margin-top:8px">${it.serials.map((s) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono">${esc(s.serial)}</span><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Libre'}</small></div>`).join('')}</div>` : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">No traes inventario asignado. El almacén te lo asigna antes de salir.</div>'}
+    <div class="card" style="margin-top:12px"><h2>Movimientos</h2><div class="timeline">${custodyLogHtml(r.log || [])}</div></div>`;
+}
+
 const snState = { q: '', status: '', product_id: '' };
 async function viewSerials(v) {
   const r = await GET('/api/serials?' + new URLSearchParams({ ...snState, limit: 200 }));
@@ -1603,7 +1679,7 @@ async function viewSerials(v) {
       <select name="product_id"><option value="">Todos los productos</option>${r.products.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
       <select name="status"><option value="">Todos los estados</option>${Object.entries(SN_STATUS).map(([k, [l]]) => `<option value="${k}">${l}</option>`).join('')}</select></form>
     <div class="table-wrap"><table><thead><tr><th>S/N</th><th>Producto</th><th>Estado</th><th>Pedido / cliente</th><th>Último movimiento</th></tr></thead><tbody>
-    ${r.rows.map((s) => `<tr class="click" data-sn="${esc(s.serial)}"><td><b class="mono">${esc(s.serial)}</b></td><td>${esc(s.product_name)}</td><td>${snChip(s.status)}</td>
+    ${r.rows.map((s) => `<tr class="click" data-sn="${esc(s.serial)}"><td><b class="mono">${esc(s.serial)}</b></td><td>${esc(s.product_name)}</td><td>${snChip(s.status)}${s.holder_name ? `<br><small class="muted">${icon('truck')} ${esc(s.holder_name)}</small>` : ''}</td>
       <td>${s.tracking_code ? `<span class="mono">${esc(s.tracking_code)}</span><br><small class="muted">${esc(s.customer_name || '')}</small>` : '—'}</td><td><small>${fmtDT(s.updated_at)}</small></td></tr>`).join('') || '<tr><td colspan="5" class="empty">Sin equipos con estos filtros</td></tr>'}
     </tbody></table></div><div class="pager"><small class="muted">${r.rows.length} de ${r.total}</small></div></div>`;
   const f = $('#snF');
@@ -2075,12 +2151,17 @@ async function viewInventory(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const q = p.get('q') || '';
   const low = p.get('low') === '1';
-  const [r, movs] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25')]);
+  const [r, movs, cust] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody')]);
   const totalUnits = r.rows.reduce((a, x) => a + x.stock, 0);
-  v.innerHTML = topbar('Inventario', `<button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
+  const withDrv = cust.drivers.filter((d) => d.total);
+  v.innerHTML = topbar('Inventario', `<button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
     <div class="card kpi"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div></div>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>
+  <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('truck')} Con repartidores</h2><small class="muted">${fmtN(withDrv.reduce((a, d) => a + d.total, 0))} unidades fuera del almacén</small></div>
+    ${withDrv.length ? `<div class="table-wrap"><table><thead><tr><th>Repartidor</th><th>Trae</th><th class="r">Unidades</th><th></th></tr></thead><tbody>
+      ${withDrv.map((d) => `<tr class="click" data-cust="${d.id}"><td><b>${esc(d.name)}</b>${d.vehicle ? `<br><small class="muted">${esc(d.vehicle)}</small>` : ''}</td><td><small>${d.items.map((it) => `${esc(it.name)}: <b>${it.qty}</b>`).join(' · ')}</small></td><td class="r num"><b>${d.total}</b></td><td class="r"><button class="btn sm">Ver / devolver</button></td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="muted" style="margin:0">Ningún repartidor trae inventario. Usa <b>Asignar a repartidor</b> para entregarle equipos antes de salir.</p>'}</div>
   <div class="grid g-main" style="margin-top:14px">
     <div class="card"><form class="row" id="iq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Nombre, SKU o código de barras" class="grow" /><label class="row"><input type="checkbox" name="low" value="1" ${low ? 'checked' : ''} /> Solo stock bajo</label><button class="btn">Buscar</button></form>
       <div class="table-wrap"><table><thead><tr><th>Producto</th><th>SKU / Código</th><th>Ubicación</th><th class="r">Stock</th><th class="r">Mín.</th></tr></thead><tbody>
@@ -2091,6 +2172,8 @@ async function viewInventory(v) {
   $('#iq').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/inventory?q=${encodeURIComponent(f.get('q'))}&low=${f.get('low') || ''}`; };
   $('#newP').onclick = () => productForm(null);
   $('#impInv').onclick = importInventory;
+  $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
+  $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => d.id === Number(tr.dataset.cust)))));
   $$('tr[data-p]', v).forEach((tr) => (tr.onclick = () => productForm(JSON.parse(tr.dataset.p))));
   const scanMove = (type) => {
     let qtyEl;
@@ -2104,6 +2187,7 @@ async function viewInventory(v) {
           const res = await POST('/api/inventory/movements', { barcode: code, type: t, qty: t === 'ajuste' ? qty : Math.abs(qty), reference: $('#mref', m.el).value || 'Escaneo' });
           return `stock: ${res.stock}`;
         } catch (e) {
+          if (e.status === 404 && ONT_SN.test(code)) throw new Error('Es un número de serie de equipo: regístralo en Números de serie → Recibir equipos');
           if (e.status === 404) { productForm({ barcode: code }); throw new Error('No registrado: da de alta el producto'); }
           throw e;
         }
@@ -3438,7 +3522,7 @@ async function render() {
   const [view, param] = path.split('/');
   const driver = store.user.role === 'repartidor';
   const routes = driver
-    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
+    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
     : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;

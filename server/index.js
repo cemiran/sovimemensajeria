@@ -729,7 +729,7 @@ app.get(
     if (req.query.q) { where.push('(s.serial LIKE ? OR o.tracking_code LIKE ? OR c.name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const from = `FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id ${w}`;
-    const rows = db.prepare(`SELECT s.*, p.name product_name, p.sku, o.tracking_code, o.status order_status, c.name customer_name ${from} ORDER BY s.updated_at DESC, s.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const rows = db.prepare(`SELECT s.*, p.name product_name, p.sku, o.tracking_code, o.status order_status, c.name customer_name, (SELECT name FROM users WHERE id = s.holder_id) holder_name ${from} ORDER BY s.updated_at DESC, s.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     const total = db.prepare(`SELECT COUNT(*) n ${from}`).get(...args).n;
     const stats = db.prepare('SELECT status, COUNT(*) n FROM serials GROUP BY status').all();
     const products = db.prepare(
@@ -802,6 +802,159 @@ app.post(
     res.json({ received: ok, errors: results.filter((r) => !r.ok), results, product: p.name, stock: db.prepare('SELECT stock FROM products WHERE id=?').get(p.id).stock });
   })
 );
+
+// ---------- Inventario asignado a repartidores ----------
+// Equipos con S/N: serials.holder_id. Productos sin S/N: driver_stock (cantidad por repartidor).
+// La existencia del almacén no cambia al asignar (el equipo sigue siendo de la empresa); solo cambia quién lo trae.
+const custodyLog = (driverId, productId, qty, action, byUser, { serial = null, orderId = null, reference = null } = {}) =>
+  db.prepare('INSERT INTO custody_log (driver_id, product_id, qty, serial, action, order_id, by_user, reference) VALUES (?,?,?,?,?,?,?,?)')
+    .run(driverId, productId, qty, serial, action, orderId, byUser, reference);
+function custodyOf(driverId) {
+  const where = driverId ? 'WHERE u.id = ?' : "WHERE u.role = 'repartidor'";
+  const args = driverId ? [driverId] : [];
+  const drivers = db.prepare(`SELECT u.id, u.name, u.vehicle, u.active FROM users u ${where} ORDER BY u.active DESC, u.name`).all(...args);
+  const sn = db.prepare(`SELECT s.holder_id, s.product_id, s.serial, s.status, s.held_at, o.tracking_code FROM serials s LEFT JOIN orders o ON o.id = s.order_id
+    WHERE s.holder_id IS NOT NULL ${driverId ? 'AND s.holder_id = ?' : ''} ORDER BY s.serial`).all(...args);
+  const qt = db.prepare(`SELECT user_id, product_id, qty FROM driver_stock WHERE qty > 0 ${driverId ? 'AND user_id = ?' : ''}`).all(...args);
+  const prods = new Map(db.prepare('SELECT id, name, sku, serialized FROM products').all().map((p) => [p.id, p]));
+  return drivers.map((d) => {
+    const items = new Map();
+    const item = (pid) => {
+      if (!items.has(pid)) { const p = prods.get(pid) || { name: '?', sku: '' }; items.set(pid, { product_id: pid, name: p.name, sku: p.sku, serialized: !!p.serialized, qty: 0, serials: [] }); }
+      return items.get(pid);
+    };
+    for (const s of sn.filter((x) => x.holder_id === d.id)) { const it = item(s.product_id); it.qty++; it.serials.push({ serial: s.serial, status: s.status, order: s.tracking_code, since: s.held_at }); }
+    for (const q of qt.filter((x) => x.user_id === d.id)) item(q.product_id).qty += q.qty;
+    const list = [...items.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return { ...d, total: list.reduce((a, x) => a + x.qty, 0), items: list };
+  });
+}
+// Unidades físicas de un producto sin S/N que siguen en el almacén: existencia libre + lo apartado en pedidos abiertos − lo que ya traen repartidores
+function warehouseQty(productId) {
+  const p = db.prepare('SELECT stock FROM products WHERE id=?').get(productId);
+  const open = db.prepare(`SELECT COALESCE(SUM(oi.qty),0) n FROM order_items oi JOIN orders o ON o.id = oi.order_id
+    WHERE oi.product_id = ? AND o.status IN ('pendiente','asignado','cargado','en_camino')`).get(productId).n;
+  const held = db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE product_id=?').get(productId).n;
+  return Math.max(0, (p?.stock || 0) + open - held);
+}
+app.get('/api/custody', auth(...STAFF), wrap((req, res) => res.json({ drivers: custodyOf(null) })));
+app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
+  const [me] = custodyOf(req.user.id);
+  const log = db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
+    JOIN products p ON p.id = l.product_id LEFT JOIN orders o ON o.id = l.order_id LEFT JOIN users u ON u.id = l.by_user
+    WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 30`).all(req.user.id);
+  res.json({ ...me, log });
+}));
+app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
+  res.json(db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
+    JOIN products p ON p.id = l.product_id LEFT JOIN orders o ON o.id = l.order_id LEFT JOIN users u ON u.id = l.by_user
+    WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 60`).all(req.params.driverId));
+}));
+// Asignar: { driver_id, serials:[...] } para equipos con S/N, o { driver_id, product_id, qty } para productos sin S/N
+app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
+  const b = req.body || {};
+  const d = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+  if (!d) throw new HttpError(400, 'Elige el repartidor');
+  if (!d.active) throw new HttpError(409, `${d.name} está desactivado`);
+  const ref = String(b.reference || '').trim().slice(0, 80) || null;
+  const dry = !!b.dry_run;
+  const results = [];
+  tx(() => {
+    if (Array.isArray(b.serials) && b.serials.length) {
+      if (b.serials.length > 2000) throw new HttpError(400, 'Máximo 2,000 series a la vez');
+      const seen = new Set();
+      for (const raw of b.serials) {
+        const sn = normSerial(raw);
+        if (!sn) continue;
+        if (seen.has(sn)) { results.push({ serial: sn, ok: false, error: 'Repetido en la lista' }); continue; }
+        seen.add(sn);
+        const s = db.prepare('SELECT s.*, p.name pname, u.name holder_name FROM serials s JOIN products p ON p.id=s.product_id LEFT JOIN users u ON u.id=s.holder_id WHERE s.serial=?').get(sn);
+        if (!s) { results.push({ serial: sn, ok: false, error: 'No está registrado en el inventario' }); continue; }
+        if (['entregado', 'baja'].includes(s.status)) { results.push({ serial: sn, ok: false, error: s.status === 'entregado' ? 'Ya fue entregado a un cliente' : 'Está dado de baja' }); continue; }
+        if (s.holder_id === d.id) { results.push({ serial: sn, ok: false, error: `${d.name} ya lo trae` }); continue; }
+        results.push({ serial: sn, ok: true, product: s.pname, note: s.holder_id ? `Se pasa de ${s.holder_name}` : null });
+        if (dry) continue;
+        if (s.holder_id) custodyLog(s.holder_id, s.product_id, 1, 'devuelto', req.user.id, { serial: sn, reference: `Reasignado a ${d.name}` });
+        db.prepare("UPDATE serials SET holder_id=?, held_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(d.id, s.id);
+        serialEvent(s.id, 'repartidor', s.order_id, req.user.id, `Entregado a ${d.name}${ref ? ' · ' + ref : ''}`);
+        custodyLog(d.id, s.product_id, 1, 'asignado', req.user.id, { serial: sn, reference: ref });
+      }
+    } else {
+      const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(b.product_id));
+      if (!p) throw new HttpError(400, 'Elige el producto');
+      if (p.serialized) throw new HttpError(400, `${p.name} se controla por número de serie: escanea o pega los S/N`);
+      const qty = Math.trunc(Number(b.qty));
+      if (!(qty > 0)) throw new HttpError(400, 'Escribe la cantidad');
+      const avail = warehouseQty(p.id);
+      if (qty > avail) throw new HttpError(409, `Solo hay ${avail} ${p.unit || 'pza'} de ${p.name} en el almacén`);
+      results.push({ product: p.name, qty, ok: true });
+      if (!dry) {
+        db.prepare(`INSERT INTO driver_stock (user_id, product_id, qty) VALUES (?,?,?)
+          ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(d.id, p.id, qty);
+        custodyLog(d.id, p.id, qty, 'asignado', req.user.id, { reference: ref });
+      }
+    }
+  });
+  const ok = results.filter((r) => r.ok);
+  if (!dry && ok.length) audit(req, 'inventario.asignar', `${d.name}: ${ok.length && ok[0].serial ? ok.length + ' equipos con S/N' : ok.map((r) => `${r.qty} ${r.product}`).join(', ')}`);
+  res.json({ dry_run: dry, driver: d.name, assigned: ok.reduce((a, r) => a + (r.qty || 1), 0), results, errors: results.filter((r) => !r.ok) });
+}));
+// Devolver al almacén: { driver_id, serials:[...] } | { driver_id, product_id, qty } | { driver_id, all: true }
+app.post('/api/custody/return', auth(...STAFF), wrap((req, res) => {
+  const b = req.body || {};
+  const d = db.prepare("SELECT id, name FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+  if (!d) throw new HttpError(400, 'Elige el repartidor');
+  const ref = String(b.reference || '').trim().slice(0, 80) || null;
+  let n = 0;
+  const errors = [];
+  tx(() => {
+    const back = (s) => {
+      db.prepare("UPDATE serials SET holder_id=NULL, held_at=NULL, updated_at=datetime('now') WHERE id=?").run(s.id);
+      serialEvent(s.id, 'almacen', s.order_id, req.user.id, `Devuelto por ${d.name}${ref ? ' · ' + ref : ''}`);
+      custodyLog(d.id, s.product_id, 1, 'devuelto', req.user.id, { serial: s.serial, reference: ref });
+      n++;
+    };
+    if (b.all) {
+      for (const s of db.prepare('SELECT * FROM serials WHERE holder_id=?').all(d.id)) back(s);
+      for (const q of db.prepare('SELECT * FROM driver_stock WHERE user_id=? AND qty>0').all(d.id)) {
+        custodyLog(d.id, q.product_id, q.qty, 'devuelto', req.user.id, { reference: ref });
+        n += q.qty;
+      }
+      db.prepare('DELETE FROM driver_stock WHERE user_id=?').run(d.id);
+    } else if (Array.isArray(b.serials) && b.serials.length) {
+      for (const raw of b.serials) {
+        const sn = normSerial(raw);
+        const s = db.prepare('SELECT * FROM serials WHERE serial=?').get(sn);
+        if (!s || s.holder_id !== d.id) { errors.push({ serial: sn, error: `${d.name} no trae este equipo` }); continue; }
+        back(s);
+      }
+    } else {
+      const q = db.prepare('SELECT * FROM driver_stock WHERE user_id=? AND product_id=?').get(d.id, Number(b.product_id));
+      const qty = Math.trunc(Number(b.qty));
+      if (!q || !(qty > 0) || qty > q.qty) throw new HttpError(409, `${d.name} solo trae ${q?.qty || 0} de ese producto`);
+      db.prepare("UPDATE driver_stock SET qty = qty - ?, updated_at=datetime('now') WHERE user_id=? AND product_id=?").run(qty, d.id, q.product_id);
+      custodyLog(d.id, q.product_id, qty, 'devuelto', req.user.id, { reference: ref });
+      n += qty;
+    }
+  });
+  if (n) audit(req, 'inventario.devolver', `${d.name} devolvió ${n} al almacén`);
+  res.json({ returned: n, errors });
+}));
+// Al entregar un pedido, lo que el repartidor traía de ese pedido sale de su inventario
+function custodyOnDelivery(orderId, driverId, userId) {
+  for (const s of db.prepare('SELECT * FROM serials WHERE order_id=? AND holder_id IS NOT NULL').all(orderId)) {
+    db.prepare('UPDATE serials SET holder_id=NULL, held_at=NULL WHERE id=?').run(s.id);
+    custodyLog(s.holder_id, s.product_id, 1, 'entregado', userId, { serial: s.serial, orderId });
+  }
+  if (!driverId) return;
+  for (const it of db.prepare('SELECT oi.product_id, oi.qty FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id=? AND p.serialized=0').all(orderId)) {
+    const q = db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(driverId, it.product_id);
+    const take = Math.min(q?.qty || 0, it.qty);
+    if (!take) continue;
+    db.prepare('UPDATE driver_stock SET qty = qty - ? WHERE user_id=? AND product_id=?').run(take, driverId, it.product_id);
+    custodyLog(driverId, it.product_id, take, 'entregado', userId, { orderId });
+  }
+}
 app.post(
   '/api/serials/:id/action',
   auth(...STAFF),
@@ -1383,7 +1536,7 @@ function registerEvidence(req, result) {
       b.receiver_id_doc ? String(b.receiver_id_doc).trim().slice(0, 60) : null, b.reason || null, photo, sig,
       b.barcode_verified ? 1 : 0, lat, lng, dist, b.notes || null, counter ? 'mostrador' : 'ruta', JSON.stringify(comp.c), when);
     db.prepare(`UPDATE orders SET status=?, attempts=attempts+1, delivered_at=COALESCE(?, datetime('now')) WHERE id=?`).run(result, when, o.id);
-    if (result === 'entregado') deliverOrderSerials(o.id, req.user.id, b.receiver_name);
+    if (result === 'entregado') { custodyOnDelivery(o.id, req.user.role === 'repartidor' ? req.user.id : null, req.user.id); deliverOrderSerials(o.id, req.user.id, b.receiver_name); }
     if (o.route_id) {
       const pending = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").get(o.route_id).c;
       if (pending === 0) db.prepare("UPDATE routes SET status='completada', finished_at=datetime('now') WHERE id=?").run(o.route_id);
