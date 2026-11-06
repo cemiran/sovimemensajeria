@@ -246,6 +246,19 @@ En *Inventario → Importar Excel / Sheets*:
 
 Los productos se identifican por SKU o, si no hay SKU, por código de barras. Máximo 5,000 filas por importación.
 
+## Producción (VPS de Hostinger)
+
+- **Dirección**: https://sovime.srv1901867.hstgr.cloud (certificado Let's Encrypt automático vía Traefik).
+- **Servidor**: VPS Hostinger `srv1901867.hstgr.cloud` (Ubuntu 24.04 con Docker y Traefik), junto a n8n.
+- **Carpeta**: `/docker/sovime`, con el código clonado de GitHub, `.env` (JWT_SECRET, APP_HOST) y `data/` (base, fotos, firmas, sesión de WhatsApp).
+- **Actualizar a la última versión de GitHub**:
+  ```bash
+  cd /docker/sovime && git pull && docker compose up -d --build
+  ```
+- **Ver registros**: `docker logs -f sovime`
+- **Respaldo manual**: copia `/docker/sovime/data/` (detén antes con `docker compose stop` o usa `VACUUM INTO`).
+- La base local de la computadora quedó marcada como **migrada** y ya no arranca (`moved_to`). Así se evita conectar WhatsApp dos veces. Para practicar usa `npm run practica`.
+
 ## Arquitectura
 
 ```
