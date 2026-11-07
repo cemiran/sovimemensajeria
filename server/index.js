@@ -1274,7 +1274,7 @@ const custVal = (b, f) => {
 };
 app.post(
   '/api/customers',
-  auth(), // repartidores también pueden registrar cliente final en campo
+  auth(...STAFF), // los clientes los registra el despacho; el repartidor solo busca y entrega
   wrap((req, res) => {
     const b = req.body;
     if (!b.name || !b.address) throw new HttpError(400, 'Nombre y dirección son obligatorios');

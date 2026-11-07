@@ -719,7 +719,7 @@ const NAV_GROUPS = [
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
-const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'plus'], ['history', 'Historial', 'history']];
+const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
@@ -3843,19 +3843,17 @@ async function viewHistory(v) {
 function viewNewCustomer(v) {
   v.innerHTML = topbar('Cliente', '', 'Busca al cliente, elige lo que le vas a entregar de tu inventario y registra la entrega.') + `
     <div class="card"><form class="row" id="dcq"><input name="q" class="grow" placeholder="Nombre, teléfono o dirección" autocomplete="off" /><button class="btn primary">${icon('search')} Buscar</button></form>
-      <div id="dcRes" style="margin-top:8px"></div>
-      <div class="row" style="margin-top:10px"><button class="btn" id="nc">${icon('plus')} Registrar cliente nuevo</button></div></div>
+      <div id="dcRes" style="margin-top:8px"></div></div>
     <div id="dcPick"></div>`;
   const search = async (q) => {
     if (q.trim().length < 2) return ($('#dcRes').innerHTML = '<p class="muted">Escribe al menos 2 letras o números.</p>');
     const r = await GET('/api/customers?limit=30&q=' + encodeURIComponent(q.trim()));
-    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.open_orders ? `<span class="chip">${c.open_orders} pedido${c.open_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Regístralo con <b>Registrar cliente nuevo</b>.</p>';
+    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.open_orders ? `<span class="chip">${c.open_orders} pedido${c.open_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
     $$('[data-c]', v).forEach((b) => (b.onclick = () => pickForCustomer(Number(b.dataset.c))));
   };
   let t;
   $('#dcq').onsubmit = (e) => { e.preventDefault(); search(e.target.q.value); };
   $('#dcq').q.oninput = (e) => { clearTimeout(t); t = setTimeout(() => search(e.target.value), 350); };
-  $('#nc').onclick = () => customerForm(null, (id) => { toast('Cliente registrado', 'ok'); pickForCustomer(id); });
 
   async function pickForCustomer(cid) {
     const [c, mine, myRoute] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null)]);
@@ -3865,7 +3863,7 @@ function viewNewCustomer(v) {
     box.innerHTML = `<div class="card" style="margin-top:12px">
       <div class="row between"><div><b style="font-size:18px">${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}</small><br>
         ${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone')} ${esc(c.phone)}</a>` : ''}${c.phone_alt ? ` · <a href="tel:${esc(c.phone_alt)}">${esc(c.phone_alt)}</a>` : ''}</div>
-        <button class="btn sm" id="dcEdit">${icon('person')} Editar</button></div>
+</div>
       ${mineOpen.length ? `<div class="info-bar" style="margin-top:10px">${icon('box')} Ya tienes ${mineOpen.length === 1 ? 'un pedido' : mineOpen.length + ' pedidos'} para este cliente en tu ruta: ${mineOpen.map((s) => `<button class="btn sm primary" data-dlv="${s.id}">Entregar ${esc(s.tracking_code)}</button>`).join(' ')}</div>` : ''}
       <h3>¿Qué le vas a entregar?</h3>
       ${items.length ? items.map((it) => `<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">traes ${it.qty}</small></div>
@@ -3876,7 +3874,6 @@ function viewNewCustomer(v) {
       <label class="f" style="margin-top:8px">Nota<input id="dcNote" maxlength="300" placeholder="Ej. instalación, cambio de equipo…" /></label>
       <button class="btn primary lg block" id="dcGo" style="margin-top:10px" ${items.length ? '' : 'disabled'}>${icon('sign')} Crear entrega y registrar</button></div>`;
     box.scrollIntoView({ behavior: 'smooth' });
-    $('#dcEdit').onclick = () => customerForm(c, () => pickForCustomer(c.id));
     $$('[data-dlv]', box).forEach((b) => (b.onclick = () => (location.hash = '#/deliver/' + b.dataset.dlv)));
     $('#dcScan')?.addEventListener('click', () => openScanner({
       title: 'Escanear S/N a entregar',
