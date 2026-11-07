@@ -806,7 +806,7 @@ async function orderDetail(id) {
         <dl class="kv">
           <dt>Estado</dt><dd>${badge(o.status)} ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</dd>
           ${staff ? `<dt>Mayorista</dt><dd id="oAcc">${o.account_name ? `<b>${esc(o.account_name)}</b>` : '<span class="muted">Sin mayorista</span>'} <button class="btn sm ghost" id="oAccEd">Cambiar</button></dd>` : ''}
-          <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b><br>${o.customer_phone ? `<a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}</dd>
+          <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b>${o.customer_phone ? `<br>Móvil: <a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}${o.customer_phone_alt ? `<br>Adicional: <a href="tel:${esc(o.customer_phone_alt)}">${esc(o.customer_phone_alt)}</a>` : ''}</dd>
           <dt>Dirección</dt><dd>${esc(o.address)}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}</dd>
           <dt>Ventana</dt><dd>${o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
           <dt>Fecha</dt><dd>${esc(o.scheduled_date)}</dd>
@@ -952,9 +952,12 @@ function customerForm(c, done) {
     <form id="cf" class="stack">
       <div class="grid g2">
         <label class="f">Nombre completo *<input name="name" required value="${esc(c.name)}" /></label>
-        <label class="f">Teléfono<input name="phone" type="tel" value="${esc(c.phone)}" /></label>
+        <label class="f">Correo<input name="email" type="email" value="${esc(c.email)}" /></label>
       </div>
-      <label class="f">Correo<input name="email" type="email" value="${esc(c.email)}" /></label>
+      <div class="grid g2">
+        <label class="f">Teléfono móvil <small class="muted">(WhatsApp y SMS)</small><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /></label>
+        <label class="f">Teléfono adicional<input name="phone_alt" type="tel" inputmode="tel" value="${esc(c.phone_alt)}" placeholder="Casa, trabajo o familiar" /></label>
+      </div>
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
       <div class="grid g3">
         <label class="f">Ciudad<input name="city" value="${esc(c.city || 'Ciudad de México')}" /></label>
@@ -1018,8 +1021,8 @@ async function viewCustomers(v) {
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
-      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Teléfono</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}"><td><b>${esc(c.name)}</b>${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${esc(c.phone || '')}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}</td></tr>`).join('')}
+      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}"><td><b>${esc(c.name)}</b>${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
@@ -1881,10 +1884,10 @@ async function viewSerials(v) {
 // ================= Importación de clientes (Excel / CSV / Sheets) =================
 const CUST_FIELDS = [
   ['name', 'Nombre', ['nombre completo', 'nombre', 'cliente', 'razon social', 'titular linea', 'titular']],
-  ['phone', 'Celular (WhatsApp/SMS)', ['contacto sugerido', 'celular', 'cel registro', 'movil', 'whatsapp', 'telefono celular']],
+  ['phone', 'Teléfono móvil (WhatsApp/SMS)', ['contacto sugerido', 'celular', 'cel registro', 'movil', 'whatsapp', 'telefono celular']],
   ['phone2', 'Celular 2 (si falta el 1)', ['cel registro', 'cel ivr', 'cel queja']],
   ['phone_line', 'Teléfono fijo / línea', ['telefono', 'tel registro', 'linea', 'telefono fijo']],
-  ['phone_alt', 'Teléfono alterno', ['contacto alterno', 'telefono alterno']],
+  ['phone_alt', 'Teléfono adicional', ['contacto alterno', 'telefono alterno']],
   ['email', 'Correo', ['correo sugerido', 'correo', 'email', 'e mail']],
   ['street', 'Calle', ['calle']],
   ['number', 'Número', ['numero', 'num', 'no exterior', 'numero exterior']],
@@ -3411,7 +3414,7 @@ async function viewMyRoute(v) {
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
         ${s.lat != null ? `<a class="btn sm" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
-        ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone))}">${icon('chat')}</a>` : ''}
+        ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone))}">${icon('chat')}</a>` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
         <a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a><a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>` : ''}
     </div></div>`;
   }).join('')}</div>`;
@@ -3481,6 +3484,7 @@ async function viewNavigate(v, id) {
       <div class="row" style="margin-top:10px">
         <a class="btn ok lg grow" href="#/deliver/${s.id}">${icon('check')} Entregar</a>
         ${s.customer_phone ? `<a class="btn lg" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn lg" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone, `Hola, soy ${firstName(store.user.name)} de ${SETTINGS.company_name}. Voy en camino con tu paquete ${s.tracking_code}.`))}" aria-label="WhatsApp">${icon('chat')}</a>` : ''}
+        ${s.customer_phone_alt ? `<a class="btn lg" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional: ${esc(s.customer_phone_alt)}">${icon('phone')} 2</a>` : ''}
       </div>
       <div class="row" style="margin-top:8px">
         <a class="btn sm grow" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=${dest.lat},${dest.lng}">Google Maps</a>

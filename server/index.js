@@ -1184,8 +1184,8 @@ app.get(
     const args = [];
     let w = '';
     if (q) {
-      w = 'WHERE name LIKE ? OR phone LIKE ? OR address LIKE ? OR email LIKE ?';
-      args.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+      w = 'WHERE name LIKE ? OR phone LIKE ? OR phone_alt LIKE ? OR address LIKE ? OR email LIKE ?';
+      args.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     const total = db.prepare(`SELECT COUNT(*) c FROM customers ${w}`).get(...args).c;
     const rows = db
@@ -1197,7 +1197,7 @@ app.get(
     res.json({ total, rows });
   })
 );
-const customerFields = ['name', 'phone', 'email', 'address', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
+const customerFields = ['name', 'phone', 'phone_alt', 'email', 'address', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
 const custVal = (b, f) => {
   if (f.startsWith('notify_')) return b[f] === undefined ? 1 : [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
   return b[f] === '' || b[f] === undefined ? null : f === 'lat' || f === 'lng' ? Number(b[f]) : b[f];
@@ -1458,7 +1458,7 @@ app.get(
 
 // ---------- Pedidos ----------
 const ORDER_SELECT = `
-  SELECT o.*, c.name customer_name, c.phone customer_phone, c.address, c.reference address_reference,
+  SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.address, c.reference address_reference,
          c.lat, c.lng, c.window_start, c.window_end, u.name driver_name, (SELECT name FROM accounts WHERE id = o.account_id) account_name
   FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id`;
 
