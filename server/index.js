@@ -1224,6 +1224,8 @@ app.put(
     const b = { ...c, ...req.body };
     const vals = customerFields.map((f) => custVal(b, f));
     db.prepare(`UPDATE customers SET ${customerFields.map((f) => f + '=?').join(',')} WHERE id=?`).run(...vals, c.id);
+    const moved = b.lat != null && b.lat !== '' && (Number(b.lat) !== c.lat || Number(b.lng) !== c.lng);
+    if (moved) db.prepare("UPDATE customers SET geo_quality='manual' WHERE id=?").run(c.id);
     res.json({ ok: true });
   })
 );

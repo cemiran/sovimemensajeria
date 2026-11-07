@@ -187,20 +187,57 @@ const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin"
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
 
-function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true } = {}) {
+function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null } = {}) {
   const pts = [];
   if (depot) { L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name)); pts.push(depotLatLng()); }
   for (const s of stops) {
     if (s.lat == null) continue;
     const ll = [s.lat, s.lng];
     pts.push(ll);
-    L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color) })
+    const mk = L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color) })
       .addTo(map)
-      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}`);
+      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${onEdit ? stopEditButtons() : ''}`);
+    if (onEdit) wireStopEdit(map, mk, s, onEdit);
   }
   if (pts.length > 1) L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(map);
   if (fit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 15 });
   return pts;
+}
+// ---- Editar cliente y ubicación desde un mapa de ruta ----
+const stopEditButtons = () => `<div class="row" style="margin-top:8px;gap:6px"><button class="btn sm" data-ed="1">${icon('person')} Editar cliente</button><button class="btn sm" data-mv="1">${icon('live')} Mover ubicación</button></div>`;
+async function afterCustomerMoved(s, onEdit) {
+  // la ruta se reordena con la nueva ubicación (solo si aún no sale o tiene paradas pendientes)
+  if (s.route_id && ['asignado', 'cargado'].includes(s.status)) {
+    try { const o = await POST(`/api/routes/${s.route_id}/optimize`); toast(`Ruta recalculada: ${fmtN(o.distance_km, 1)} km`, 'ok'); } catch {}
+  }
+  onEdit();
+}
+function wireStopEdit(map, mk, s, onEdit) {
+  mk.on('popupopen', (e) => {
+    const el = e.popup.getElement();
+    $('[data-ed]', el)?.addEventListener('click', async () => {
+      map.closePopup();
+      const c = await GET('/api/customers/' + s.customer_id);
+      customerForm(c, () => afterCustomerMoved(s, onEdit));
+    });
+    $('[data-mv]', el)?.addEventListener('click', () => {
+      map.closePopup();
+      const from = mk.getLatLng();
+      mk.dragging.enable();
+      mk.setZIndexOffset(2000);
+      toast(`Arrastra el pin de ${s.customer_name} al domicilio correcto`, '');
+      mk.once('dragend', async () => {
+        mk.dragging.disable();
+        const to = mk.getLatLng();
+        if (!(await confirmDlg(`¿Guardar la nueva ubicación de ${s.customer_name}? Se usará en todas sus entregas.`))) { mk.setLatLng(from); return; }
+        try {
+          await api('PUT', '/api/customers/' + s.customer_id, { lat: to.lat, lng: to.lng });
+          toast('Ubicación guardada', 'ok');
+          afterCustomerMoved(s, onEdit);
+        } catch (er) { toast(er.message, 'bad'); mk.setLatLng(from); }
+      });
+    });
+  });
 }
 function gmapsUrl(stops) {
   const pts = stops.filter((s) => s.lat != null);
@@ -761,7 +798,7 @@ async function viewDashboard(v) {
   const all = [depotLatLng()];
   for (const [i, r] of routes.entries()) {
     const det = await GET('/api/routes/' + r.id);
-    all.push(...drawRoute(map, det.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { fit: false, depot: i === 0 }));
+    all.push(...drawRoute(map, det.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { fit: false, depot: i === 0, onEdit: () => render() }));
   }
   if (!routes.length) L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
   for (const x of drivers) if (x.last_lat) { L.marker([x.last_lat, x.last_lng], { icon: truckIcon() }).addTo(map).bindPopup(`<b>${esc(x.name)}</b><br>${fmtDT(x.last_seen)}`); all.push([x.last_lat, x.last_lng]); }
@@ -1061,7 +1098,7 @@ async function viewRoutes(v) {
       const done = r.delivered + r.failed;
       return `<div class="card" style="border-left:5px solid ${ROUTE_COLORS[i % ROUTE_COLORS.length]}">
         <div class="row between"><b>${esc(r.driver_name || 'Sin repartidor')}</b>${badge(r.status)}</div>
-        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num">⏱️ ${fmtN(r.est_minutes / 60, 1)} h</small>${r.original_distance_km ? `<small class="num" style="color:var(--ok)">−${fmtN(((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100, 0)}%</small>` : ''}</div>
+        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num">⏱️ ${fmtN(r.est_minutes / 60, 1)} h</small>${r.original_distance_km ? (() => { const sv = ((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100; return sv >= 0.5 ? `<small class="num" style="color:var(--ok)" title="Ahorro contra el orden original">−${fmtN(sv, 0)}%</small>` : sv <= -0.5 ? `<small class="num" style="color:var(--warn)" title="Más km que el plan original: se agregaron o movieron paradas">+${fmtN(-sv, 0)}%</small>` : ''; })() : ''}</div>
         <div class="progress"><i style="width:${r.stops ? (r.delivered / r.stops) * 100 : 0}%;background:var(--ok)"></i><i style="width:${r.stops ? (r.failed / r.stops) * 100 : 0}%;background:var(--bad)"></i></div>
         <div class="row between" style="margin-top:8px"><small class="muted">${done}/${r.stops} visitadas · ${r.loaded} en vehículo</small><button class="btn sm" data-route="${r.id}">Ver detalle</button></div></div>`;
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
@@ -1071,8 +1108,12 @@ async function viewRoutes(v) {
   const all = [depotLatLng()];
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name));
   const dets = await Promise.all(routes.map((r) => GET('/api/routes/' + r.id)));
-  dets.forEach((d, i) => all.push(...drawRoute(map, d.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { depot: false, fit: false })));
-  for (const o of pending) if (o.lat != null) { L.circleMarker([o.lat, o.lng], { radius: 6, color: '#7b8a85', fillOpacity: 0.7 }).addTo(map).bindPopup(`${esc(o.tracking_code)}<br>${esc(o.customer_name)}`); all.push([o.lat, o.lng]); }
+  dets.forEach((d, i) => all.push(...drawRoute(map, d.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { depot: false, fit: false, onEdit: () => render() })));
+  for (const o of pending) if (o.lat != null) {
+    const mk = L.marker([o.lat, o.lng], { icon: pinIcon('•', '#7b8a85') }).addTo(map).bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}<br>${esc(o.tracking_code)} · sin ruta${stopEditButtons()}`);
+    wireStopEdit(map, mk, o, () => render());
+    all.push([o.lat, o.lng]);
+  }
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
   $$('[data-route]', v).forEach((b) => (b.onclick = () => routeDetail(b.dataset.route)));
 
@@ -1137,7 +1178,7 @@ async function routeDetail(id) {
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
-  drawRoute(map, r.stops);
+  drawRoute(map, r.stops, undefined, { onEdit: () => { m.el.remove(); routeDetail(r.id); } });
   if (r.last_lat) L.marker([r.last_lat, r.last_lng], { icon: truckIcon() }).addTo(map).bindPopup('Última posición ' + fmtDT(r.last_seen));
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#ropt', m.el).onclick = async () => { const o = await POST(`/api/routes/${r.id}/optimize`); toast(`Re-optimizada: ${o.distance_km} km`, 'ok'); m.el.remove(); routeDetail(r.id); };
