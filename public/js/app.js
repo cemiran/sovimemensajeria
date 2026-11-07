@@ -3760,7 +3760,8 @@ async function viewScan(v) {
 async function viewDeliver(v, id, mode) {
   const o = await GET('/api/orders/' + id);
   const scannedParam = new URLSearchParams(location.hash.split('?')[1] || '').get('scanned') === '1';
-  let verified = scannedParam;
+  // entrega armada en campo por el mismo repartidor: no trae etiqueta impresa; el equipo ya se eligió por su S/N
+  let verified = scannedParam || (o.created_by === store.user.id && store.user.role === 'repartidor');
   let photo = null;
   const isFail = mode === 'fail';
   const needPhoto = !isFail && SETTINGS.require_photo === '1';
@@ -3848,7 +3849,7 @@ function viewNewCustomer(v) {
   const search = async (q) => {
     if (q.trim().length < 2) return ($('#dcRes').innerHTML = '<p class="muted">Escribe al menos 2 letras o números.</p>');
     const r = await GET('/api/customers?limit=30&q=' + encodeURIComponent(q.trim()));
-    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.open_orders ? `<span class="chip">${c.open_orders} pedido${c.open_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
+    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.active_orders ? `<span class="chip">${c.active_orders} pedido${c.active_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
     $$('[data-c]', v).forEach((b) => (b.onclick = () => pickForCustomer(Number(b.dataset.c))));
   };
   let t;
@@ -3862,12 +3863,14 @@ function viewNewCustomer(v) {
     const box = $('#dcPick');
     box.innerHTML = `<div class="card" style="margin-top:12px">
       <div class="row between"><div><b style="font-size:18px">${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}</small><br>
-        ${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone')} ${esc(c.phone)}</a>` : ''}${c.phone_alt ? ` · <a href="tel:${esc(c.phone_alt)}">${esc(c.phone_alt)}</a>` : ''}</div>
+        <div class="row" style="margin-top:6px;gap:6px">${c.phone ? `<a class="btn sm" href="tel:${esc(c.phone)}">${icon('phone')} ${esc(c.phone)}</a>` : ''}${c.phone_alt ? `<a class="btn sm" href="tel:${esc(c.phone_alt)}">${icon('phone')} ${esc(c.phone_alt)}</a>` : ''}</div></div>
 </div>
       ${mineOpen.length ? `<div class="info-bar" style="margin-top:10px">${icon('box')} Ya tienes ${mineOpen.length === 1 ? 'un pedido' : mineOpen.length + ' pedidos'} para este cliente en tu ruta: ${mineOpen.map((s) => `<button class="btn sm primary" data-dlv="${s.id}">Entregar ${esc(s.tracking_code)}</button>`).join(' ')}</div>` : ''}
       <h3>¿Qué le vas a entregar?</h3>
-      ${items.length ? items.map((it) => `<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">traes ${it.qty}</small></div>
-        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span></label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
+      ${items.length ? `<div class="row" style="margin-bottom:8px"><input id="dcPq" class="grow" placeholder="Buscar producto o S/N en lo que traes" autocomplete="off" /></div>
+        <div id="dcSel" class="muted" style="margin-bottom:6px">Nada seleccionado</div>` : ''}
+      ${items.length ? items.map((it) => `<div class="card dc-item" data-name="${esc(normH(it.name + ' ' + it.sku))}" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">traes ${it.qty}</small></div>
+        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row dc-sn" data-s="${esc(normH(s.serial))}" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span></label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
           : `<div class="row" style="margin-top:6px"><label class="row"><input type="checkbox" data-pp="${it.product_id}" /> Entregar</label><input type="number" min="1" max="${it.qty}" value="1" data-pq="${it.product_id}" style="width:90px" /></div>`}</div>`).join('')
         : '<div class="card empty">No traes inventario asignado. Pide al almacén que te lo asigne.</div>'}
       ${items.some((it) => it.serialized) ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
@@ -3875,6 +3878,27 @@ function viewNewCustomer(v) {
       <button class="btn primary lg block" id="dcGo" style="margin-top:10px" ${items.length ? '' : 'disabled'}>${icon('sign')} Crear entrega y registrar</button></div>`;
     box.scrollIntoView({ behavior: 'smooth' });
     $$('[data-dlv]', box).forEach((b) => (b.onclick = () => (location.hash = '#/deliver/' + b.dataset.dlv)));
+    // buscar dentro de lo que trae: por nombre / SKU del producto o por número de serie
+    const updSel = () => {
+      const nSn = $$('[data-sn]', box).filter((x) => x.checked).length;
+      const nP = $$('[data-pp]', box).filter((x) => x.checked).reduce((a, x) => a + (Number($(`[data-pq="${x.dataset.pp}"]`, box).value) || 1), 0);
+      const el = $('#dcSel', box);
+      if (el) el.innerHTML = nSn || nP ? `<b>Seleccionado: ${[nSn ? `${nSn} equipo${nSn === 1 ? '' : 's'} con S/N` : '', nP ? `${nP} pieza${nP === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ')}</b>` : 'Nada seleccionado';
+    };
+    $$('[data-sn], [data-pp], [data-pq]', box).forEach((x) => x.addEventListener(x.matches('[data-pq]') ? 'input' : 'change', () => {
+      if (x.matches('[data-pq]')) { const cb = $(`[data-pp="${x.dataset.pq}"]`, box); if (cb) cb.checked = true; }
+      updSel();
+    }));
+    $('#dcPq')?.addEventListener('input', (e) => {
+      const q = normH(e.target.value);
+      $$('.dc-item', box).forEach((card) => {
+        const byName = !q || card.dataset.name.includes(q);
+        const sns = $$('.dc-sn', card);
+        let anySn = false;
+        sns.forEach((l) => { const hit = byName || l.dataset.s.includes(q); l.hidden = !hit; anySn ||= hit; });
+        card.hidden = !(byName || anySn);
+      });
+    });
     $('#dcScan')?.addEventListener('click', () => openScanner({
       title: 'Escanear S/N a entregar',
       onCode: async (code) => {
@@ -3882,6 +3906,8 @@ function viewNewCustomer(v) {
         const cb = $$('[data-sn]', box).find((x) => x.dataset.sn.toUpperCase() === sn);
         if (!cb) throw new Error('Ese S/N no está en tu inventario libre');
         cb.checked = true;
+        cb.closest('.dc-item').hidden = false; cb.closest('.dc-sn').hidden = false;
+        updSel();
         return sn + ' seleccionado';
       },
     }));
