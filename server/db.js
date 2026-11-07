@@ -408,4 +408,26 @@ CREATE TABLE IF NOT EXISTS custody_log (
 CREATE INDEX IF NOT EXISTS idx_custody_driver ON custody_log(driver_id, created_at);
 `);
 
+// ---- Clientes mayoristas (empresas a las que Sovime da el servicio de entrega) ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  legal_name TEXT,
+  rfc TEXT,
+  contact_name TEXT,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  rate_delivery REAL NOT NULL DEFAULT 0,
+  rate_failed REAL NOT NULL DEFAULT 0,
+  payment_terms TEXT,
+  notes TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+addCols('orders', [['account_id', 'INTEGER REFERENCES accounts(id)']]);
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, scheduled_date)');
+
 module.exports = { db, tx, getSettings, DATA_DIR, UPLOAD_DIR };

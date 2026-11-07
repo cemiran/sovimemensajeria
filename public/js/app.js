@@ -28,6 +28,7 @@ const I = {
   chart: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-6"/>',
   cog: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-2.7 1.1V21a2 2 0 11-4 0v-.1a1.6 1.6 0 00-2.7-1.1l-.1.1a2 2 0 11-2.8-2.8l.1-.1A1.6 1.6 0 003 15H3a2 2 0 110-4h.1a1.6 1.6 0 001.1-2.7l-.1-.1a2 2 0 112.8-2.8l.1.1A1.6 1.6 0 009 4.6V3a2 2 0 114 0v.1a1.6 1.6 0 002.7 1.1l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 001.1 2.7H21a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"/>',
   person: '<circle cx="12" cy="7" r="4"/><path d="M4 21v-1a8 8 0 0116 0v1"/>',
+  building: '<path d="M3 21h18M5 21V5a2 2 0 012-2h7a2 2 0 012 2v16M16 9h3a2 2 0 012 2v10M9 7h2M9 11h2M9 15h2"/>',
   scan: '<path d="M3 7V4h3M21 7V4h-3M3 17v3h3M21 17v3h-3M7 8v8M10 8v8M13 8v8M17 8v8"/>',
   truck: '<path d="M1 4h14v12H1zM15 9h4l3 3v4h-7"/><circle cx="5.5" cy="18.5" r="2"/><circle cx="18.5" cy="18.5" r="2"/>',
   history: '<path d="M3 12a9 9 0 109-9 9.7 9.7 0 00-6.7 2.8L3 8"/><path d="M3 3v5h5M12 7v5l4 2"/>',
@@ -676,7 +677,7 @@ function viewForcePassword() {
 // ================= Shell =================
 const NAV_GROUPS = [
   ['Operación', [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['live', 'Mapa en vivo', 'live'], ['receipts', 'Recepciones', 'sign'], ['messages', 'Mensajes', 'chat']]],
-  ['Catálogos', [['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['customers', 'Clientes', 'person']]],
+  ['Catálogos', [['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
@@ -773,18 +774,20 @@ async function viewOrders(v) {
   const st = p.get('status') || '';
   const date = p.get('date') ?? today();
   const q = p.get('q') || '';
-  const data = await GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}`);
+  const acc = p.get('account_id') || '';
+  const [data, accs] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}`), GET('/api/accounts').catch(() => ({ rows: [] }))]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Buscar por guía</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
       <input name="q" placeholder="Guía, cliente o dirección" value="${esc(q)}" class="grow" style="max-width:280px" />
       <input type="date" name="date" value="${esc(date)}" style="max-width:170px" />
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
+      ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
     <div class="table-wrap"><table><thead><tr><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Sin pedidos</td></tr>'}
+    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
@@ -802,6 +805,7 @@ async function orderDetail(id) {
       <div class="stack">
         <dl class="kv">
           <dt>Estado</dt><dd>${badge(o.status)} ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</dd>
+          ${staff ? `<dt>Mayorista</dt><dd id="oAcc">${o.account_name ? `<b>${esc(o.account_name)}</b>` : '<span class="muted">Sin mayorista</span>'} <button class="btn sm ghost" id="oAccEd">Cambiar</button></dd>` : ''}
           <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b><br>${o.customer_phone ? `<a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}</dd>
           <dt>Dirección</dt><dd>${esc(o.address)}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}</dd>
           <dt>Ventana</dt><dd>${o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
@@ -863,6 +867,11 @@ async function orderDetail(id) {
     L.marker([o.lat, o.lng], { icon: pinIcon('C', '#1d5a96') }).addTo(map).bindPopup('Cliente');
     for (const e of o.evidences) if (e.lat) L.circleMarker([e.lat, e.lng], { radius: 8, color: e.result === 'entregado' ? '#1f8a4c' : '#c0392b' }).addTo(map).bindPopup('GPS del repartidor');
   }
+  $('#oAccEd', m.el)?.addEventListener('click', async () => {
+    const { rows } = await GET('/api/accounts');
+    $('#oAcc', m.el).innerHTML = `<div class="row"><select id="oAccSel"><option value="">— Sin mayorista —</option>${rows.filter((a) => a.active || a.id === o.account_id).map((a) => `<option value="${a.id}" ${a.id === o.account_id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><button class="btn sm primary" id="oAccOk">Guardar</button></div>`;
+    $('#oAccOk', m.el).onclick = async () => { try { await api('PUT', `/api/orders/${o.id}/account`, { account_id: $('#oAccSel', m.el).value || null }); toast('Mayorista actualizado', 'ok'); m.close(); orderDetail(o.id); } catch (e) { toast(e.message, 'bad'); } };
+  });
   $('#cancel', m.el)?.addEventListener('click', async () => {
     if (!(await confirmDlg('¿Cancelar el pedido? El stock regresará al inventario.'))) return;
     await POST(`/api/orders/${o.id}/cancel`); toast('Pedido cancelado', 'ok'); m.close(); render();
@@ -883,6 +892,7 @@ async function orderForm(done) {
         <div class="row"><input id="custQ" class="grow" placeholder="Buscar por nombre, teléfono o dirección" autocomplete="off" /><button type="button" class="btn" id="newCust">${icon('plus')} Nuevo</button></div>
         <div id="custRes"></div><div id="custSel" style="margin-top:6px"></div>
       </div>
+      <label class="f">Mayorista (empresa que nos envía el pedido)<select id="oacc"><option value="">— Sin mayorista —</option></select></label>
       <div class="grid g3">
         <label class="f">Fecha de entrega<input type="date" id="odate" value="${today()}" /></label>
         <label class="f">Prioridad<select id="oprio"><option value="normal">Normal</option><option value="alta">Urgente</option></select></label>
@@ -923,11 +933,12 @@ async function orderForm(done) {
     $('#prodRes', m.el).innerHTML = `<table>${r.rows.map((p) => `<tr class="click" data-p='${esc(JSON.stringify(p))}'><td>${esc(p.name)}</td><td class="r num">${p.stock}</td></tr>`).join('')}</table>`;
   }, 250); };
   $('#prodRes', m.el).onclick = (e) => { const tr = e.target.closest('[data-p]'); if (!tr) return; addProd(JSON.parse(tr.dataset.p)); $('#prodRes', m.el).innerHTML = ''; $('#prodQ', m.el).value = ''; };
+  GET('/api/accounts').then(({ rows }) => { const act = rows.filter((a) => a.active); $('#oacc', m.el).insertAdjacentHTML('beforeend', act.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')); if (act.length === 1) $('#oacc', m.el).value = act[0].id; }).catch(() => {});
   $('#scanProd', m.el).onclick = () => openScanner({ title: 'Escanear productos', continuous: true, onCode: async (c) => { const p = await GET('/api/products/barcode/' + encodeURIComponent(c)); addProd(p); return p.name; } });
   $('#saveOrder', m.el).onclick = async () => {
     if (!customer) return toast('Selecciona o registra el cliente', 'bad');
     try {
-      const o = await POST('/api/orders', { customer_id: customer.id, items: items.map(({ product_id, qty }) => ({ product_id, qty })), scheduled_date: $('#odate', m.el).value, priority: $('#oprio', m.el).value, cod_amount: $('#ocod', m.el).value, notes: $('#onotes', m.el).value, tracking_code: $('#ocode', m.el).value,
+      const o = await POST('/api/orders', { account_id: $('#oacc', m.el).value || null, customer_id: customer.id, items: items.map(({ product_id, qty }) => ({ product_id, qty })), scheduled_date: $('#odate', m.el).value, priority: $('#oprio', m.el).value, cod_amount: $('#ocod', m.el).value, notes: $('#onotes', m.el).value, tracking_code: $('#ocode', m.el).value,
         shipment_type: $('#oship', m.el).value, temp_min: tempRange()[0], temp_max: tempRange()[1], requires_seal: $('#oreqseal', m.el).checked, seal_number: $('#oseal', m.el).value });
       toast(`Pedido ${o.tracking_code} creado`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
     } catch (e) { toast(e.message, 'bad'); }
@@ -1586,6 +1597,119 @@ function receiveSerials(products, preselect) {
   });
 }
 
+// ================= Clientes mayoristas =================
+const mxn = (n) => '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+async function viewAccounts(v) {
+  const { rows, unassigned } = await GET('/api/accounts');
+  const admin = store.user.role === 'admin';
+  const pct = (a) => (a.delivered + a.failed ? Math.round((a.delivered / (a.delivered + a.failed)) * 100) + '%' : '—');
+  v.innerHTML = topbar('Clientes mayoristas', admin ? `<button class="btn primary" id="accNew">${icon('plus')} Mayorista</button>` : '', 'Empresas a las que les damos el servicio de entrega: sus pedidos, resultados y estado de cuenta.') + `
+    ${unassigned && rows.length ? `<div class="info-bar">${icon('info')} Hay <b>${unassigned}</b> pedidos sin mayorista. Abre un mayorista y usa <b>Ligar pedidos</b> para asignárselos.</div>` : ''}
+    ${rows.length ? `<div class="grid g3" style="margin-top:10px">${rows.map((a) => `<button class="card kpi-btn acc-card" data-acc="${a.id}" style="text-align:left;${a.active ? '' : 'opacity:.6'}">
+      <div class="row between"><b style="font-size:17px">${icon('building')} ${esc(a.name)}</b>${a.active ? '' : '<span class="chip off">Inactivo</span>'}</div>
+      <small class="muted">${esc(a.contact_name || '')}${a.phone ? ' · ' + esc(a.phone) : ''}</small>
+      <div class="grid g4" style="margin-top:10px;gap:6px">
+        <div><small class="muted">Pedidos</small><br><b>${fmtN(a.orders_total)}</b></div>
+        <div><small class="muted">Abiertos</small><br><b>${fmtN(a.open || 0)}</b></div>
+        <div><small class="muted">Entregados</small><br><b style="color:var(--ok)">${fmtN(a.delivered || 0)}</b></div>
+        <div><small class="muted">Éxito</small><br><b>${pct(a)}</b></div></div>
+      <small class="muted">Tarifa: ${mxn(a.rate_delivery)} por entrega${a.rate_failed ? ` · ${mxn(a.rate_failed)} por intento fallido` : ''}</small></button>`).join('')}</div>`
+      : `<div class="card empty">${icon('building')}<br>Aún no hay mayoristas.<br><small class="muted">Da de alta a las empresas que te envían entregas (p. ej. Telnor / Anderns) para separar sus pedidos y sacar su estado de cuenta.</small></div>`}`;
+  $('#accNew')?.addEventListener('click', () => accountForm(null));
+  $$('[data-acc]', v).forEach((b) => (b.onclick = () => accountDetail(Number(b.dataset.acc))));
+}
+
+function accountForm(a) {
+  a = a || { active: 1 };
+  const m = modal(a.id ? `Editar ${a.name}` : 'Nuevo mayorista', `<form id="accF" class="stack">
+    <div class="grid g2"><label class="f">Nombre comercial *<input name="name" required value="${esc(a.name)}" placeholder="Telnor / Anderns" /></label>
+      <label class="f">Razón social<input name="legal_name" value="${esc(a.legal_name)}" /></label></div>
+    <div class="grid g3"><label class="f">RFC<input name="rfc" value="${esc(a.rfc)}" style="text-transform:uppercase" /></label>
+      <label class="f">Contacto<input name="contact_name" value="${esc(a.contact_name)}" /></label>
+      <label class="f">Teléfono<input name="phone" type="tel" value="${esc(a.phone)}" /></label></div>
+    <div class="grid g2"><label class="f">Correo<input name="email" type="email" value="${esc(a.email)}" /></label>
+      <label class="f">Condiciones de pago<input name="payment_terms" value="${esc(a.payment_terms)}" placeholder="Semanal, 15 días…" /></label></div>
+    <label class="f">Domicilio<input name="address" value="${esc(a.address)}" /></label>
+    <fieldset><legend>Tarifas del servicio</legend><div class="grid g2">
+      <label class="f">Por entrega exitosa ($)<input name="rate_delivery" type="number" min="0" step="0.01" value="${a.rate_delivery ?? ''}" placeholder="0.00" /></label>
+      <label class="f">Por intento fallido ($)<input name="rate_failed" type="number" min="0" step="0.01" value="${a.rate_failed ?? ''}" placeholder="0.00" /></label></div>
+      <small class="muted">Se usan para calcular el estado de cuenta del periodo.</small></fieldset>
+    <label class="f">Notas<textarea name="notes">${esc(a.notes)}</textarea></label>
+    ${a.id ? `<label class="row"><input type="checkbox" name="active" ${a.active ? 'checked' : ''} /> Activo</label>` : ''}</form>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="accSave">Guardar</button>' });
+  $('#accSave', m.el).onclick = async () => {
+    const f = $('#accF', m.el);
+    if (!f.reportValidity()) return;
+    const b = Object.fromEntries(new FormData(f));
+    if (a.id) b.active = !!f.active?.checked;
+    try {
+      if (a.id) await PUT('/api/accounts/' + a.id, b); else await POST('/api/accounts', b);
+      toast('Mayorista guardado', 'ok'); m.close(); render();
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+}
+
+async function accountDetail(id) {
+  const a = await GET('/api/accounts/' + id);
+  const admin = store.user.role === 'admin';
+  const first = today().slice(0, 8) + '01';
+  const m = modal(a.name, `<div class="stack">
+    <div class="row between"><div><small class="muted">${esc(a.legal_name || '')}${a.rfc ? ' · RFC ' + esc(a.rfc) : ''}</small><br>${esc(a.contact_name || '')} ${a.phone ? `· <a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ''} ${a.email ? `· <a href="mailto:${esc(a.email)}">${esc(a.email)}</a>` : ''}</div>
+      <div class="row">${admin ? `<button class="btn sm" id="adEdit">${icon('cog')} Editar</button>` : ''}<a class="btn sm" href="#/orders?date=&account_id=${a.id}">${icon('box')} Ver pedidos</a><button class="btn sm" id="adLink">${icon('plus')} Ligar pedidos</button></div></div>
+    <div class="grid g4">
+      <div class="card kpi"><div class="label">Pedidos</div><div class="value">${fmtN(a.orders_total)}</div></div>
+      <div class="card kpi"><div class="label">Abiertos</div><div class="value">${fmtN(a.open || 0)}</div></div>
+      <div class="card kpi"><div class="label">Entregados</div><div class="value" style="color:var(--ok)">${fmtN(a.delivered || 0)}</div></div>
+      <div class="card kpi"><div class="label">Fallidos</div><div class="value" style="color:var(--bad)">${fmtN(a.failed || 0)}</div></div></div>
+    ${a.by_day.length ? `<div><h3>Por día</h3><div class="table-wrap" style="max-height:200px"><table><thead><tr><th>Fecha</th><th class="r">Pedidos</th><th class="r">Entregados</th><th class="r">Fallidos</th></tr></thead><tbody>
+      ${a.by_day.map((d) => `<tr><td class="num">${esc(d.day)}</td><td class="r num">${d.total}</td><td class="r num">${d.delivered || 0}</td><td class="r num">${d.failed || 0}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+    <div class="card" style="padding:12px"><h3 style="margin-top:0">${icon('chart')} Estado de cuenta</h3>
+      <div class="row"><label class="f">Desde<input type="date" id="stFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="stTo" value="${today()}" /></label>
+        <button class="btn" id="stGo">Calcular</button><button class="btn" id="stCsv">${icon('download')} Excel (CSV)</button></div>
+      <div id="stOut" style="margin-top:8px"></div></div>
+    ${a.notes ? `<p class="muted">${esc(a.notes)}</p>` : ''}</div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
+  $('#adEdit', m.el)?.addEventListener('click', () => { m.close(); accountForm(a); });
+  const stmt = async () => {
+    const r = await GET(`/api/accounts/${a.id}/statement?from=${$('#stFrom', m.el).value}&to=${$('#stTo', m.el).value}`);
+    const t = r.totals;
+    $('#stOut', m.el).innerHTML = `<div class="grid g3">
+        <div><small class="muted">Entregas exitosas</small><br><b>${t.delivered}</b> × ${mxn(r.account.rate_delivery)} = <b>${mxn(t.amount_delivered)}</b></div>
+        <div><small class="muted">Intentos fallidos</small><br><b>${t.failed}</b> × ${mxn(r.account.rate_failed)} = <b>${mxn(t.amount_failed)}</b></div>
+        <div><small class="muted">Total del periodo</small><br><b style="font-size:20px">${mxn(t.total)}</b></div></div>
+      ${r.rows.length ? `<div class="table-wrap" style="max-height:260px;margin-top:8px"><table><thead><tr><th>Guía</th><th>Fecha</th><th>Cliente</th><th>Resultado</th><th class="r">Importe</th></tr></thead><tbody>
+        ${r.rows.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td class="num">${esc(x.scheduled_date)}</td><td>${esc(x.customer)}${x.serials ? `<br><small class="muted mono">${esc(x.serials)}</small>` : ''}</td><td>${badge(x.status)}${x.reason ? `<br><small class="muted">${esc(x.reason)}</small>` : ''}</td><td class="r num">${mxn(x.amount)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Sin entregas ni intentos fallidos en este periodo.</p>'}`;
+  };
+  $('#stGo', m.el).onclick = () => stmt().catch((e) => toast(e.message, 'bad'));
+  $('#stCsv', m.el).onclick = async () => {
+    try {
+      const res = await fetch(`/api/accounts/${a.id}/statement?format=csv&from=${$('#stFrom', m.el).value}&to=${$('#stTo', m.el).value}`, { headers: { Authorization: 'Bearer ' + store.token } });
+      if (!res.ok) throw new Error('No se pudo generar el archivo');
+      const blob = await res.blob();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'estado-de-cuenta.csv';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  stmt().catch(() => {});
+  $('#adLink', m.el).onclick = async () => {
+    const { unassigned } = await GET('/api/accounts');
+    const m2 = modal(`Ligar pedidos a ${a.name}`, `<div class="stack">
+      <label class="radio"><input type="radio" name="lk" value="date" checked /> <span>Los pedidos sin mayorista de la fecha <input type="date" id="lkDate" value="${today()}" style="width:auto" /></span></label>
+      <label class="radio"><input type="radio" name="lk" value="all" /> <span>Todos los pedidos sin mayorista <small class="muted">(${unassigned})</small></span></label>
+      <small class="muted">Los pedidos que ya tienen otro mayorista no se cambian. Para cambiar uno en particular, ábrelo en Pedidos.</small></div>`,
+      { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="lkGo">Ligar</button>' });
+    $('#lkGo', m2.el).onclick = async () => {
+      const mode = $('input[name=lk]:checked', m2.el).value;
+      try {
+        const r = await POST(`/api/accounts/${a.id}/orders`, mode === 'all' ? { all_unassigned: true } : { date: $('#lkDate', m2.el).value });
+        toast(`${r.updated} pedidos ligados a ${a.name}`, 'ok'); m2.close(); m.close(); accountDetail(a.id);
+      } catch (e) { toast(e.message, 'bad'); }
+    };
+  };
+}
+
 // ================= Inventario asignado a repartidores =================
 function assignToDriver(drivers, products, preDriver) {
   const act = drivers.filter((d) => d.active);
@@ -1824,6 +1948,7 @@ function importCustomers() {
     const nh = headers.map(normH);
     const noteCols = nh.map((h, i) => (NOTE_HINTS.includes(h) ? i : -1)).filter((i) => i >= 0);
     const products = (await GET('/api/products?limit=500')).rows;
+    const accounts = (await GET('/api/accounts').catch(() => ({ rows: [] }))).rows.filter((a) => a.active);
     const tomorrow = new Date(Date.now() + 864e5).toLocaleDateString('en-CA');
     const opt = (k) => `<option value="">— No usar —</option>${headers.map((h, i) => `<option value="${i}" ${map[k] === i ? 'selected' : ''}>${esc(h || 'Columna ' + (i + 1))}</option>`).join('')}`;
     body.innerHTML = `<div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} clientes · encabezados en la fila ${hr + 1}</small></div><button class="btn sm" id="ciBack">Cambiar archivo</button></div>
@@ -1837,6 +1962,7 @@ function importCustomers() {
           <label class="f">Producto a entregar<select id="ciProd"><option value="">— Sin producto —</option>${products.map((p) => `<option value="${p.id}">${esc(p.name)}${p.serialized ? ' (con S/N)' : ''} · existencia ${p.stock}</option>`).join('')}</select></label>
           <label class="f">Cantidad por cliente<input id="ciQty" type="number" min="1" value="1" /></label>
           <label class="f">Fecha de entrega<input id="ciDate" type="date" value="${tomorrow}" /></label></div>
+        <label class="f">Mayorista (empresa que nos envía estas entregas)<select id="ciAcc"><option value="">— Sin mayorista —</option>${accounts.map((a) => `<option value="${a.id}" ${accounts.length === 1 ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
         <label class="f">Nota para el repartidor<input id="ciNote" placeholder="Ej. Cambio de módem: recoger el equipo anterior" /></label>
         <label class="switch"><input type="checkbox" id="ciNotify" /><span></span><div><b>Avisar a los clientes ahora</b><br><small class="muted">Apagado: no se envía nada al crear; reciben sus avisos cuando el repartidor cargue y salga a entregar. Recomendado para cargas grandes o fuera de horario.</small></div></label></fieldset>
       <div class="row" style="justify-content:flex-end"><button class="btn primary" id="ciPrev">${icon('search')} Revisar antes de importar</button></div>`;
@@ -1855,7 +1981,7 @@ function importCustomers() {
         if (extra.length) o.notes = extra.join(' · ');
         return o;
       }).filter(Boolean);
-      const orders = $('#ciOrd', body).checked ? { create: true, product_id: $('#ciProd', body).value || null, qty: $('#ciQty', body).value, scheduled_date: $('#ciDate', body).value, notes: $('#ciNote', body).value, notify: $('#ciNotify', body).checked } : { create: false };
+      const orders = $('#ciOrd', body).checked ? { create: true, account_id: $('#ciAcc', body).value || null, product_id: $('#ciProd', body).value || null, qty: $('#ciQty', body).value, scheduled_date: $('#ciDate', body).value, notes: $('#ciNote', body).value, notify: $('#ciNotify', body).checked } : { create: false };
       e.currentTarget.disabled = true;
       try { step3(rows, orders, await POST('/api/customers/import', { rows, orders, dry_run: true })); }
       catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
@@ -3582,7 +3708,7 @@ async function render() {
   const driver = store.user.role === 'repartidor';
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
-    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());

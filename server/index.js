@@ -803,6 +803,123 @@ app.post(
   })
 );
 
+// ---------- Clientes mayoristas ----------
+const ACC_FIELDS = ['name', 'legal_name', 'rfc', 'contact_name', 'phone', 'email', 'address', 'payment_terms', 'notes'];
+function accountBody(b) {
+  const out = {};
+  for (const k of ACC_FIELDS) out[k] = b[k] == null ? null : String(b[k]).trim().slice(0, k === 'notes' || k === 'address' ? 500 : 120) || null;
+  if (!out.name) throw new HttpError(400, 'Escribe el nombre del mayorista');
+  if (out.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) throw new HttpError(400, 'Correo no válido');
+  for (const k of ['rate_delivery', 'rate_failed']) {
+    const v = b[k] === '' || b[k] == null ? 0 : Number(b[k]);
+    if (!Number.isFinite(v) || v < 0) throw new HttpError(400, 'La tarifa debe ser un número positivo');
+    out[k] = Math.round(v * 100) / 100;
+  }
+  out.active = b.active === false || b.active === 0 || b.active === '0' ? 0 : 1;
+  return out;
+}
+const ACC_STATS = `SELECT a.*,
+    COUNT(o.id) orders_total,
+    SUM(o.status = 'entregado') delivered,
+    SUM(o.status = 'fallido') failed,
+    SUM(o.status IN ('pendiente','asignado','cargado')) open,
+    SUM(o.status = 'cancelado') cancelled,
+    MAX(o.scheduled_date) last_date
+  FROM accounts a LEFT JOIN orders o ON o.account_id = a.id`;
+app.get('/api/accounts', auth(...STAFF), wrap((req, res) => {
+  const rows = db.prepare(`${ACC_STATS} GROUP BY a.id ORDER BY a.active DESC, a.name`).all();
+  const unassigned = db.prepare("SELECT COUNT(*) n FROM orders WHERE account_id IS NULL AND status <> 'cancelado'").get().n;
+  res.json({ rows, unassigned });
+}));
+app.get('/api/accounts/:id', auth(...STAFF), wrap((req, res) => {
+  const a = db.prepare(`${ACC_STATS} WHERE a.id = ? GROUP BY a.id`).get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  a.by_day = db.prepare(`SELECT scheduled_date day, COUNT(*) total, SUM(status='entregado') delivered, SUM(status='fallido') failed
+    FROM orders WHERE account_id = ? GROUP BY scheduled_date ORDER BY scheduled_date DESC LIMIT 30`).all(a.id);
+  res.json(a);
+}));
+app.post('/api/accounts', auth('admin'), wrap((req, res) => {
+  const b = accountBody(req.body || {});
+  try {
+    const r = db.prepare(`INSERT INTO accounts (${Object.keys(b).join(',')}) VALUES (${Object.keys(b).map(() => '?').join(',')})`).run(...Object.values(b));
+    audit(req, 'mayorista.alta', b.name);
+    res.status(201).json({ id: Number(r.lastInsertRowid) });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `Ya existe un mayorista llamado "${b.name}"`);
+    throw e;
+  }
+}));
+app.put('/api/accounts/:id', auth('admin'), wrap((req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  const b = accountBody({ ...a, ...req.body });
+  try {
+    db.prepare(`UPDATE accounts SET ${Object.keys(b).map((k) => `${k}=?`).join(', ')} WHERE id=?`).run(...Object.values(b), a.id);
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `Ya existe un mayorista llamado "${b.name}"`);
+    throw e;
+  }
+  audit(req, 'mayorista.editar', b.name);
+  res.json({ ok: true });
+}));
+// Ligar pedidos a un mayorista: { order_ids:[...] } o { date, only_unassigned } (todos los de un día)
+app.post('/api/accounts/:id/orders', auth(...STAFF), wrap((req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  const b = req.body || {};
+  let n = 0;
+  tx(() => {
+    if (Array.isArray(b.order_ids) && b.order_ids.length) {
+      const up = db.prepare('UPDATE orders SET account_id=? WHERE id=?');
+      for (const id of b.order_ids.slice(0, 5000)) n += up.run(a.id, Number(id)).changes;
+    } else if (b.date) {
+      n = db.prepare(`UPDATE orders SET account_id=? WHERE scheduled_date=? AND status <> 'cancelado' ${b.only_unassigned === false ? '' : 'AND account_id IS NULL'}`).run(a.id, String(b.date)).changes;
+    } else if (b.all_unassigned) {
+      n = db.prepare("UPDATE orders SET account_id=? WHERE account_id IS NULL AND status <> 'cancelado'").run(a.id).changes;
+    } else throw new HttpError(400, 'Indica los pedidos');
+  });
+  audit(req, 'mayorista.pedidos', `${n} pedidos → ${a.name}`);
+  res.json({ updated: n });
+}));
+app.put('/api/orders/:id/account', auth(...STAFF), wrap((req, res) => {
+  const o = db.prepare('SELECT id, tracking_code FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  const aid = req.body?.account_id ? Number(req.body.account_id) : null;
+  if (aid && !db.prepare('SELECT 1 FROM accounts WHERE id=?').get(aid)) throw new HttpError(400, 'Mayorista no encontrado');
+  db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(aid, o.id);
+  res.json({ ok: true });
+}));
+// Estado de cuenta: entregas y fallidos del periodo con la tarifa del mayorista (JSON o CSV para Excel)
+app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : today().slice(0, 8) + '01';
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today();
+  const rows = db.prepare(`SELECT o.tracking_code, o.scheduled_date, o.status, o.delivered_at, o.attempts, c.name customer, c.address, c.colonia, u.name driver,
+      (SELECT receiver_name FROM evidences e WHERE e.order_id = o.id AND e.result = o.status ORDER BY e.id DESC LIMIT 1) receiver,
+      (SELECT reason FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido' ORDER BY e.id DESC LIMIT 1) reason,
+      (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials
+    FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id
+    WHERE o.account_id = ? AND o.scheduled_date BETWEEN ? AND ? AND o.status IN ('entregado','fallido')
+    ORDER BY o.scheduled_date, o.tracking_code`).all(a.id, from, to);
+  for (const r of rows) r.amount = r.status === 'entregado' ? a.rate_delivery : a.rate_failed;
+  const del = rows.filter((r) => r.status === 'entregado').length;
+  const fail = rows.length - del;
+  const totals = { delivered: del, failed: fail, amount_delivered: del * a.rate_delivery, amount_failed: fail * a.rate_failed, total: del * a.rate_delivery + fail * a.rate_failed };
+  if (req.query.format === 'csv') {
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['Guía', 'Fecha', 'Resultado', 'Entregado', 'Cliente', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
+    const lines = rows.map((r) => [r.tracking_code, r.scheduled_date, r.status, r.delivered_at || '', r.customer, r.address, r.colonia, r.driver, r.receiver, r.reason, r.serials, r.amount.toFixed(2)].map(q).join(','));
+    lines.push('', [q('Entregados'), del, q('Tarifa'), a.rate_delivery.toFixed(2), q('Importe'), totals.amount_delivered.toFixed(2)].join(','));
+    lines.push([q('Fallidos'), fail, q('Tarifa'), a.rate_failed.toFixed(2), q('Importe'), totals.amount_failed.toFixed(2)].join(','));
+    lines.push([q('TOTAL'), '', '', '', '', totals.total.toFixed(2)].join(','));
+    const fname = `estado-de-cuenta-${a.name.replace(/[^\w-]+/g, '_')}-${from}-a-${to}.csv`;
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    return res.type('text/csv; charset=utf-8').send('﻿' + head.map(q).join(',') + '\n' + lines.join('\n'));
+  }
+  res.json({ account: a, from, to, rows, totals });
+}));
+
 // ---------- Inventario asignado a repartidores ----------
 // Equipos con S/N: serials.holder_id. Productos sin S/N: driver_stock (cantidad por repartidor).
 // La existencia del almacén no cambia al asignar (el equipo sigue siendo de la empresa); solo cambia quién lo trae.
@@ -1148,6 +1265,7 @@ app.post(
     if (!rows.length) throw new HttpError(400, 'No hay filas para importar');
     if (rows.length > CUST_IMPORT_MAX) throw new HttpError(400, `Máximo ${CUST_IMPORT_MAX} clientes por importación`);
     const o = req.body.orders || {};
+    const accountId = o.account_id && db.prepare('SELECT id FROM accounts WHERE id=?').get(Number(o.account_id)) ? Number(o.account_id) : null;
     const makeOrders = !!o.create;
     const product = makeOrders && o.product_id ? db.prepare('SELECT * FROM products WHERE id=?').get(Number(o.product_id)) : null;
     if (makeOrders && o.product_id && !product) throw new HttpError(400, 'Producto no encontrado');
@@ -1207,6 +1325,7 @@ app.post(
                 const code = genTracking();
                 const oid = Number(db.prepare(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
                   VALUES (?,?,?,?,?,?,?,?)`).run(code, cid, date, 'normal', cleanTxt(o.notes, 300) || null, req.user.id, crypto.randomBytes(12).toString('hex'), stype).lastInsertRowid);
+                if (accountId) db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(accountId, oid);
                 if (product) {
                   db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
                   moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
@@ -1340,7 +1459,7 @@ app.get(
 // ---------- Pedidos ----------
 const ORDER_SELECT = `
   SELECT o.*, c.name customer_name, c.phone customer_phone, c.address, c.reference address_reference,
-         c.lat, c.lng, c.window_start, c.window_end, u.name driver_name
+         c.lat, c.lng, c.window_start, c.window_end, u.name driver_name, (SELECT name FROM accounts WHERE id = o.account_id) account_name
   FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id`;
 
 function loadOrder(id) {
@@ -1363,7 +1482,7 @@ app.get(
   '/api/orders',
   auth(),
   wrap((req, res) => {
-    const { status, date, driver_id, q, route_id, unrouted } = req.query;
+    const { status, date, driver_id, q, route_id, unrouted, account_id } = req.query;
     const { limit, offset } = paging(req);
     const where = [];
     const args = [];
@@ -1388,6 +1507,8 @@ app.get(
       args.push(route_id);
     }
     if (unrouted === '1') where.push('o.route_id IS NULL');
+    if (account_id === 'none') where.push('o.account_id IS NULL');
+    else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
       where.push('(o.tracking_code LIKE ? OR c.name LIKE ? OR c.address LIKE ?)');
       args.push(`%${q}%`, `%${q}%`, `%${q}%`);
@@ -1441,6 +1562,7 @@ app.post(
         .run(code, customer_id, scheduled_date || today(), priority === 'alta' ? 'alta' : 'normal', notes || null, Number(cod_amount) || 0, req.user.id,
           crypto.randomBytes(12).toString('hex'), stype, tmin, tmax, req.body.requires_seal ? 1 : 0, req.body.seal_number ? String(req.body.seal_number).trim().slice(0, 40) : null);
       const oid = Number(r.lastInsertRowid);
+      if (req.body.account_id && db.prepare('SELECT 1 FROM accounts WHERE id=?').get(Number(req.body.account_id))) db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(Number(req.body.account_id), oid);
       for (const it of items) {
         const qty = Math.abs(Math.trunc(Number(it.qty))) || 1;
         db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, it.product_id, qty);
