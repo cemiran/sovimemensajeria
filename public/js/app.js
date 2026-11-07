@@ -824,7 +824,7 @@ async function viewOrders(v) {
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
     <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['pendiente', 'asignado'].includes(o.status) ? '' : 'disabled title="Ya no se puede reasignar"'} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
+    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
@@ -1060,7 +1060,7 @@ async function viewCustomers(v) {
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.open_orders ? '' : 'disabled title="Sin pedidos abiertos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.open_orders ? `<br><small class="muted">${c.open_orders} abierto${c.open_orders === 1 ? '' : 's'}</small>` : ''}</td></tr>`).join('')}
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
@@ -1662,7 +1662,12 @@ async function bulkAssign(v, kind) {
     bar.innerHTML = `<b>${ids.length} ${kind === 'customers' ? 'cliente' : 'pedido'}${ids.length === 1 ? '' : 's'}</b>
       <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
       <input type="date" id="bkDate" value="${prev.f || today()}" title="Fecha de la ruta" />
-      <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button><button class="btn ghost" id="bkClr">Quitar selección</button>`;
+      <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button>
+      <span class="bulk-sep"></span>
+      <select id="bkSt"><option value="">Cambiar estado…</option><option value="pendiente">Pendiente (quitar de ruta / reprogramar)</option><option value="fallido">Fallido (intento no exitoso)</option>${store.user.role === 'admin' ? '<option value="entregado">Entregado (registro manual)</option>' : ''}<option value="cancelado">Cancelado</option></select>
+      <button class="btn" id="bkStGo">Aplicar</button>
+      <button class="btn ghost" id="bkClr">Quitar selección</button>`;
+    $('#bkStGo', bar).onclick = () => bulkStatus($('#bkSt', bar).value, kind, picked());
     if (prev.d) $('#bkDrv', bar).value = prev.d;
     $('#bkClr', bar).onclick = () => { boxes().forEach((c) => (c.checked = false)); draw(); };
     $('#bkGo', bar).onclick = async (e) => {
@@ -1687,6 +1692,39 @@ async function bulkAssign(v, kind) {
   $$('[data-sel]', v).forEach((c) => { c.onclick = (e) => e.stopPropagation(); c.onchange = draw; });
   $('#selAll', v)?.addEventListener('change', (e) => { boxes().forEach((c) => (c.checked = e.target.checked)); draw(); });
   v.bulkPicked = picked;
+}
+
+function bulkStatus(status, kind, ids) {
+  if (!status) return toast('Elige el nuevo estado', 'bad');
+  if (!ids.length) return;
+  const what = `${ids.length} ${kind === 'customers' ? `cliente${ids.length === 1 ? '' : 's'} (sus pedidos activos)` : `pedido${ids.length === 1 ? '' : 's'}`}`;
+  const T = {
+    pendiente: ['Regresar a pendiente', `Los pedidos de ${what} salen de su ruta y quedan pendientes para volver a asignarse.`],
+    fallido: ['Registrar intento fallido', `Se registra un intento no exitoso para ${what}.`],
+    entregado: ['Registrar entrega manual', `Se marcan como entregados ${what} <b>sin foto ni firma</b>. Úsalo solo cuando la entrega ocurrió y no se pudo registrar en la app; queda en la bitácora con tu nombre.`],
+    cancelado: ['Cancelar pedidos', `Se cancelan los pedidos de ${what}. Las piezas regresan al inventario y se liberan los números de serie.`],
+  }[status];
+  const m = modal(T[0], `<form id="bsF" class="stack"><p style="margin:0">${T[1]}</p>
+    ${status === 'pendiente' ? `<label class="f">Nueva fecha de entrega <small class="muted">(opcional)</small><input type="date" name="date" /></label>` : ''}
+    ${status === 'fallido' ? `<label class="f">Motivo *<select name="reason" required>${FAIL_REASONS.map((r) => `<option>${esc(r)}</option>`).join('')}</select></label>` : ''}
+    ${status === 'entregado' ? `<label class="f">¿Quién recibió? *<input name="receiver_name" required placeholder="Nombre de quien recibió" /></label>` : ''}
+    ${['fallido', 'entregado'].includes(status) ? `<label class="f">Nota<input name="note" maxlength="300" placeholder="Detalle para la bitácora" /></label>
+      <label class="row"><input type="checkbox" name="notify" /> Avisar a los clientes (WhatsApp / SMS / correo según la configuración)</label>` : ''}</form>`,
+    { footer: `<button class="btn" data-close>Volver</button><button class="btn ${status === 'cancelado' ? 'bad' : 'primary'}" id="bsGo">${T[0]}</button>` });
+  $('#bsGo', m.el).onclick = async (e) => {
+    const f = $('#bsF', m.el);
+    if (!f.reportValidity()) return;
+    const btn = e.currentTarget;
+    const fd = Object.fromEntries(new FormData(f));
+    btn.disabled = true;
+    try {
+      const r = await POST('/api/orders/bulk-status', { status, ...fd, notify: !!f.notify?.checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: ids });
+      toast(`${r.changed} pedido(s) ahora están ${STATUS[status].toLowerCase()}${r.skipped.length ? ` · ${r.skipped.length} no cambiaron` : ''}`, r.skipped.length ? '' : 'ok');
+      m.close();
+      if (r.skipped.length) modal('Pedidos que no cambiaron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
+      else render();
+    } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
 }
 
 // ================= Clientes mayoristas =================

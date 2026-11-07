@@ -717,3 +717,4 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .bulk-bar { position: sticky; bottom: 12px; z-index: 30; margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; background: var(--surface); border: 1px solid var(--primary); border-radius: 14px; box-shadow: 0 8px 24px rgba(16, 40, 70, .18); }
 .bulk-bar select, .bulk-bar input { width: auto; min-width: 140px; }
 @media (max-width: 760px) { .bulk-bar { bottom: 74px; } .bulk-bar select, .bulk-bar input { flex: 1 1 140px; } }
+.bulk-bar .bulk-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }

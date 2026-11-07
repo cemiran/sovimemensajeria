@@ -1192,6 +1192,8 @@ app.get(
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count,
            (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado')) open_orders,
+           (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado','cargado','fallido')) active_orders,
+           (SELECT o.status FROM orders o WHERE o.customer_id = c.id ORDER BY o.scheduled_date DESC, o.id DESC LIMIT 1) last_status,
            (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) driver_name
          FROM customers c ${w} ORDER BY c.name LIMIT ? OFFSET ?`
       )
@@ -1234,7 +1236,12 @@ app.put(
 // El navegador (o un script en el servidor) manda filas normalizadas. Con dry_run calcula todo sin guardar.
 // Por defecto NO avisa a los clientes al crear los pedidos (evita una ráfaga de WhatsApp/correos).
 const CUST_IMPORT_MAX = 3000;
-const cleanTxt = (v, max = 200) => (v == null ? '' : String(v).replace(/\s+/g, ' ').trim().slice(0, max));
+// Los errores de fórmula de Excel (#N/A, #REF!…) cuentan como celda vacía
+const XL_ERR = /^#?(N\/A|NA|REF!|VALUE!|DIV\/0!|NAME\?|NULL!|NUM!|SPILL!|CALC!)$/i;
+const cleanTxt = (v, max = 200) => {
+  const t = v == null ? '' : String(v).replace(/\s+/g, ' ').trim();
+  return XL_ERR.test(t) ? '' : t.slice(0, max);
+};
 const digits = (v) => String(v ?? '').replace(/\D/g, '');
 function normCustomerRow(r) {
   const street = cleanTxt(r.street, 150);
@@ -1592,6 +1599,83 @@ app.post(
     });
     audit(req, 'pedido.cancelar', o.tracking_code);
     res.json({ ok: true });
+  })
+);
+// Rutas que perdieron paradas: se recalculan, o se eliminan si quedaron vacías y sin visitas
+function recalcRoutes(routeIds) {
+  const s = getSettings();
+  for (const rid of [...new Set(routeIds.filter(Boolean))]) {
+    const old = db.prepare('SELECT * FROM routes WHERE id=?').get(rid);
+    if (!old) continue;
+    const rest = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(rid).map((x) => x.id);
+    const closed = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(rid).c;
+    if (!rest.length && !closed) db.prepare('DELETE FROM routes WHERE id=?').run(rid);
+    else if (rest.length && old.status === 'planificada') persistRoute({ routeId: rid, driverId: old.driver_id, date: old.date, depot: { lat: old.depot_lat, lng: old.depot_lng }, orderIds: rest, settings: s });
+    else if (!rest.length) db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE id=?").run(rid);
+  }
+}
+// Cambio de estado masivo desde Clientes o Pedidos.
+// pendiente: lo quita de su ruta (opcional: nueva fecha) · cancelado: regresa existencias y libera S/N
+// fallido: registra el intento con motivo · entregado: registro manual sin evidencia (solo administrador, con quién recibió)
+const BULK_FROM = {
+  pendiente: ['asignado', 'cargado', 'fallido', 'pendiente'],
+  cancelado: ['pendiente', 'asignado', 'cargado', 'fallido'],
+  fallido: ['pendiente', 'asignado', 'cargado'],
+  entregado: ['pendiente', 'asignado', 'cargado', 'fallido'],
+};
+app.post(
+  '/api/orders/bulk-status',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const b = req.body || {};
+    const status = b.status;
+    if (!BULK_FROM[status]) throw new HttpError(400, 'Elige el nuevo estado');
+    if (status === 'entregado' && req.user.role !== 'admin') throw new HttpError(403, 'Solo el administrador puede marcar entregas manuales');
+    const reason = String(b.reason || '').trim().slice(0, 200);
+    const receiver = String(b.receiver_name || '').trim().slice(0, 120);
+    const note = String(b.note || '').trim().slice(0, 300);
+    if (status === 'fallido' && !reason) throw new HttpError(400, 'Indica el motivo del intento fallido');
+    if (status === 'entregado' && !receiver) throw new HttpError(400, 'Indica quién recibió');
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
+    let ids = (Array.isArray(b.order_ids) ? b.order_ids : []).map(Number).filter(Boolean);
+    if (Array.isArray(b.customer_ids) && b.customer_ids.length) {
+      const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
+      // de cada cliente se toman sus pedidos que todavía pueden pasar al nuevo estado
+      ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN (${BULK_FROM[status].map(() => '?').join(',')})`).all(...cids, ...BULK_FROM[status]).map((r) => r.id));
+    }
+    ids = [...new Set(ids)].slice(0, 3000);
+    if (!ids.length) throw new HttpError(400, 'La selección no tiene pedidos que puedan cambiar a ese estado');
+    const changed = [];
+    const skipped = [];
+    const routes = [];
+    const who = req.user.name || 'administración';
+    tx(() => {
+      for (const id of ids) {
+        const o = loadOrder(id);
+        if (!o) continue;
+        if (!BULK_FROM[status].includes(o.status)) { skipped.push({ tracking_code: o.tracking_code, reason: `está ${o.status}` }); continue; }
+        if (o.route_id) routes.push(o.route_id);
+        if (status === 'pendiente') {
+          db.prepare("UPDATE orders SET status='pendiente', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL, loaded_at=NULL, scheduled_date=COALESCE(?, scheduled_date) WHERE id=?").run(date, o.id);
+        } else if (status === 'cancelado') {
+          for (const it of o.items) moveStock(it.product_id, 'devolucion', it.qty, `Cancelación ${o.tracking_code}`, req.user.id);
+          releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado`);
+          db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL WHERE id=?").run(o.id);
+        } else {
+          const ev = db.prepare(`INSERT INTO evidences (order_id, driver_id, result, receiver_name, reason, notes, kind) VALUES (?,?,?,?,?,?, 'manual')`)
+            .run(o.id, o.driver_id || null, status, status === 'entregado' ? receiver : null, status === 'fallido' ? reason : null,
+              `Registro manual por ${who}${note ? ' · ' + note : ''}`);
+          db.prepare("UPDATE orders SET status=?, attempts=attempts+1, delivered_at=datetime('now') WHERE id=?").run(status, o.id);
+          if (status === 'entregado') { custodyOnDelivery(o.id, o.driver_id, req.user.id); deliverOrderSerials(o.id, req.user.id, receiver); }
+          notify.queueSheet(Number(ev.lastInsertRowid), o.id);
+          if (b.notify) notify.queueEvent(status, o.id);
+        }
+        changed.push(o.tracking_code);
+      }
+      recalcRoutes(routes);
+    });
+    if (changed.length) audit(req, 'pedidos.estado', `${changed.length} → ${status}${reason ? ' · ' + reason : ''}${receiver ? ' · recibió ' + receiver : ''}`);
+    res.json({ changed: changed.length, skipped });
   })
 );
 app.post(
