@@ -998,7 +998,7 @@ function customerForm(c, done) {
       </div>
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
       <div class="grid g3">
-        <label class="f">Ciudad<input name="city" value="${esc(c.city || 'Ciudad de México')}" /></label>
+        <label class="f">Ciudad<input name="city" value="${esc(c.city || SETTINGS.default_city || 'Tijuana')}" /></label>
         <label class="f">C.P.<input name="zip" value="${esc(c.zip)}" /></label>
         <label class="f">Referencias<input name="reference" value="${esc(c.reference)}" placeholder="Portón azul…" /></label>
       </div>
@@ -3839,9 +3839,68 @@ async function viewHistory(v) {
   $$('[data-id]', v).forEach((el) => (el.onclick = () => orderDetail(el.dataset.id)));
 }
 
+// Repartidor: buscar (o registrar) al cliente final y entregarle productos de lo que trae
 function viewNewCustomer(v) {
-  v.innerHTML = topbar('Registrar cliente') + `<div class="card empty"><p>Registra los datos del cliente final y su ubicación exacta en el mapa.</p><button class="btn primary lg" id="nc">${icon('plus')} Nuevo cliente</button></div>`;
-  $('#nc').onclick = () => customerForm(null, () => toast('Cliente registrado. El despacho podrá asignarle pedidos.', 'ok'));
+  v.innerHTML = topbar('Cliente', '', 'Busca al cliente, elige lo que le vas a entregar de tu inventario y registra la entrega.') + `
+    <div class="card"><form class="row" id="dcq"><input name="q" class="grow" placeholder="Nombre, teléfono o dirección" autocomplete="off" /><button class="btn primary">${icon('search')} Buscar</button></form>
+      <div id="dcRes" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:10px"><button class="btn" id="nc">${icon('plus')} Registrar cliente nuevo</button></div></div>
+    <div id="dcPick"></div>`;
+  const search = async (q) => {
+    if (q.trim().length < 2) return ($('#dcRes').innerHTML = '<p class="muted">Escribe al menos 2 letras o números.</p>');
+    const r = await GET('/api/customers?limit=30&q=' + encodeURIComponent(q.trim()));
+    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.open_orders ? `<span class="chip">${c.open_orders} pedido${c.open_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Regístralo con <b>Registrar cliente nuevo</b>.</p>';
+    $$('[data-c]', v).forEach((b) => (b.onclick = () => pickForCustomer(Number(b.dataset.c))));
+  };
+  let t;
+  $('#dcq').onsubmit = (e) => { e.preventDefault(); search(e.target.q.value); };
+  $('#dcq').q.oninput = (e) => { clearTimeout(t); t = setTimeout(() => search(e.target.value), 350); };
+  $('#nc').onclick = () => customerForm(null, (id) => { toast('Cliente registrado', 'ok'); pickForCustomer(id); });
+
+  async function pickForCustomer(cid) {
+    const [c, mine, myRoute] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null)]);
+    const mineOpen = (myRoute?.stops || []).filter((s) => s.customer_id === c.id && ['asignado', 'cargado'].includes(s.status));
+    const items = mine.items || [];
+    const box = $('#dcPick');
+    box.innerHTML = `<div class="card" style="margin-top:12px">
+      <div class="row between"><div><b style="font-size:18px">${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}</small><br>
+        ${c.phone ? `<a href="tel:${esc(c.phone)}">${icon('phone')} ${esc(c.phone)}</a>` : ''}${c.phone_alt ? ` · <a href="tel:${esc(c.phone_alt)}">${esc(c.phone_alt)}</a>` : ''}</div>
+        <button class="btn sm" id="dcEdit">${icon('person')} Editar</button></div>
+      ${mineOpen.length ? `<div class="info-bar" style="margin-top:10px">${icon('box')} Ya tienes ${mineOpen.length === 1 ? 'un pedido' : mineOpen.length + ' pedidos'} para este cliente en tu ruta: ${mineOpen.map((s) => `<button class="btn sm primary" data-dlv="${s.id}">Entregar ${esc(s.tracking_code)}</button>`).join(' ')}</div>` : ''}
+      <h3>¿Qué le vas a entregar?</h3>
+      ${items.length ? items.map((it) => `<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">traes ${it.qty}</small></div>
+        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span></label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
+          : `<div class="row" style="margin-top:6px"><label class="row"><input type="checkbox" data-pp="${it.product_id}" /> Entregar</label><input type="number" min="1" max="${it.qty}" value="1" data-pq="${it.product_id}" style="width:90px" /></div>`}</div>`).join('')
+        : '<div class="card empty">No traes inventario asignado. Pide al almacén que te lo asigne.</div>'}
+      ${items.some((it) => it.serialized) ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
+      <label class="f" style="margin-top:8px">Nota<input id="dcNote" maxlength="300" placeholder="Ej. instalación, cambio de equipo…" /></label>
+      <button class="btn primary lg block" id="dcGo" style="margin-top:10px" ${items.length ? '' : 'disabled'}>${icon('sign')} Crear entrega y registrar</button></div>`;
+    box.scrollIntoView({ behavior: 'smooth' });
+    $('#dcEdit').onclick = () => customerForm(c, () => pickForCustomer(c.id));
+    $$('[data-dlv]', box).forEach((b) => (b.onclick = () => (location.hash = '#/deliver/' + b.dataset.dlv)));
+    $('#dcScan')?.addEventListener('click', () => openScanner({
+      title: 'Escanear S/N a entregar',
+      onCode: async (code) => {
+        const sn = String(code).trim().replace(/^S\/?N[:\s]*/i, '').toUpperCase();
+        const cb = $$('[data-sn]', box).find((x) => x.dataset.sn.toUpperCase() === sn);
+        if (!cb) throw new Error('Ese S/N no está en tu inventario libre');
+        cb.checked = true;
+        return sn + ' seleccionado';
+      },
+    }));
+    $('#dcGo').onclick = async (e) => {
+      const btn = e.currentTarget;
+      const serials = $$('[data-sn]', box).filter((x) => x.checked).map((x) => x.dataset.sn);
+      const its = $$('[data-pp]', box).filter((x) => x.checked).map((x) => ({ product_id: Number(x.dataset.pp), qty: Number($(`[data-pq="${x.dataset.pp}"]`, box).value) || 1 }));
+      if (!serials.length && !its.length) return toast('Marca lo que vas a entregar', 'bad');
+      btn.disabled = true;
+      try {
+        const o = await POST('/api/my/orders', { customer_id: c.id, serials, items: its, notes: $('#dcNote').value });
+        toast(`Entrega ${o.tracking_code} creada`, 'ok');
+        location.hash = '#/deliver/' + o.id;
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    };
+  }
 }
 
 // ================= Router =================

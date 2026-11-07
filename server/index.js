@@ -985,6 +985,55 @@ app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 30`).all(req.user.id);
   res.json({ ...me, log });
 }));
+// El repartidor arma una entrega en campo: elige cliente y productos de lo que él trae (S/N o cantidad).
+// Se crea el pedido ya cargado en su unidad y se agrega a su ruta del día, listo para registrar la entrega.
+app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
+  const b = req.body || {};
+  const me = req.user.id;
+  const c = db.prepare('SELECT id, name FROM customers WHERE id=?').get(Number(b.customer_id));
+  if (!c) throw new HttpError(400, 'Elige el cliente');
+  const serials = [...new Set((Array.isArray(b.serials) ? b.serials : []).map(normSerial).filter(Boolean))];
+  const items = (Array.isArray(b.items) ? b.items : []).map((it) => ({ product_id: Number(it.product_id), qty: Math.trunc(Number(it.qty)) })).filter((it) => it.product_id && it.qty > 0);
+  if (!serials.length && !items.length) throw new HttpError(400, 'Elige al menos un producto de tu inventario');
+  const out = tx(() => {
+    const code = genTracking();
+    const oid = Number(db.prepare(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
+      VALUES (?,?,?,?,?,?,?,?)`).run(code, c.id, today(), 'normal', String(b.notes || '').trim().slice(0, 300) || null, me, crypto.randomBytes(12).toString('hex'), 'general').lastInsertRowid);
+    const qtyBy = new Map();
+    for (const sn of serials) {
+      const s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial=?').get(sn);
+      if (!s) throw new HttpError(409, `El S/N ${sn} no está registrado`);
+      if (s.holder_id !== me) throw new HttpError(409, `El S/N ${sn} no está en tu inventario`);
+      if (s.status !== 'disponible') throw new HttpError(409, `El S/N ${sn} ya está ligado a otro pedido`);
+      db.prepare("UPDATE serials SET status='asignado', order_id=?, assigned_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(oid, s.id);
+      serialEvent(s.id, 'asignado', oid, me, `Pedido ${code} (armado por el repartidor)`);
+      qtyBy.set(s.product_id, (qtyBy.get(s.product_id) || 0) + 1);
+    }
+    for (const it of items) {
+      const p = db.prepare('SELECT * FROM products WHERE id=?').get(it.product_id);
+      if (!p) throw new HttpError(400, 'Producto no encontrado');
+      if (p.serialized) throw new HttpError(400, `${p.name} se entrega por número de serie`);
+      const held = db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(me, p.id)?.qty || 0;
+      if (it.qty > held) throw new HttpError(409, `Solo traes ${held} de ${p.name}`);
+      qtyBy.set(p.id, (qtyBy.get(p.id) || 0) + it.qty);
+    }
+    for (const [pid, qty] of qtyBy) {
+      db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, pid, qty);
+      // la existencia libre baja como en cualquier pedido; si ya estaba apartada para otro pedido no se descuenta dos veces
+      const st = db.prepare('SELECT stock FROM products WHERE id=?').get(pid).stock;
+      if (st >= qty) moveStock(pid, 'salida', qty, `Pedido ${code}`, me);
+    }
+    // a su ruta del día (o una nueva) y ya en su unidad
+    const s = getSettings();
+    const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(me, today());
+    const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
+    persistRoute({ routeId: r?.id, name: `Ruta ${req.user.name || ''} ${today()}`.trim(), driverId: me, date: today(), depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}), orderIds: [...keep, oid], settings: s });
+    db.prepare("UPDATE orders SET status='cargado', loaded_at=datetime('now') WHERE id=?").run(oid);
+    return { id: oid, tracking_code: code };
+  });
+  audit(req, 'pedido.campo', `${out.tracking_code} → ${c.name}`);
+  res.status(201).json(out);
+}));
 app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
   res.json(db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
     JOIN products p ON p.id = l.product_id LEFT JOIN orders o ON o.id = l.order_id LEFT JOIN users u ON u.id = l.by_user
