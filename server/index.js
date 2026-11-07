@@ -1190,7 +1190,9 @@ app.get(
     const total = db.prepare(`SELECT COUNT(*) c FROM customers ${w}`).get(...args).c;
     const rows = db
       .prepare(
-        `SELECT c.*, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count
+        `SELECT c.*, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count,
+           (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado')) open_orders,
+           (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) driver_name
          FROM customers c ${w} ORDER BY c.name LIMIT ? OFFSET ?`
       )
       .all(...args, limit, offset);
@@ -1870,6 +1872,59 @@ app.post(
     const d = date || today();
     const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body), orderIds: order_ids.map(Number), settings: s, startTime: start_time });
     res.status(201).json(out);
+  })
+);
+// Asignación masiva: pedidos (o los pedidos abiertos de varios clientes) a un repartidor.
+// Se agregan a su ruta del día (o se crea) y la ruta se re-optimiza; las rutas de donde salieron se recalculan.
+app.post(
+  '/api/routes/assign',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const b = req.body || {};
+    const drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+    if (!drv) throw new HttpError(400, 'Elige el repartidor');
+    if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
+    let ids = (Array.isArray(b.order_ids) ? b.order_ids : []).map(Number).filter(Boolean);
+    if (Array.isArray(b.customer_ids) && b.customer_ids.length) {
+      const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
+      ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN ('pendiente','asignado')`).all(...cids).map((r) => r.id));
+    }
+    ids = [...new Set(ids)].slice(0, 2000);
+    if (!ids.length) throw new HttpError(400, 'No hay pedidos abiertos para asignar en la selección');
+    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+    const skipped = [];
+    const take = [];
+    for (const o of rows) {
+      if (!['pendiente', 'asignado'].includes(o.status)) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
+      else if (o.driver_id === drv.id && o.route_id) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
+      else take.push(o);
+    }
+    if (!take.length) return res.json({ assigned: 0, skipped, route_id: null });
+    const s = getSettings();
+    const fromRoutes = [...new Set(take.map((o) => o.route_id).filter(Boolean))];
+    const result = tx(() => {
+      // se sueltan de su ruta anterior
+      const free = db.prepare("UPDATE orders SET route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, status='pendiente' WHERE id=?");
+      for (const o of take) free.run(o.id);
+      // ruta del repartidor para ese día (abierta) o una nueva
+      const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(drv.id, date);
+      const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
+      const done = r ? db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(r.id).c : 0;
+      const out = persistRoute({ routeId: r?.id, name: `Ruta ${drv.name} ${date}`, driverId: drv.id, date, depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}), orderIds: [...keep, ...take.map((o) => o.id)], settings: s });
+      if (done) db.prepare('UPDATE orders SET stop_seq = stop_seq + ? WHERE route_id=? AND status IN (\'asignado\',\'cargado\') AND stop_seq < 999').run(done, out.route_id);
+      // rutas de origen: se recalculan o se eliminan si quedaron vacías
+      for (const rid of fromRoutes.filter((x) => x !== out.route_id)) {
+        const old = db.prepare('SELECT * FROM routes WHERE id=?').get(rid);
+        const rest = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(rid).map((x) => x.id);
+        const closed = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(rid).c;
+        if (!rest.length && !closed) db.prepare('DELETE FROM routes WHERE id=?').run(rid);
+        else if (rest.length) persistRoute({ routeId: rid, driverId: old.driver_id, date: old.date, depot: { lat: old.depot_lat, lng: old.depot_lng }, orderIds: rest, settings: s });
+      }
+      return out;
+    });
+    audit(req, 'pedidos.asignar', `${take.length} pedidos → ${drv.name} (${date})`);
+    res.json({ assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0 });
   })
 );
 // Planificación automática: reparte todos los pendientes del día entre los repartidores elegidos

@@ -371,6 +371,8 @@ function getSettings() {
 
 // Transacción simple (node:sqlite no trae helper)
 function tx(fn) {
+  // anidada (p. ej. persistRoute dentro de otra transacción): corre dentro de la transacción de afuera
+  if (db.isTransaction) return fn();
   db.exec('BEGIN IMMEDIATE');
   try {
     const r = fn();

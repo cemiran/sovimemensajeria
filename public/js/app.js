@@ -786,14 +786,15 @@ async function viewOrders(v) {
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
-    <div class="table-wrap"><table><thead><tr><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Sin pedidos</td></tr>'}
+    <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
+    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['pendiente', 'asignado'].includes(o.status) ? '' : 'disabled title="Ya no se puede reasignar"'} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
   $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}`; };
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.id)));
   $('#newOrder').onclick = () => orderForm(() => render());
+  bulkAssign(v, 'orders');
   $('#scanFind').onclick = () => openScanner({ title: 'Buscar pedido por guía', onCode: async (c) => { const o = await GET('/api/orders/tracking/' + encodeURIComponent(c)); orderDetail(o.id); } });
 }
 
@@ -1021,16 +1022,17 @@ async function viewCustomers(v) {
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
-      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}"><td><b>${esc(c.name)}</b>${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}</td></tr>`).join('')}
+      <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.open_orders ? '' : 'disabled title="Sin pedidos abiertos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.open_orders ? `<br><small class="muted">${c.open_orders} abierto${c.open_orders === 1 ? '' : 's'}</small>` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
   $('#cq').onsubmit = (e) => { e.preventDefault(); location.hash = '#/customers?q=' + encodeURIComponent(e.target.q.value); };
   $('#newC').onclick = () => customerForm(null, () => render());
   $('#impC')?.addEventListener('click', importCustomers);
+  if (staffC) bulkAssign(v, 'customers');
   $('#geoRetry')?.addEventListener('click', async () => { await POST('/api/customers/geocode', { retry_failed: true }); toast('Reintentando…', 'ok'); setTimeout(render, 1500); });
-  if (pend) setTimeout(() => { if (location.hash.startsWith('#/customers')) render(); }, 15000);
+  if (pend) setTimeout(() => { if (location.hash.startsWith('#/customers') && !(v.bulkPicked?.().length)) render(); }, 15000);
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.id), () => render())));
   const map = makeMap($('#cmapall'));
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
@@ -1600,6 +1602,52 @@ function receiveSerials(products, preselect) {
   });
 }
 
+// ================= Asignación masiva a repartidor =================
+// Barra que aparece al marcar pedidos o clientes: elige repartidor y fecha, y asigna todo de un jalón.
+async function bulkAssign(v, kind) {
+  const boxes = () => $$(`[data-sel]`, v).filter((c) => !c.disabled);
+  const picked = () => boxes().filter((c) => c.checked).map((c) => Number(c.dataset.sel));
+  let bar = $('#bulkBar', v);
+  if (!bar) { v.insertAdjacentHTML('beforeend', '<div id="bulkBar" class="bulk-bar" hidden></div>'); bar = $('#bulkBar', v); }
+  let drivers = null;
+  const draw = async () => {
+    const ids = picked();
+    const all = $('#selAll', v);
+    if (all) { all.checked = ids.length && ids.length === boxes().length; all.indeterminate = ids.length > 0 && ids.length < boxes().length; }
+    bar.hidden = !ids.length;
+    if (!ids.length) return;
+    if (!drivers) drivers = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
+    const prev = { d: $('#bkDrv', bar)?.value, f: $('#bkDate', bar)?.value };
+    bar.innerHTML = `<b>${ids.length} ${kind === 'customers' ? 'cliente' : 'pedido'}${ids.length === 1 ? '' : 's'}</b>
+      <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
+      <input type="date" id="bkDate" value="${prev.f || today()}" title="Fecha de la ruta" />
+      <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button><button class="btn ghost" id="bkClr">Quitar selección</button>`;
+    if (prev.d) $('#bkDrv', bar).value = prev.d;
+    $('#bkClr', bar).onclick = () => { boxes().forEach((c) => (c.checked = false)); draw(); };
+    $('#bkGo', bar).onclick = async (e) => {
+      const btn = e.currentTarget; // después de un await, e.currentTarget ya es null
+      const drv = $('#bkDrv', bar);
+      if (!drv.value) return toast('Elige el repartidor', 'bad');
+      const name = drv.selectedOptions[0].text.split(' · ')[0];
+      const n = picked().length;
+      if (!(await confirmDlg(`¿Asignar ${n} ${kind === 'customers' ? 'cliente(s) (sus pedidos abiertos)' : 'pedido(s)'} a ${name} para el ${$('#bkDate', bar).value}? Se agregan a su ruta y se reordenan las paradas.`))) return;
+      btn.disabled = true;
+      try {
+        const body = { driver_id: drv.value, date: $('#bkDate', bar).value, [kind === 'customers' ? 'customer_ids' : 'order_ids']: picked() };
+        const r = await POST('/api/routes/assign', body);
+        toast(`${r.assigned} pedido(s) asignados a ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}${r.unlocated ? ` · ${r.unlocated} sin ubicación en el mapa` : ''}`, r.skipped.length ? '' : 'ok');
+        if (r.skipped.length) {
+          const m = modal('Pedidos que no se movieron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
+          void m;
+        } else render();
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    };
+  };
+  $$('[data-sel]', v).forEach((c) => { c.onclick = (e) => e.stopPropagation(); c.onchange = draw; });
+  $('#selAll', v)?.addEventListener('change', (e) => { boxes().forEach((c) => (c.checked = e.target.checked)); draw(); });
+  v.bulkPicked = picked;
+}
+
 // ================= Clientes mayoristas =================
 const mxn = (n) => '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 async function viewAccounts(v) {
@@ -1985,9 +2033,10 @@ function importCustomers() {
         return o;
       }).filter(Boolean);
       const orders = $('#ciOrd', body).checked ? { create: true, account_id: $('#ciAcc', body).value || null, product_id: $('#ciProd', body).value || null, qty: $('#ciQty', body).value, scheduled_date: $('#ciDate', body).value, notes: $('#ciNote', body).value, notify: $('#ciNotify', body).checked } : { create: false };
-      e.currentTarget.disabled = true;
+      const btn = e.currentTarget;
+      btn.disabled = true;
       try { step3(rows, orders, await POST('/api/customers/import', { rows, orders, dry_run: true })); }
-      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+      catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
     };
   };
   const ACT = { nuevo: ['Nuevo', 'ok'], actualizado: ['Actualizar', 'warn'], existente: ['Ya existe', ''], error: ['Error', 'off'] };
@@ -2007,9 +2056,10 @@ function importCustomers() {
       <div class="row" style="justify-content:flex-end">${done ? '<button class="btn primary" data-close>Listo</button>' : `<button class="btn" id="ciBack2">Volver</button><button class="btn primary" id="ciDo" ${s.nuevos + s.actualizados + s.pedidos ? '' : 'disabled'}>${icon('upload')} Importar</button>`}</div>`;
     $('#ciBack2', body)?.addEventListener('click', step2);
     $('#ciDo', body)?.addEventListener('click', async (e) => {
-      e.currentTarget.disabled = true; e.currentTarget.textContent = 'Importando…';
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = 'Importando…';
       try { const res = await POST('/api/customers/import', { rows, orders, dry_run: false }); toast(`${res.summary.nuevos} clientes nuevos, ${res.summary.pedidos} pedidos`, 'ok'); step3(rows, orders, res, true); m.el.dataset.done = '1'; }
-      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; e.currentTarget.textContent = 'Importar'; }
+      catch (er) { toast(er.message, 'bad'); btn.disabled = false; btn.textContent = 'Importar'; }
     });
     if (shortStock) toast('La existencia del producto no alcanza', 'bad');
   };
@@ -2257,9 +2307,10 @@ function importInventory() {
         return o;
       }).filter((o) => Object.entries(o).some(([k, v]) => k !== '__line' && String(v).trim() !== ''));
       const opts = { stock_mode: $('input[name=sm]:checked', body).value, update_existing: $('#updEx', body).checked, reference: $('#impRef', body).value };
-      e.currentTarget.disabled = true;
+      const btn = e.currentTarget;
+      btn.disabled = true;
       try { step3(rows, opts, await POST('/api/products/import', { rows, ...opts, dry_run: true })); }
-      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+      catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
     };
   };
 
@@ -2318,15 +2369,16 @@ function importInventory() {
     draw();
     $('#back2', body)?.addEventListener('click', step2);
     $('#doImp', body)?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget; // después de confirmar (await), e.currentTarget ya es null
       if (opts.stock_mode === 'reemplazar' && !(await confirmDlg('Las existencias de los productos del archivo se reemplazarán por las cantidades del archivo. ¿Continuar?'))) return;
-      e.currentTarget.disabled = true;
-      e.currentTarget.textContent = 'Importando…';
+      btn.disabled = true;
+      btn.textContent = 'Importando…';
       try {
         const res = await POST('/api/products/import', { rows, ...opts, dry_run: false });
         toast(`Inventario actualizado: ${res.summary.nuevos} nuevos, ${res.summary.actualizados} actualizados`, 'ok');
         step3(rows, opts, res, true);
         m.onDone = true;
-      } catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; btn.textContent = 'Importar'; }
     });
   };
   const close0 = m.close;
