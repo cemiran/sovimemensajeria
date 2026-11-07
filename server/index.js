@@ -780,6 +780,13 @@ app.post(
     const ref = String(req.body.reference || '').trim().slice(0, 80);
     const results = [];
     const seen = new Set();
+    // opcional: los equipos recibidos se entregan de inmediato a un repartidor
+    let drv = null;
+    if (req.body.driver_id) {
+      drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(req.body.driver_id));
+      if (!drv) throw new HttpError(400, 'Repartidor no encontrado');
+      if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
+    }
     if (enable && !dry) db.prepare('UPDATE products SET serialized=1 WHERE id=?').run(p.id);
     tx(() => {
       for (const sn of list) {
@@ -790,16 +797,22 @@ app.post(
         if (ex) { results.push({ serial: sn, ok: false, error: `Ya registrado (${ex.name}, ${ex.status})` }); continue; }
         if (dry) { results.push({ serial: sn, ok: true }); continue; }
         const r = db.prepare('INSERT INTO serials (product_id, serial, reference) VALUES (?,?,?)').run(p.id, sn, ref || null);
-        serialEvent(Number(r.lastInsertRowid), 'recibido', null, req.user.id, ref || null);
+        const sid = Number(r.lastInsertRowid);
+        serialEvent(sid, 'recibido', null, req.user.id, ref || null);
+        if (drv) {
+          db.prepare("UPDATE serials SET holder_id=?, held_at=datetime('now') WHERE id=?").run(drv.id, sid);
+          serialEvent(sid, 'repartidor', null, req.user.id, `Entregado a ${drv.name} al recibirlo${ref ? ' · ' + ref : ''}`);
+          custodyLog(drv.id, p.id, 1, 'asignado', req.user.id, { serial: sn, reference: ref || 'Al recibir en almacén' });
+        }
         results.push({ serial: sn, ok: true });
       }
       const n = dry ? 0 : results.filter((r) => r.ok).length;
       if (n) moveStock(p.id, 'entrada', n, `Recepción de ${n} S/N${ref ? ' · ' + ref : ''}`, req.user.id);
     });
-    if (dry) return res.json({ dry_run: true, received: 0, errors: results.filter((r) => !r.ok), results, product: p.name, will_enable: enable, stock: p.stock });
+    if (dry) return res.json({ dry_run: true, received: 0, errors: results.filter((r) => !r.ok), results, product: p.name, will_enable: enable, stock: p.stock, driver: drv?.name || null });
     const ok = results.filter((r) => r.ok).length;
-    if (ok) audit(req, 'series.recibir', `${ok} S/N de ${p.name}${ref ? ' · ' + ref : ''}`);
-    res.json({ received: ok, errors: results.filter((r) => !r.ok), results, product: p.name, stock: db.prepare('SELECT stock FROM products WHERE id=?').get(p.id).stock });
+    if (ok) audit(req, 'series.recibir', `${ok} S/N de ${p.name}${ref ? ' · ' + ref : ''}${drv ? ` → ${drv.name}` : ''}`);
+    res.json({ received: ok, errors: results.filter((r) => !r.ok), results, product: p.name, driver: drv?.name || null, stock: db.prepare('SELECT stock FROM products WHERE id=?').get(p.id).stock });
   })
 );
 

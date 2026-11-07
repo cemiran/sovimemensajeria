@@ -1613,22 +1613,31 @@ async function serialDetail(sn) {
   }));
 }
 
+// Opciones de repartidor para "entregar al recibir"
+async function fillDriverSelect(sel) {
+  try {
+    const ds = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
+    sel.insertAdjacentHTML('beforeend', ds.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join(''));
+  } catch {}
+}
 function receiveSerials(products, preselect) {
   if (!products.length) return toast('Primero activa "Controlar por número de serie" en algún producto (Inventario → editar producto)', 'bad');
   const m = modal('Recibir equipos por número de serie', `<div class="stack">
     <div class="grid g2"><label class="f">Producto<select id="rsP">${products.map((p) => `<option value="${p.id}" ${String(p.id) === String(preselect) ? 'selected' : ''}>${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select></label>
       <label class="f">Referencia<input id="rsRef" placeholder="Factura, remisión, lote…" maxlength="80" /></label></div>
+    <label class="f">${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small><select id="rsDrv"><option value="">— Dejar en almacén —</option></select></label>
     <div class="row"><button class="btn primary grow" id="rsScan">${icon('scan')} Escanear series</button></div>
     <label class="f">…o pega una lista (una serie por línea, p. ej. desde Excel)<textarea id="rsList" rows="5" placeholder="HWTCDE3D40BA&#10;HWTCDE3D40BB"></textarea></label>
     <div class="row"><button class="btn" id="rsPaste">Registrar lista</button><small class="muted" id="rsCount"></small></div>
     <div class="scan-log" id="rsLog"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Listo</button>', onClose: () => render() });
   const send = async (serials) => {
-    const r = await POST('/api/serials/receive', { product_id: $('#rsP', m.el).value, serials, reference: $('#rsRef', m.el).value });
+    const r = await POST('/api/serials/receive', { product_id: $('#rsP', m.el).value, serials, reference: $('#rsRef', m.el).value, driver_id: $('#rsDrv', m.el).value || null });
     const log = $('#rsLog', m.el);
-    for (const x of r.results) log.insertAdjacentHTML('afterbegin', `<div style="${x.ok ? '' : 'color:var(--bad)'}">${x.ok ? '✅' : '⛔'} <b>${esc(x.serial)}</b>${x.error ? ' · ' + esc(x.error) : ''}</div>`);
+    for (const x of r.results) log.insertAdjacentHTML('afterbegin', `<div style="${x.ok ? '' : 'color:var(--bad)'}">${x.ok ? '✅' : '⛔'} <b>${esc(x.serial)}</b>${x.ok && r.driver ? ` → ${icon('truck')} ${esc(r.driver)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>`);
     $('#rsCount', m.el).textContent = `Existencia actual: ${r.stock}`;
     return r;
   };
+  fillDriverSelect($('#rsDrv', m.el));
   $('#rsList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#rsCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
   $('#rsPaste', m.el).onclick = async () => {
     const list = $('#rsList', m.el).value.split(/[\r\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
@@ -2342,7 +2351,8 @@ function importInventory() {
       <fieldset id="snBox" hidden><legend>${icon('tag')} Números de serie</legend>
         <p class="muted" style="margin:0">Cada S/N se registra como un equipo en el almacén y suma 1 a la existencia del producto.</p>
         <label class="f">¿A qué producto pertenecen estas series?<select id="snProd"></select></label>
-        <label class="f">Referencia<input id="snRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label></fieldset>
+        <label class="f">Referencia<input id="snRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label>
+        <label class="f">${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small><select id="snDrv"><option value="">— Dejar en almacén —</option></select></label></fieldset>
       <fieldset id="stBox"><legend>${icon('inv')} Existencias</legend>
         <label class="radio"><input type="radio" name="sm" value="reemplazar" checked /> <span><b>Reemplazar</b> por la cantidad del archivo <small class="muted">(conteo físico; se registra un ajuste por la diferencia)</small></span></label>
         <label class="radio"><input type="radio" name="sm" value="sumar" /> <span><b>Sumar</b> la cantidad del archivo <small class="muted">(llegada de mercancía; se registra una entrada)</small></span></label>
@@ -2357,6 +2367,7 @@ function importInventory() {
       const on = snSel.value !== '';
       $('#snBox', body).hidden = !on; $('#stBox', body).hidden = on;
       $('#prev', body).innerHTML = on ? `${icon('search')} Revisar series` : `${icon('search')} Revisar antes de importar`;
+      if (on && $('#snDrv', body).options.length === 1) fillDriverSelect($('#snDrv', body));
       if (on && !$('#snProd', body).options.length) {
         const ps = (await GET('/api/products?limit=500')).rows;
         const list = [...ps.filter((p) => p.serialized), ...ps.filter((p) => !p.serialized && !p.stock)];
@@ -2372,7 +2383,7 @@ function importInventory() {
       if (mp.serial != null) {
         const serials = data.map((r) => String(r[mp.serial] ?? '').trim()).filter(Boolean);
         if (!serials.length) return toast('La columna de S/N está vacía', 'bad');
-        const opts = { product_id: $('#snProd', body).value, reference: $('#snRef', body).value, enable_serial: true };
+        const opts = { product_id: $('#snProd', body).value, reference: $('#snRef', body).value, enable_serial: true, driver_id: $('#snDrv', body).value || null };
         const btn = e.currentTarget;
         btn.disabled = true;
         try { stepSerials(serials, opts, await POST('/api/serials/receive', { serials, ...opts, dry_run: true })); }
@@ -2398,14 +2409,15 @@ function importInventory() {
     const bad = r.results.filter((x) => !x.ok);
     const okN = r.results.length - bad.length;
     body.innerHTML = `
-      ${done ? `<div class="info-bar" style="background:var(--ok-soft);color:var(--ok)">${icon('check')} <b>Listo: ${r.received} equipos recibidos.</b> Existencia actual de ${esc(r.product)}: <b>${r.stock}</b>.</div>` : `<div class="info-bar">${icon('info')} Vista previa: todavía no se ha guardado nada.</div>`}
+      ${done ? `<div class="info-bar" style="background:var(--ok-soft);color:var(--ok)">${icon('check')} <b>Listo: ${r.received} equipos recibidos${r.driver ? ` y entregados a ${esc(r.driver)}` : ''}.</b> Existencia actual de ${esc(r.product)}: <b>${r.stock}</b>.</div>` : `<div class="info-bar">${icon('info')} Vista previa: todavía no se ha guardado nada.</div>`}
       <div class="imp-sum"><div class="kpi card"><div class="label">Series en el archivo</div><div class="value">${r.results.length}</div></div>
         <div class="kpi card"><div class="label">${done ? 'Recibidas' : 'Se recibirán'}</div><div class="value" style="color:var(--ok)">${done ? r.received : okN}</div></div>
         <div class="kpi card"><div class="label">Con error</div><div class="value" style="color:${bad.length ? 'var(--bad)' : 'inherit'}">${bad.length}</div></div></div>
-      <p class="muted" style="margin:0">Producto: <b>${esc(r.product)}</b>${r.will_enable ? ' · se activará el control por número de serie' : ''}</p>
+      <p class="muted" style="margin:0">Producto: <b>${esc(r.product)}</b>${r.will_enable ? ' · se activará el control por número de serie' : ''}${r.driver ? ` · ${icon('truck')} se entregarán a <b>${esc(r.driver)}</b>` : ' · quedan en el almacén'}</p>
       ${bad.length ? `<div class="table-wrap" style="max-height:260px"><table><thead><tr><th>S/N</th><th>Motivo</th></tr></thead><tbody>${bad.slice(0, 300).map((x) => `<tr><td class="mono">${esc(x.serial)}</td><td style="color:var(--bad)">${esc(x.error)}</td></tr>`).join('')}</tbody></table></div>` : ''}
-      <div class="row" style="justify-content:flex-end">${done ? '<button class="btn primary" data-close>Listo</button>' : `<button class="btn" id="back3">Volver</button><button class="btn primary" id="doSn" ${okN ? '' : 'disabled'}>${icon('upload')} Recibir ${okN} equipo${okN === 1 ? '' : 's'}</button>`}</div>`;
+      <div class="row" style="justify-content:flex-end">${done ? `${r.driver ? '' : `<button class="btn" id="toDrvNow">${icon('truck')} Asignar a repartidor</button>`}<button class="btn primary" data-close>Listo</button>` : `<button class="btn" id="back3">Volver</button><button class="btn primary" id="doSn" ${okN ? '' : 'disabled'}>${icon('upload')} Recibir ${okN} equipo${okN === 1 ? '' : 's'}</button>`}</div>`;
     $('#back3', body)?.addEventListener('click', step2);
+    $('#toDrvNow', body)?.addEventListener('click', async () => { m.close(); const [c, ps] = await Promise.all([GET('/api/custody'), GET('/api/products?limit=500')]); assignToDriver(c.drivers, ps.rows); });
     $('#doSn', body)?.addEventListener('click', async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true; btn.textContent = 'Registrando…';
@@ -2443,10 +2455,11 @@ function importInventory() {
       </div>
       <div class="table-wrap" style="max-height:340px"><table><thead><tr><th>Fila</th><th>SKU</th><th>Producto</th><th>Resultado</th><th class="r">Existencia</th></tr></thead><tbody id="impRows"></tbody></table></div>
       ${s.errores && !done ? '<small class="muted">Las filas con error no se importan; el resto sí. Corrige el archivo y vuelve a cargarlo si las necesitas.</small>' : ''}
-      <div class="row" style="justify-content:flex-end">${done ? '<button class="btn primary" data-close>Listo</button>' : `<button class="btn" id="back2">Volver</button><button class="btn primary" id="doImp" ${s.nuevos + s.actualizados ? '' : 'disabled'}>${icon('upload')} Importar ${s.nuevos + s.actualizados} producto${s.nuevos + s.actualizados === 1 ? '' : 's'}</button>`}</div>`;
+      <div class="row" style="justify-content:flex-end">${done ? `<button class="btn" id="toDrvNow2">${icon('truck')} Asignar a repartidor</button><button class="btn primary" data-close>Listo</button>` : `<button class="btn" id="back2">Volver</button><button class="btn primary" id="doImp" ${s.nuevos + s.actualizados ? '' : 'disabled'}>${icon('upload')} Importar ${s.nuevos + s.actualizados} producto${s.nuevos + s.actualizados === 1 ? '' : 's'}</button>`}</div>`;
     $$('[data-f]', body).forEach((b) => (b.onclick = () => { filter = b.dataset.f; draw(); }));
     draw();
     $('#back2', body)?.addEventListener('click', step2);
+    $('#toDrvNow2', body)?.addEventListener('click', async () => { m.close(); const [c, ps] = await Promise.all([GET('/api/custody'), GET('/api/products?limit=500')]); assignToDriver(c.drivers, ps.rows); });
     $('#doImp', body)?.addEventListener('click', async (e) => {
       const btn = e.currentTarget; // después de confirmar (await), e.currentTarget ya es null
       if (opts.stock_mode === 'reemplazar' && !(await confirmDlg('Las existencias de los productos del archivo se reemplazarán por las cantidades del archivo. ¿Continuar?'))) return;
