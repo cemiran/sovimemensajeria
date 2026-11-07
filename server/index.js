@@ -477,7 +477,11 @@ app.delete(
     const sn = db.prepare('SELECT COUNT(*) n FROM serials WHERE product_id=?').get(p.id).n;
     if (sn) throw new HttpError(409, `No se puede eliminar: ${p.name} tiene ${sn} número(s) de serie registrados.`);
     if (p.stock) throw new HttpError(409, `Primero deja la existencia en 0 (tiene ${p.stock}).`);
+    const held = db.prepare("SELECT u.name, d.qty FROM driver_stock d JOIN users u ON u.id = d.user_id WHERE d.product_id=? AND d.qty > 0").all(p.id);
+    if (held.length) throw new HttpError(409, `No se puede eliminar: ${held.map((h) => `${h.name} trae ${h.qty}`).join(', ')}. Primero regrésalo al almacén.`);
     tx(() => {
+      db.prepare('DELETE FROM driver_stock WHERE product_id=?').run(p.id);
+      db.prepare('DELETE FROM custody_log WHERE product_id=?').run(p.id);
       db.prepare('DELETE FROM inventory_movements WHERE product_id=?').run(p.id);
       db.prepare('DELETE FROM products WHERE id=?').run(p.id);
     });
