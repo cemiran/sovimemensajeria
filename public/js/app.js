@@ -66,7 +66,7 @@ const I = {
   trash: '<path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>',
   live: '<circle cx="12" cy="10" r="3"/><path d="M12 21s-7-6.2-7-11a7 7 0 0114 0c0 4.8-7 11-7 11z"/>',
 };
-const icon = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I[k] || ''}</svg>`;
+const icon = (k) => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${I[k] || ''}</svg>`;
 
 function toast(msg, type = '') {
   const t = document.createElement('div');
@@ -993,7 +993,7 @@ function customerForm(c, done) {
         <label class="f">Correo<input name="email" type="email" value="${esc(c.email)}" /></label>
       </div>
       <div class="grid g2">
-        <label class="f">Teléfono móvil <small class="muted">(WhatsApp y SMS)</small><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /></label>
+        <label class="f"><span>Teléfono móvil <small class="muted">(WhatsApp y SMS)</small></span><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /></label>
         <label class="f">Teléfono adicional<input name="phone_alt" type="tel" inputmode="tel" value="${esc(c.phone_alt)}" placeholder="Casa, trabajo o familiar" /></label>
       </div>
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
@@ -1625,7 +1625,7 @@ function receiveSerials(products, preselect) {
   const m = modal('Recibir equipos por número de serie', `<div class="stack">
     <div class="grid g2"><label class="f">Producto<select id="rsP">${products.map((p) => `<option value="${p.id}" ${String(p.id) === String(preselect) ? 'selected' : ''}>${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select></label>
       <label class="f">Referencia<input id="rsRef" placeholder="Factura, remisión, lote…" maxlength="80" /></label></div>
-    <label class="f">${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small><select id="rsDrv"><option value="">— Dejar en almacén —</option></select></label>
+    <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="rsDrv"><option value="">— Dejar en almacén —</option></select></label>
     <div class="row"><button class="btn primary grow" id="rsScan">${icon('scan')} Escanear series</button></div>
     <label class="f">…o pega una lista (una serie por línea, p. ej. desde Excel)<textarea id="rsList" rows="5" placeholder="HWTCDE3D40BA&#10;HWTCDE3D40BB"></textarea></label>
     <div class="row"><button class="btn" id="rsPaste">Registrar lista</button><small class="muted" id="rsCount"></small></div>
@@ -1714,7 +1714,7 @@ function bulkStatus(status, kind, ids) {
     cancelado: ['Cancelar pedidos', `Se cancelan los pedidos de ${what}. Las piezas regresan al inventario y se liberan los números de serie.`],
   }[status];
   const m = modal(T[0], `<form id="bsF" class="stack"><p style="margin:0">${T[1]}</p>
-    ${status === 'pendiente' ? `<label class="f">Nueva fecha de entrega <small class="muted">(opcional)</small><input type="date" name="date" /></label>` : ''}
+    ${status === 'pendiente' ? `<label class="f"><span>Nueva fecha de entrega <small class="muted">(opcional)</small></span><input type="date" name="date" /></label>` : ''}
     ${status === 'fallido' ? `<label class="f">Motivo *<select name="reason" required>${FAIL_REASONS.map((r) => `<option>${esc(r)}</option>`).join('')}</select></label>` : ''}
     ${status === 'entregado' ? `<label class="f">¿Quién recibió? *<input name="receiver_name" required placeholder="Nombre de quien recibió" /></label>` : ''}
     ${['fallido', 'entregado'].includes(status) ? `<label class="f">Nota<input name="note" maxlength="300" placeholder="Detalle para la bitácora" /></label>
@@ -2347,12 +2347,12 @@ function importInventory() {
     body.innerHTML = `
       <div class="row between"><div><b>${esc(sourceName)}</b><br><small class="muted">${data.filter(filled).length} filas de datos · ${hr < 0 ? 'lista sin encabezados' : `encabezados en la fila ${hr + 1}`}</small></div><button class="btn sm" id="back">Cambiar archivo</button></div>
       <h3 style="margin:4px 0 0">¿Qué columna corresponde a cada dato?</h3>
-      <div class="map-grid">${IMP_FIELDS.map(([k, l]) => `<label class="f">${l}${k === 'name' ? ' <small class="muted">(obligatorio en nuevos)</small>' : k === 'sku' ? ' <small class="muted">(o código de barras)</small>' : ''}<select data-map="${k}">${colOpts(k)}</select></label>`).join('')}</div>
+      <div class="map-grid">${IMP_FIELDS.map(([k, l]) => `<label class="f"><span>${l}${k === 'name' ? ' <small class="muted">(obligatorio en nuevos)</small>' : k === 'sku' ? ' <small class="muted">(o código de barras)</small>' : ''}</span><select data-map="${k}">${colOpts(k)}</select></label>`).join('')}</div>
       <fieldset id="snBox" hidden><legend>${icon('tag')} Números de serie</legend>
         <p class="muted" style="margin:0">Cada S/N se registra como un equipo en el almacén y suma 1 a la existencia del producto.</p>
         <label class="f">¿A qué producto pertenecen estas series?<select id="snProd"></select></label>
         <label class="f">Referencia<input id="snRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label>
-        <label class="f">${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small><select id="snDrv"><option value="">— Dejar en almacén —</option></select></label></fieldset>
+        <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="snDrv"><option value="">— Dejar en almacén —</option></select></label></fieldset>
       <fieldset id="stBox"><legend>${icon('inv')} Existencias</legend>
         <label class="radio"><input type="radio" name="sm" value="reemplazar" checked /> <span><b>Reemplazar</b> por la cantidad del archivo <small class="muted">(conteo físico; se registra un ajuste por la diferencia)</small></span></label>
         <label class="radio"><input type="radio" name="sm" value="sumar" /> <span><b>Sumar</b> la cantidad del archivo <small class="muted">(llegada de mercancía; se registra una entrada)</small></span></label>

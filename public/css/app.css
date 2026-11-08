@@ -26,6 +26,9 @@
   --side: 248px;
   color-scheme: light;
 }
+/* Íconos: tamaño del texto que los rodea si ninguna regla más específica lo define */
+.ic { width: 1.15em; height: 1.15em; vertical-align: -0.2em; flex: none; }
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0e141b; --surface: #161e28; --surface-2: #1e2834; --text: #e8edf3; --muted: #97a3b2;
