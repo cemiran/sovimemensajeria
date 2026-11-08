@@ -187,7 +187,7 @@ const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin"
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
 
-function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null } = {}) {
+function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null } = {}) {
   const pts = [];
   if (depot) { L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name)); pts.push(depotLatLng()); }
   for (const s of stops) {
@@ -198,6 +198,7 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
       .addTo(map)
       .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${onEdit ? stopEditButtons() : ''}`);
     if (onEdit) wireStopEdit(map, mk, s, onEdit);
+    collect?.push({ s, mk });
   }
   if (pts.length > 1) L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(map);
   if (fit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 15 });
@@ -1093,7 +1094,13 @@ async function viewRoutes(v) {
     <div class="card kpi"><div class="label">Sin ruta</div><div class="value" style="color:${pending.length ? 'var(--warn)' : 'inherit'}">${pending.length}</div><div class="sub">pedidos pendientes</div></div>
   </div>
   <div class="grid g-main" style="margin-top:14px">
-    <div class="card"><div id="rmap" class="map tall"></div><div class="legend" style="margin-top:8px">${routes.map((r, i) => `<span><i style="background:${ROUTE_COLORS[i % ROUTE_COLORS.length]}"></i>${esc(r.driver_name)}</span>`).join('')}<span><i style="background:#7b8a85"></i>Pendiente sin ruta</span></div></div>
+    <div class="card"><div class="row map-tools" style="margin-bottom:8px">
+        <button class="btn sm" id="selLasso" title="Encierra con el dedo o el ratón las entregas que quieras">${icon('edit')} Dibujar zona</button>
+        <button class="btn sm" id="selTap" title="Toca cada pin para agregarlo o quitarlo">${icon('check')} Tocar pines</button>
+        <button class="btn sm ghost" id="selClear" hidden>Quitar selección</button>
+        <small class="muted grow" id="selHint">Selecciona entregas en el mapa para asignarlas y optimizar su ruta.</small></div>
+      <div id="rmap" class="map tall"></div>
+      <div id="mapSelBar" class="bulk-bar" hidden></div><div class="legend" style="margin-top:8px">${routes.map((r, i) => `<span><i style="background:${ROUTE_COLORS[i % ROUTE_COLORS.length]}"></i>${esc(r.driver_name)}</span>`).join('')}<span><i style="background:#7b8a85"></i>Pendiente sin ruta</span></div></div>
     <div class="stack">${routes.map((r, i) => {
       const done = r.delivered + r.failed;
       return `<div class="card" style="border-left:5px solid ${ROUTE_COLORS[i % ROUTE_COLORS.length]}">
@@ -1108,12 +1115,15 @@ async function viewRoutes(v) {
   const all = [depotLatLng()];
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name));
   const dets = await Promise.all(routes.map((r) => GET('/api/routes/' + r.id)));
-  dets.forEach((d, i) => all.push(...drawRoute(map, d.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { depot: false, fit: false, onEdit: () => render() })));
+  const pinsSel = [];
+  dets.forEach((d, i) => all.push(...drawRoute(map, d.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { depot: false, fit: false, onEdit: () => render(), collect: pinsSel })));
   for (const o of pending) if (o.lat != null) {
     const mk = L.marker([o.lat, o.lng], { icon: pinIcon('•', '#7b8a85') }).addTo(map).bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}<br>${esc(o.tracking_code)} · sin ruta${stopEditButtons()}`);
     wireStopEdit(map, mk, o, () => render());
+    pinsSel.push({ s: o, mk });
     all.push([o.lat, o.lng]);
   }
+  mapSelection(v, map, pinsSel, drivers, date);
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
   $$('[data-route]', v).forEach((b) => (b.onclick = () => routeDetail(b.dataset.route)));
 
@@ -1734,6 +1744,100 @@ function bulkStatus(status, kind, ids) {
       else render();
     } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
   };
+}
+
+// ================= Selección de entregas en el mapa (lazo o toque) =================
+// Solo se pueden mover las que aún no salen: pendientes o asignadas (no cargadas, entregadas ni fallidas).
+function mapSelection(v, map, pins, drivers, date) {
+  const movable = pins.filter((p) => ['pendiente', 'asignado'].includes(p.s.status));
+  const sel = new Set();
+  let mode = null;
+  const bar = $('#mapSelBar', v);
+  const box = map.getContainer();
+  const mark = (p, on) => { if (p.mk._icon) p.mk._icon.classList.toggle('pin-sel', on); };
+  const draw = () => {
+    movable.forEach((p) => mark(p, sel.has(p.s.id)));
+    $('#selClear', v).hidden = !sel.size;
+    bar.hidden = !sel.size;
+    if (!sel.size) return;
+    const act = drivers.filter((d) => d.active);
+    const prev = { d: $('#msDrv', bar)?.value, f: $('#msDate', bar)?.value };
+    const list = movable.filter((p) => sel.has(p.s.id));
+    const from = [...new Set(list.map((p) => p.s.driver_name || 'sin ruta'))];
+    bar.innerHTML = `<b>${sel.size} entrega${sel.size === 1 ? '' : 's'}</b><small class="muted">${esc(from.join(', '))}</small>
+      <select id="msDrv"><option value="">Asignar a…</option>${act.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
+      <input type="date" id="msDate" value="${prev.f || date}" />
+      <button class="btn primary" id="msGo">${icon('route')} Asignar y optimizar</button>`;
+    if (prev.d) $('#msDrv', bar).value = prev.d;
+    $('#msGo', bar).onclick = async (e) => {
+      const btn = e.currentTarget;
+      const drv = $('#msDrv', bar);
+      if (!drv.value) return toast('Elige el repartidor', 'bad');
+      btn.disabled = true;
+      try {
+        const r = await POST('/api/routes/assign', { driver_id: drv.value, date: $('#msDate', bar).value, order_ids: [...sel] });
+        toast(`${r.assigned} entrega(s) a ${r.driver}; ruta optimizada${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}`, r.skipped.length ? '' : 'ok');
+        render();
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    };
+  };
+  const setMode = (m) => {
+    mode = mode === m ? null : m;
+    $('#selLasso', v).classList.toggle('primary', mode === 'lasso');
+    $('#selTap', v).classList.toggle('primary', mode === 'tap');
+    box.classList.toggle('lasso-on', mode === 'lasso');
+    if (mode === 'lasso') { map.dragging.disable(); map.closePopup(); } else map.dragging.enable();
+    $('#selHint', v).textContent = mode === 'lasso' ? 'Encierra con el dedo o el ratón las entregas que quieras (puedes dibujar varias zonas).'
+      : mode === 'tap' ? 'Toca cada pin para agregarlo o quitarlo.' : 'Selecciona entregas en el mapa para asignarlas y optimizar su ruta.';
+  };
+  $('#selLasso', v).onclick = () => setMode('lasso');
+  $('#selTap', v).onclick = () => setMode('tap');
+  $('#selClear', v).onclick = () => { sel.clear(); draw(); };
+  // tocar pines
+  for (const p of movable) p.mk.on('click', (e) => {
+    if (mode !== 'tap') return;
+    e.target.closePopup();
+    sel.has(p.s.id) ? sel.delete(p.s.id) : sel.add(p.s.id);
+    draw();
+  });
+  // lazo: se dibuja con el puntero y se toman los pines que quedan adentro
+  const inside = (pt, poly) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = [poly[i].lng, poly[i].lat], [xj, yj] = [poly[j].lng, poly[j].lat];
+      if (yi > pt.lat !== yj > pt.lat && pt.lng < ((xj - xi) * (pt.lat - yi)) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  let path = null, line = null;
+  box.addEventListener('pointerdown', (e) => {
+    if (mode !== 'lasso' || e.button > 0) return;
+    e.preventDefault(); e.stopPropagation();
+    box.setPointerCapture?.(e.pointerId);
+    path = [map.mouseEventToLatLng(e)];
+    line = L.polyline(path, { color: '#ef7d2d', weight: 3, dashArray: '6 6' }).addTo(map);
+  }, true);
+  box.addEventListener('pointermove', (e) => {
+    if (!path) return;
+    e.preventDefault();
+    path.push(map.mouseEventToLatLng(e));
+    line.setLatLngs(path);
+  }, true);
+  const finish = () => {
+    if (!path) return;
+    const poly = path; path = null;
+    map.removeLayer(line); line = null;
+    if (poly.length < 3) return;
+    const shape = L.polygon(poly, { color: '#ef7d2d', weight: 2, fillOpacity: 0.08 }).addTo(map);
+    setTimeout(() => map.removeLayer(shape), 1200);
+    let n = 0;
+    for (const p of movable) if (inside(p.mk.getLatLng(), poly) && !sel.has(p.s.id)) { sel.add(p.s.id); n++; }
+    const skipped = pins.filter((p) => !movable.includes(p) && inside(p.mk.getLatLng(), poly)).length;
+    toast(`${n} entrega(s) agregadas${skipped ? ` · ${skipped} ya cargadas o cerradas no se pueden mover` : ''}`, n ? 'ok' : '');
+    draw();
+  };
+  box.addEventListener('pointerup', finish, true);
+  box.addEventListener('pointercancel', finish, true);
 }
 
 // ================= Clientes mayoristas =================

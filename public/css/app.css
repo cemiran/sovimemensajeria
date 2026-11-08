@@ -721,3 +721,9 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .bulk-bar select, .bulk-bar input { width: auto; min-width: 140px; }
 @media (max-width: 760px) { .bulk-bar { bottom: 74px; } .bulk-bar select, .bulk-bar input { flex: 1 1 140px; } }
 .bulk-bar .bulk-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+.map-tools { flex-wrap: wrap; gap: 6px; align-items: center; }
+.lasso-on { cursor: crosshair !important; touch-action: none; }
+.lasso-on .leaflet-marker-icon { cursor: crosshair !important; }
+.pin-sel { filter: drop-shadow(0 0 0 #ef7d2d) drop-shadow(0 0 6px #ef7d2d); transform-origin: bottom center; z-index: 900 !important; }
+.pin-sel > * { outline: 3px solid #ef7d2d; outline-offset: 1px; border-radius: 50%; }
+#mapSelBar { position: static; margin-top: 10px; }
