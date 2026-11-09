@@ -850,7 +850,7 @@ async function orderDetail(id) {
           ${staff ? `<dt>Mayorista</dt><dd id="oAcc">${o.account_name ? `<b>${esc(o.account_name)}</b>` : '<span class="muted">Sin mayorista</span>'} <button class="btn sm ghost" id="oAccEd">Cambiar</button></dd>` : ''}
           <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b>${o.customer_phone ? `<br>Móvil: <a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}${o.customer_phone_alt ? `<br>Adicional: <a href="tel:${esc(o.customer_phone_alt)}">${esc(o.customer_phone_alt)}</a>` : ''}${o.telnor_phone ? `<br>Telnor: <span class="mono">${esc(o.telnor_phone)}</span>` : ''}</dd>
           <dt>Dirección</dt><dd>${esc(o.address)}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}</dd>
-          <dt>Ventana</dt><dd>${o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
+          <dt>Ventana</dt><dd>${o.appointment_time ? `<b>⏰ ${esc(o.appointment_time)}</b> (hora acordada)` : o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
           <dt>Fecha</dt><dd>${esc(o.scheduled_date)}</dd>
           <dt>Repartidor</dt><dd>${esc(o.driver_name || '—')} ${o.stop_seq ? `· parada ${o.stop_seq} · ETA ${esc(o.eta || '—')}` : ''}</dd>
           ${o.shipment_type && o.shipment_type !== 'general' || o.temp_min != null || o.temp_max != null || o.requires_seal ? `<dt>Tipo de envío</dt><dd><b>${esc(SHIP_TYPES[o.shipment_type] || 'General')}</b>${fmtRange(o.temp_min, o.temp_max) ? ` · ${fmtRange(o.temp_min, o.temp_max)}` : ''}${o.requires_seal ? ` · sello ${esc(o.seal_number || '')} a verificar` : ''}</dd>` : ''}
@@ -1011,6 +1011,7 @@ function customerForm(c, done) {
         <label class="f">Recibe desde<input type="time" name="window_start" value="${esc(c.window_start)}" /></label>
         <label class="f">Recibe hasta<input type="time" name="window_end" value="${esc(c.window_end)}" /></label>
       </div>
+      ${c.id && store.user.role !== 'repartidor' ? `<fieldset id="schedBox"><legend>${icon('truck')} Programar entrega</legend><div id="schedBody"><small class="muted">Cargando pedidos…</small></div></fieldset>` : ''}
       <div><div class="row between"><small class="muted">Toca el mapa para fijar la ubicación exacta</small><button type="button" class="btn sm" id="here">📍 Estoy aquí</button></div>
         <div id="cmap" class="map sm" style="margin-top:6px"></div><small class="muted num" id="coords"></small></div>
       <input type="hidden" name="lat" value="${c.lat ?? ''}" /><input type="hidden" name="lng" value="${c.lng ?? ''}" />
@@ -1039,16 +1040,51 @@ function customerForm(c, done) {
       if (r[0]) setPt(Number(r[0].lat), Number(r[0].lon), true); else toast('Dirección no encontrada, marca en el mapa', 'bad');
     } catch { toast('Geocodificador no disponible, marca en el mapa', 'bad'); }
   };
-  $('#saveC', m.el).onclick = async () => {
+  // Programar entrega del pedido abierto: día, hora acordada y repartidor
+  let sched = null;
+  if ($('#schedBody', m.el)) (async () => {
+    const box = $('#schedBody', m.el);
+    const open = (c.orders || []).filter((o) => ['pendiente', 'asignado', 'cargado', 'fallido'].includes(o.status));
+    if (!open.length) { box.innerHTML = '<small class="muted">Este cliente no tiene pedidos abiertos. Crea uno en Pedidos → Nuevo pedido.</small>'; return; }
+    const drivers = (await GET('/api/users?role=repartidor').catch(() => [])).filter((d) => d.active);
+    box.innerHTML = `${open.length > 1 ? `<label class="f">Pedido<select id="scO">${open.map((o) => `<option value="${o.id}">${esc(o.tracking_code)} · ${STATUS[o.status]}</option>`).join('')}</select></label>` : `<p style="margin:0 0 6px"><b class="mono">${esc(open[0].tracking_code)}</b> · ${badge(open[0].status)}</p>`}
+      <div class="grid g3"><label class="f">Día de entrega<input type="date" id="scD" /></label><label class="f">Hora acordada<input type="time" id="scT" /></label>
+        <label class="f">Repartidor<select id="scR"><option value="">— Sin asignar —</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select></label></div>
+      <small class="muted">La ruta del repartidor se reordena respetando la hora acordada (±30 min).</small>`;
+    const fill = () => {
+      const o = open.find((x) => String(x.id) === String($('#scO', box)?.value || open[0].id));
+      $('#scD', box).value = o.scheduled_date || today(); $('#scT', box).value = o.appointment_time || ''; $('#scR', box).value = o.driver_id || '';
+      sched = { o, d: $('#scD', box).value, t: $('#scT', box).value, r: $('#scR', box).value };
+    };
+    $('#scO', box)?.addEventListener('change', fill);
+    fill();
+  })();
+  const applySchedule = async () => {
+    if (!sched) return '';
+    const box = $('#schedBody', m.el);
+    const d = $('#scD', box).value, t = $('#scT', box).value, r = $('#scR', box).value, o = sched.o;
+    if (d === sched.d && t === sched.t && r === String(sched.r || '')) return '';
+    if (o.status === 'cargado' && r !== String(o.driver_id || '')) throw new Error('Ese pedido ya va cargado en una unidad; descárgalo antes de cambiar de repartidor');
+    await PUT(`/api/orders/${o.id}/schedule`, { date: d, time: t || null });
+    if (r && (r !== String(o.driver_id || '') || d !== sched.d)) {
+      const res = await POST('/api/routes/assign', { driver_id: r, date: d, order_ids: [o.id] });
+      if (res.skipped?.length && res.skipped[0].reason && !/ya lo tiene/.test(res.skipped[0].reason)) throw new Error(res.skipped[0].reason);
+    } else if (!r && o.driver_id) await POST('/api/orders/bulk-status', { status: 'pendiente', order_ids: [o.id], date: d });
+    return ` · entrega ${d}${t ? ' ' + t : ''}${r ? ' con ' + $('#scR', box).selectedOptions[0].text.split(' · ')[0] : ''}`;
+  };
+  $('#saveC', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
     if (!f.reportValidity()) return;
     const body = Object.fromEntries(new FormData(f));
     for (const k of ['notify_sms', 'notify_email', 'notify_whatsapp']) body[k] = f[k].checked ? 1 : 0;
     if (!body.lat && !(await confirmDlg('El cliente no tiene ubicación en el mapa; no podrá optimizarse su ruta. ¿Guardar así?'))) return;
+    btn.disabled = true;
     try {
       let id = c.id;
       if (id) await PUT('/api/customers/' + id, body); else id = (await POST('/api/customers', body)).id;
-      toast('Cliente guardado', 'ok'); m.close(); done?.(id);
-    } catch (e) { toast(e.message, 'bad'); }
+      const extra = await applySchedule();
+      toast('Cliente guardado' + extra, 'ok'); m.close(); done?.(id);
+    } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
   };
 }
 
@@ -1186,7 +1222,7 @@ async function routeDetail(id) {
         <label class="f" style="margin-top:10px">Reasignar repartidor<select id="rdrv">${drivers.map((d) => `<option value="${d.id}" ${d.id === r.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
       </div>
       <div class="table-wrap" style="max-height:520px"><table><thead><tr><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
-        ${r.stops.map((s) => `<tr><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
+        ${r.stops.map((s) => `<tr><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.appointment_time ? `<br><small><b>⏰ ${esc(s.appointment_time)}</b> acordada</small>` : s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
           <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar de la ruta">${icon('x')}</button>` : ''}</td></tr>`).join('')}
       </tbody></table></div>
     </div>`, {
@@ -2086,7 +2122,7 @@ async function exportAssignedExcel(date, driverId) {
       const rows = [[`${company} · Hoja de ruta y carga`], [`Repartidor: ${d.name}`, '', `Vehículo: ${d.vehicle || '—'}`], [`Fecha: ${fecha}`, '', `Pedidos: ${d.orders.length}`], [],
         ['#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
       d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.telnor || '', o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
-        o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '', '']));
+        o.appointment_time ? `${o.appointment_time} (acordada)` : o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '', '']));
       if (!d.orders.length) rows.push(['', 'Sin pedidos asignados en esta fecha']);
       rows.push([], ['Inventario que trae'], ['Producto', 'Cantidad', 'Números de serie']);
       for (const it of d.inventory) rows.push([it.name, it.qty, it.serials.map((x) => x.serial + (x.order ? ` (${x.order})` : '')).join(', ')]);
@@ -3975,7 +4011,7 @@ async function viewMyRoute(v) {
     return `<div class="stop ${cls}"><div class="n">${s.status === 'entregado' || q ? '✓' : s.status === 'fallido' ? '✕' : s.stop_seq}</div><div>
       <div class="row between"><span class="addr">${esc(s.customer_name)}</span><span class="num muted">${esc(s.eta || '')}</span></div>
       <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}
-      <small class="muted">${esc(s.tracking_code)} ${s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
+      <small class="muted">${esc(s.tracking_code)} ${s.appointment_time ? `· <b>⏰ ${esc(s.appointment_time)}</b>` : s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
         ${s.lat != null ? `<a class="btn sm" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}

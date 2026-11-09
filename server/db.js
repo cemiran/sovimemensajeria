@@ -439,6 +439,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 `);
 addCols('orders', [['account_id', 'INTEGER REFERENCES accounts(id)']]);
+addCols('orders', [['appointment_time', 'TEXT']]); // hora de entrega acordada con el cliente (HH:MM)
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, scheduled_date)');
 
 // ---- Expediente del personal (interno o externo): datos personales, fiscales, bancarios y pago ----

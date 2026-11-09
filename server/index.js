@@ -1861,7 +1861,8 @@ app.get(
   wrap((req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!c) throw new HttpError(404, 'No encontrado');
-    c.orders = db.prepare('SELECT id, tracking_code, status, scheduled_date, delivered_at FROM orders WHERE customer_id = ? ORDER BY id DESC LIMIT 50').all(c.id);
+    c.orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.scheduled_date, o.delivered_at, o.appointment_time, o.driver_id, o.route_id, u.name driver_name
+      FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.customer_id = ? ORDER BY o.id DESC LIMIT 50`).all(c.id);
     res.json(c);
   })
 );
@@ -2077,6 +2078,26 @@ app.post(
     res.json({ changed: changed.length, skipped });
   })
 );
+// Programar día y hora de entrega (la asignación a repartidor se hace con /api/routes/assign)
+app.put('/api/orders/:id/schedule', auth(...STAFF), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (['entregado', 'cancelado'].includes(o.status)) throw new HttpError(409, `El pedido ya está ${o.status}`);
+  const b = req.body || {};
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : o.scheduled_date;
+  const time = b.time === '' || b.time === null ? null : /^\d{2}:\d{2}$/.test(b.time || '') ? b.time : o.appointment_time;
+  db.prepare("UPDATE orders SET scheduled_date=?, appointment_time=?, status=CASE WHEN status='fallido' THEN 'pendiente' ELSE status END WHERE id=?").run(date, time, o.id);
+  // si ya va en una ruta, se reordena con la nueva hora
+  if (o.route_id && (time !== o.appointment_time)) {
+    const r = db.prepare('SELECT * FROM routes WHERE id=?').get(o.route_id);
+    if (r && r.status === 'planificada') {
+      const ids = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id);
+      if (ids.length) persistRoute({ routeId: r.id, driverId: r.driver_id, date: r.date, depot: { lat: r.depot_lat, lng: r.depot_lng }, orderIds: ids, settings: getSettings() });
+    }
+  }
+  audit(req, 'pedido.programar', `${o.tracking_code} → ${date}${time ? ' ' + time : ''}`);
+  res.json({ ok: true, date, time });
+}));
 app.post(
   '/api/orders/:id/reschedule',
   auth(...STAFF),
@@ -2281,7 +2302,11 @@ function stopsFor(orderIds) {
   if (!orderIds.length) return [];
   return db
     .prepare(
-      `SELECT o.id, o.priority, c.lat, c.lng, c.window_start, c.window_end FROM orders o JOIN customers c ON c.id=o.customer_id
+      // si se acordó una hora con el cliente, la ventana es ±30 min alrededor de esa hora
+      `SELECT o.id, o.priority, c.lat, c.lng,
+         CASE WHEN o.appointment_time IS NOT NULL THEN strftime('%H:%M', '2000-01-01 ' || o.appointment_time, '-30 minutes') ELSE c.window_start END window_start,
+         CASE WHEN o.appointment_time IS NOT NULL THEN strftime('%H:%M', '2000-01-01 ' || o.appointment_time, '+30 minutes') ELSE c.window_end END window_end
+       FROM orders o JOIN customers c ON c.id=o.customer_id
        WHERE o.id IN (${orderIds.map(() => '?').join(',')}) ORDER BY o.id`
     )
     .all(...orderIds);
@@ -2377,7 +2402,7 @@ app.get(
           c.name customer, c.phone, c.phone_alt, c.external_id telnor, c.address, c.colonia, c.reference, c.window_start, c.window_end, r.name route_name,
           (SELECT name FROM accounts WHERE id = o.account_id) account,
           (SELECT GROUP_CONCAT(i.qty || ' × ' || p.name, ', ') FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = o.id) items,
-          (SELECT GROUP_CONCAT(s.serial, ', ') FROM serials s WHERE s.order_id = o.id) serials
+          (SELECT GROUP_CONCAT(s.serial, ', ') FROM serials s WHERE s.order_id = o.id) serials, o.appointment_time
         FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN routes r ON r.id = o.route_id
         WHERE o.driver_id = ? AND o.status <> 'cancelado' AND (o.scheduled_date = ? OR r.date = ? OR (o.status IN ('entregado','fallido') AND date(o.delivered_at,'localtime') = ?))
         ORDER BY COALESCE(o.stop_seq, 999), o.id`).all(d.id, date, date, date);
