@@ -231,10 +231,11 @@ ${m.body}` };
 // Formato compatible con la hoja "Entregas" de Sovime: columnas A–I iguales a las existentes
 // (el Dashboard cuenta Estatus en G y Repartidor en H) y la evidencia a partir de la J.
 const SHEET_NAME = 'Entregas';
-const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
+const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono móvil', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
   'Recibió', 'Parentesco', 'Identificación', 'Tipo de entrega', 'Motivo', 'Ruta', 'Latitud', 'Longitud', 'Distancia al domicilio (m)',
   'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante', 'Números de serie',
-  'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable'];
+  'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable',
+  'Teléfono adicional'];
 function fmtPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
   return d.length === 10 ? `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}` : String(p || '');
@@ -251,7 +252,7 @@ function zoneOf(s, lat, lng) {
 function sheetRow(evidenceId) {
   const e = db
     .prepare(
-      `SELECT e.*, o.tracking_code, o.cod_amount, o.public_token, c.name cname, c.phone cphone, c.address, c.lat clat, c.lng clng,
+      `SELECT e.*, o.tracking_code, o.cod_amount, o.public_token, c.name cname, c.phone cphone, c.phone_alt cphone2, c.address, c.lat clat, c.lng clng,
               u.name dname, r.name rname
        FROM evidences e JOIN orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id
        LEFT JOIN users u ON u.id=e.driver_id LEFT JOIN routes r ON r.id=o.route_id WHERE e.id=?`
@@ -280,6 +281,7 @@ function sheetRow(evidenceId) {
       return [types[c.shipment_type] || '', c.temp_c ?? '', yn(c.temp_in_range), c.seal_number ? `${c.seal_number}${c.seal_ok == null ? '' : c.seal_ok ? ' (íntegro)' : ' (dañado)'}` : yn(c.seal_ok),
         c.vehicle?.plates || '', c.check ? (c.check.passed ? 'Aprobado' : 'Con observaciones') : '', c.trusted ? `${c.trusted.folio}${c.trusted.valid ? '' : ' (vencido)'}` : ''];
     })(),
+    fmtPhone(e.cphone2),
   ];
 }
 function queueSheet(evidenceId, orderId) {
