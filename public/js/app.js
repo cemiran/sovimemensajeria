@@ -771,16 +771,18 @@ async function viewDashboard(v) {
     GET(`/api/orders?date=${d}&limit=500`), GET(`/api/routes?date=${d}`), GET('/api/tracking/drivers'), GET(`/api/analytics?from=${d}&to=${d}`),
   ]);
   const c = (s) => orders.rows.filter((o) => s.includes(o.status)).length;
-  const done = c(['entregado']) + c(['fallido']);
+  const T = an.totals || {};
+  const nDel = T.delivered || 0, nFail = T.failed || 0;
+  const done = nDel + nFail;
   const hr = new Date().getHours();
   v.innerHTML = topbar(`${hr < 12 ? 'Buenos días' : hr < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${esc(firstName(store.user.name))}`,
     `<a class="btn" href="#/routes">${icon('route')} Planificar rutas</a><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`,
     `Resumen del ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}`) + `
   <div class="grid g4">
-    <div class="card kpi"><div class="label">Pedidos hoy</div><div class="value">${orders.total}</div><div class="sub">${c(['pendiente'])} sin ruta</div></div>
+    <div class="card kpi"><div class="label">Pedidos hoy</div><div class="value">${T.total || 0}</div><div class="sub">${c(['pendiente'])} sin ruta · programados o atendidos hoy</div></div>
     <div class="card kpi"><div class="label">En ruta</div><div class="value">${c(['asignado', 'cargado'])}</div><div class="sub">${c(['cargado'])} ya en vehículo</div></div>
-    <div class="card kpi"><div class="label">Entregados</div><div class="value" style="color:var(--ok)">${c(['entregado'])}</div><div class="sub">${done ? fmtN((c(['entregado']) / done) * 100, 1) + '% de éxito' : '—'}</div></div>
-    <div class="card kpi"><div class="label">Fallidos</div><div class="value" style="color:var(--bad)">${c(['fallido'])}</div><div class="sub">${routes.length} rutas · ${fmtN(routes.reduce((a, r) => a + (r.distance_km || 0), 0), 1)} km plan</div></div>
+    <div class="card kpi"><div class="label">Entregados hoy</div><div class="value" style="color:var(--ok)">${nDel}</div><div class="sub">${done ? fmtN((nDel / done) * 100, 1) + '% de éxito' : '—'}</div></div>
+    <div class="card kpi"><div class="label">Fallidos hoy</div><div class="value" style="color:var(--bad)">${nFail}</div><div class="sub">${routes.length} rutas · ${fmtN(routes.reduce((a, r) => a + (r.distance_km || 0), 0), 1)} km plan</div></div>
   </div>
   <div class="grid g-main" style="margin-top:14px">
     <div class="card"><div class="row between"><h2>Rutas del día</h2><small class="muted">🚚 posición de repartidores</small></div><div id="dmap" class="map"></div></div>

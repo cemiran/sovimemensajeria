@@ -2585,66 +2585,36 @@ app.get(
   wrap((req, res) => {
     const to = req.query.to || today();
     const from = req.query.from || new Date(Date.now() - 13 * 864e5).toLocaleDateString('en-CA');
-    const totals = db
-      .prepare(
-        `SELECT COUNT(*) total,
-          SUM(status='entregado') delivered, SUM(status='fallido') failed,
-          SUM(status IN ('pendiente','asignado','cargado')) open, SUM(status='cancelado') cancelled
-         FROM orders WHERE scheduled_date BETWEEN ? AND ?`
-      )
-      .get(from, to);
-    const routes = db
-      .prepare(
-        `SELECT COUNT(*) routes, ROUND(SUM(distance_km),1) km, ROUND(SUM(original_distance_km),1) original_km,
-          ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ?`
-      )
-      .get(from, to);
-    const byDriver = db
-      .prepare(
-        `SELECT u.id, u.name,
-          COUNT(o.id) assigned,
-          SUM(o.status='entregado') delivered,
-          SUM(o.status='fallido') failed,
-          (SELECT ROUND(SUM(r.distance_km),1) FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ?) km,
-          (SELECT ROUND(SUM((julianday(COALESCE(r.finished_at, datetime('now'))) - julianday(r.started_at))*24),2)
-             FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
-          (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e JOIN orders o2 ON o2.id=e.order_id
-             WHERE e.driver_id=u.id AND o2.scheduled_date BETWEEN ? AND ?) avg_gps_dev_m
-         FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND o.scheduled_date BETWEEN ? AND ?
-         WHERE u.role='repartidor' GROUP BY u.id ORDER BY delivered DESC`
-      )
-      .all(from, to, from, to, from, to, from, to)
+    // Entregas y fallidos cuentan por la FECHA REAL en que pasaron (hora local); lo abierto, por su fecha programada.
+    const DONE = "date(o.delivered_at,'localtime')";
+    const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))`;
+    const R = [from, to, from, to];
+    const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
+        SUM(o.status IN ('pendiente','asignado','cargado')) open, SUM(o.status='cancelado') cancelled FROM orders o WHERE ${IN}`).get(...R);
+    const routes = db.prepare(`SELECT COUNT(*) routes, ROUND(SUM(distance_km),1) km, ROUND(SUM(original_distance_km),1) original_km,
+        ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ?`).get(from, to);
+    const byDriver = db.prepare(`SELECT u.id, u.name, COUNT(o.id) assigned, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
+        (SELECT ROUND(SUM(r.distance_km),1) FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ?) km,
+        (SELECT ROUND(SUM((julianday(COALESCE(r.finished_at, datetime('now'))) - julianday(r.started_at))*24),2)
+           FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
+        (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e WHERE e.driver_id=u.id AND date(e.created_at,'localtime') BETWEEN ? AND ?) avg_gps_dev_m
+       FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND ${IN}
+       WHERE u.role='repartidor' GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
       .map((d) => ({
         ...d,
         success_rate: d.delivered + d.failed ? +((d.delivered / (d.delivered + d.failed)) * 100).toFixed(1) : null,
         per_hour: d.hours > 0 ? +(d.delivered / d.hours).toFixed(2) : null,
         km_per_delivery: d.delivered ? +((d.km || 0) / d.delivered).toFixed(2) : null,
       }));
-    const daily = db
-      .prepare(
-        `SELECT scheduled_date day, SUM(status='entregado') delivered, SUM(status='fallido') failed, COUNT(*) total
-         FROM orders WHERE scheduled_date BETWEEN ? AND ? GROUP BY scheduled_date ORDER BY day`
-      )
-      .all(from, to);
-    const reasons = db
-      .prepare(
-        `SELECT reason, COUNT(*) n FROM evidences e JOIN orders o ON o.id=e.order_id
-         WHERE e.result='fallido' AND o.scheduled_date BETWEEN ? AND ? GROUP BY reason ORDER BY n DESC`
-      )
-      .all(from, to);
-    const zones = db
-      .prepare(
-        `SELECT COALESCE(c.zip,'s/CP') zone, COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
-         FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.scheduled_date BETWEEN ? AND ?
-         GROUP BY zone ORDER BY total DESC LIMIT 12`
-      )
-      .all(from, to);
-    const onTime = db
-      .prepare(
-        `SELECT SUM(CASE WHEN c.window_end IS NULL OR time(o.delivered_at,'localtime') <= c.window_end THEN 1 ELSE 0 END) on_time, COUNT(*) n
-         FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='entregado' AND o.scheduled_date BETWEEN ? AND ?`
-      )
-      .get(from, to);
+    const daily = db.prepare(`SELECT CASE WHEN o.status IN ('entregado','fallido') THEN ${DONE} ELSE o.scheduled_date END day,
+        SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed, COUNT(*) total
+       FROM orders o WHERE ${IN} AND o.status <> 'cancelado' GROUP BY day ORDER BY day`).all(...R);
+    const reasons = db.prepare(`SELECT reason, COUNT(*) n FROM evidences e WHERE e.result='fallido' AND date(e.created_at,'localtime') BETWEEN ? AND ?
+       GROUP BY reason ORDER BY n DESC`).all(from, to);
+    const zones = db.prepare(`SELECT COALESCE(NULLIF(c.colonia,''), c.zip, 's/colonia') zone, COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
+       FROM orders o JOIN customers c ON c.id=o.customer_id WHERE ${IN} GROUP BY zone ORDER BY total DESC LIMIT 12`).all(...R);
+    const onTime = db.prepare(`SELECT SUM(CASE WHEN c.window_end IS NULL OR time(o.delivered_at,'localtime') <= c.window_end THEN 1 ELSE 0 END) on_time, COUNT(*) n
+       FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='entregado' AND ${DONE} BETWEEN ? AND ?`).get(from, to);
     const lowStock = db.prepare('SELECT id, name, sku, stock, min_stock FROM products WHERE stock <= min_stock ORDER BY stock LIMIT 20').all();
     res.json({ from, to, totals, routes, byDriver, daily, reasons, zones, onTime, lowStock });
   })
