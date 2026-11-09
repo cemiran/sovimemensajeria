@@ -2363,6 +2363,29 @@ app.post(
     res.status(201).json(out);
   })
 );
+// Lo asignado a cada repartidor en una fecha (para imprimir / Excel): pedidos con cliente, productos y S/N + inventario que trae
+app.get(
+  '/api/assigned/export',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
+    const only = req.query.driver_id ? Number(req.query.driver_id) : null;
+    const drivers = db.prepare(`SELECT id, name, vehicle, phone FROM users WHERE role='repartidor' ${only ? 'AND id=?' : 'AND active=1'} ORDER BY name`).all(...(only ? [only] : []));
+    const custody = new Map(custodyOf(only).map((d) => [d.id, d.items]));
+    const out = drivers.map((d) => {
+      const orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.stop_seq, o.eta, o.scheduled_date, o.notes, o.cod_amount,
+          c.name customer, c.phone, c.phone_alt, c.address, c.colonia, c.reference, c.window_start, c.window_end, r.name route_name,
+          (SELECT name FROM accounts WHERE id = o.account_id) account,
+          (SELECT GROUP_CONCAT(i.qty || ' × ' || p.name, ', ') FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = o.id) items,
+          (SELECT GROUP_CONCAT(s.serial, ', ') FROM serials s WHERE s.order_id = o.id) serials
+        FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN routes r ON r.id = o.route_id
+        WHERE o.driver_id = ? AND o.status <> 'cancelado' AND (o.scheduled_date = ? OR r.date = ? OR (o.status IN ('entregado','fallido') AND date(o.delivered_at,'localtime') = ?))
+        ORDER BY COALESCE(o.stop_seq, 999), o.id`).all(d.id, date, date, date);
+      return { ...d, orders, inventory: custody.get(d.id) || [] };
+    });
+    res.json({ date, drivers: out });
+  })
+);
 // Asignación masiva: pedidos (o los pedidos abiertos de varios clientes) a un repartidor.
 // Se agregan a su ruta del día (o se crea) y la ruta se re-optimiza; las rutas de donde salieron se recalculan.
 app.post(

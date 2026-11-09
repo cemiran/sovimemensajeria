@@ -1088,7 +1088,7 @@ async function viewRoutes(v) {
   const pending = pend.rows.filter((o) => o.scheduled_date <= date);
   const totKm = routes.reduce((a, r) => a + (r.distance_km || 0), 0);
   const totOrig = routes.reduce((a, r) => a + (r.original_distance_km || 0), 0);
-  v.innerHTML = topbar('Planificación de rutas', `<input type="date" id="rdate" value="${date}" style="width:auto" /><button class="btn" id="manual">${icon('route')} Ruta manual</button><button class="btn primary" id="auto">⚡ Auto-planificar (${pending.length})</button>`) + `
+  v.innerHTML = topbar('Planificación de rutas', `<input type="date" id="rdate" value="${date}" style="width:auto" /><button class="btn" id="xlsAll" title="Descarga un Excel con lo asignado a cada repartidor en esta fecha">${icon('download')} Excel por repartidor</button><button class="btn" id="manual">${icon('route')} Ruta manual</button><button class="btn primary" id="auto">⚡ Auto-planificar (${pending.length})</button>`) + `
   <div class="grid g4">
     <div class="card kpi"><div class="label">Rutas</div><div class="value">${routes.length}</div><div class="sub">${routes.reduce((a, r) => a + r.stops, 0)} paradas</div></div>
     <div class="card kpi"><div class="label">Km planificados</div><div class="value">${fmtN(totKm, 1)}</div><div class="sub">vs ${fmtN(totOrig, 1)} km sin optimizar</div></div>
@@ -1113,6 +1113,7 @@ async function viewRoutes(v) {
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
   </div>`;
   $('#rdate').onchange = (e) => (location.hash = '#/routes?date=' + e.target.value);
+  $('#xlsAll').onclick = () => exportAssignedExcel(date);
   const map = makeMap($('#rmap'));
   const all = [depotLatLng()];
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name));
@@ -1188,13 +1189,14 @@ async function routeDetail(id) {
       </tbody></table></div>
     </div>`, {
     wide: true,
-    footer: `<button class="btn bad" id="rdel">Eliminar ruta</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
+    footer: `<button class="btn bad" id="rdel">Eliminar ruta</button><button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
   drawRoute(map, r.stops, undefined, { onEdit: () => { m.el.remove(); routeDetail(r.id); } });
   if (r.last_lat) L.marker([r.last_lat, r.last_lng], { icon: truckIcon() }).addTo(map).bindPopup('Última posición ' + fmtDT(r.last_seen));
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
+  $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
   $('#ropt', m.el).onclick = async () => { const o = await POST(`/api/routes/${r.id}/optimize`); toast(`Re-optimizada: ${o.distance_km} km`, 'ok'); m.el.remove(); routeDetail(r.id); };
   $('#rdel', m.el).onclick = async () => { if (!(await confirmDlg('¿Eliminar la ruta? Los pedidos regresarán a pendientes.'))) return; try { await api('DELETE', '/api/routes/' + r.id); toast('Ruta eliminada', 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } };
   $$('[data-rm]', m.el).forEach((b) => (b.onclick = async () => { await PUT('/api/routes/' + r.id, { remove_order_ids: [Number(b.dataset.rm)] }); m.el.remove(); routeDetail(r.id); }));
@@ -2056,6 +2058,51 @@ async function staffProfile(box, u) {
   };
 }
 
+// ================= Excel de lo asignado a cada repartidor =================
+async function exportAssignedExcel(date, driverId) {
+  toast('Preparando Excel…', '');
+  try {
+    const [X, r] = await Promise.all([loadXLSX(), GET(`/api/assigned/export?date=${date}${driverId ? '&driver_id=' + driverId : ''}`)]);
+    const list = r.drivers.filter((d) => driverId || d.orders.length || d.inventory.length);
+    if (!list.length) return toast('No hay nada asignado a repartidores en esa fecha', 'bad');
+    const wb = X.utils.book_new();
+    const fecha = new Date(date + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const company = SETTINGS.company_name || 'Sovime Mensajería';
+    const invUnits = (d) => d.inventory.reduce((a, x) => a + x.qty, 0);
+    if (!driverId) {
+      const rows = [[`${company} · Lo asignado a repartidores`], [`Fecha: ${fecha}`], [],
+        ['Repartidor', 'Vehículo', 'Pedidos', 'Entregados', 'Fallidos', 'Por entregar', 'Unidades que trae']];
+      for (const d of list) rows.push([d.name, d.vehicle || '', d.orders.length, d.orders.filter((o) => o.status === 'entregado').length, d.orders.filter((o) => o.status === 'fallido').length,
+        d.orders.filter((o) => ['asignado', 'cargado', 'pendiente'].includes(o.status)).length, invUnits(d)]);
+      rows.push(['Total', '', ...[2, 3, 4, 5, 6].map((i) => rows.slice(4).reduce((a, x) => a + (x[i] || 0), 0))]);
+      const ws = X.utils.aoa_to_sheet(rows);
+      ws['!cols'] = [{ wch: 26 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 13 }, { wch: 18 }];
+      X.utils.book_append_sheet(wb, ws, 'Resumen');
+    }
+    const used = new Set(['Resumen']);
+    for (const d of list) {
+      const rows = [[`${company} · Hoja de ruta y carga`], [`Repartidor: ${d.name}`, '', `Vehículo: ${d.vehicle || '—'}`], [`Fecha: ${fecha}`, '', `Pedidos: ${d.orders.length}`], [],
+        ['#', 'Guía', 'Cliente', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
+      d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
+        o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '', '']));
+      if (!d.orders.length) rows.push(['', 'Sin pedidos asignados en esta fecha']);
+      rows.push([], ['Inventario que trae'], ['Producto', 'Cantidad', 'Números de serie']);
+      for (const it of d.inventory) rows.push([it.name, it.qty, it.serials.map((x) => x.serial + (x.order ? ` (${x.order})` : '')).join(', ')]);
+      if (!d.inventory.length) rows.push(['Sin inventario asignado']);
+      rows.push([], [], ['Entregó (almacén): ____________________', '', '', 'Recibió (repartidor): ____________________']);
+      const ws = X.utils.aoa_to_sheet(rows);
+      ws['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }, { wch: 30 }];
+      let name = d.name.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || 'Repartidor';
+      while (used.has(name)) name = name.slice(0, 26) + '_' + used.size;
+      used.add(name);
+      X.utils.book_append_sheet(wb, ws, name);
+    }
+    const file = driverId ? `asignado-${list[0].name.replace(/\s+/g, '_')}-${date}.xlsx` : `asignado-repartidores-${date}.xlsx`;
+    X.writeFile(wb, file);
+    toast('Excel descargado', 'ok');
+  } catch (e) { toast(e.message || 'No se pudo generar el Excel', 'bad'); }
+}
+
 // ================= Clientes mayoristas =================
 const mxn = (n) => '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 async function viewAccounts(v) {
@@ -2289,7 +2336,7 @@ function assignToDriver(drivers, products, preDriver) {
 
 function custodyDetail(d) {
   const m = modal(`Inventario de ${d.name}`, `<div class="stack">
-    <div class="row between"><b>${d.total} unidades</b><div class="row"><button class="btn sm" id="cdAdd">${icon('plus')} Asignar más</button>${d.open ? '' : `<button class="btn sm" id="cdOpen" title="Lo podrá entregar cualquier repartidor">🔓 Pasar a abierto</button>`}<button class="btn sm bad" id="cdAll">Devolver todo al almacén</button></div></div>
+    <div class="row between"><b>${d.total} unidades</b><div class="row">${d.open ? '' : `<button class="btn sm" id="cdXls">${icon('download')} Excel</button>`}<button class="btn sm" id="cdAdd">${icon('plus')} Asignar más</button>${d.open ? '' : `<button class="btn sm" id="cdOpen" title="Lo podrá entregar cualquier repartidor">🔓 Pasar a abierto</button>`}<button class="btn sm bad" id="cdAll">Devolver todo al almacén</button></div></div>
     ${d.items.map((it) => `<div class="card" style="padding:12px"><div class="row between"><div><b>${esc(it.name)}</b> <small class="muted">${esc(it.sku)}</small></div><b>${it.qty}</b></div>
       ${it.serialized ? `<div class="table-wrap" style="max-height:220px"><table><tbody>${it.serials.map((s) => `<tr><td class="mono">${esc(s.serial)}</td><td><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Sin pedido'} · desde ${fmtDT(s.since)}</small></td><td class="r"><button class="btn sm" data-ret-sn="${esc(s.serial)}">Devolver</button></td></tr>`).join('')}</tbody></table></div>`
         : `<div class="row" style="margin-top:8px"><input type="number" min="1" max="${it.qty}" value="${it.qty}" style="width:90px" data-ret-qty="${it.product_id}" /><button class="btn sm" data-ret-p="${it.product_id}">Devolver al almacén</button></div>`}</div>`).join('')}
@@ -2309,6 +2356,7 @@ function custodyDetail(d) {
       toast(`${n} unidades ahora están abiertas para cualquier repartidor`, 'ok'); m.close();
     } catch (e) { toast(e.message, 'bad'); }
   });
+  $('#cdXls', m.el)?.addEventListener('click', () => exportAssignedExcel(today(), d.id));
   $('#cdAll', m.el).onclick = async () => { if (await confirmDlg(`¿${d.name} devolvió al almacén todo lo que traía (${d.total} unidades)?`)) ret({ all: true }, 'unidades devueltas al almacén'); };
   $('#cdAdd', m.el).onclick = async () => { m.close(); const [c, p] = await Promise.all([GET('/api/custody'), GET('/api/products?limit=500')]); assignToDriver(c.drivers, p.rows, d.id); };
   $$('[data-ret-sn]', m.el).forEach((b) => (b.onclick = () => ret({ serials: [b.dataset.retSn] }, 'equipo devuelto al almacén')));
