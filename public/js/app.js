@@ -348,7 +348,7 @@ function openScanner({ title = 'Escanear código', continuous = false, onCode, h
       </form>
     </div>
     <div class="scan-last" id="scanLast" hidden></div>
-    ${continuous ? '<h3 style="margin-top:14px">Escaneados</h3><div class="scan-log" id="scanLog"><small class="muted">Aún nada…</small></div>' : ''}
+    ${continuous ? '<h3 style="margin-top:14px">Escaneados</h3><div class="scan-log" id="scanLog"><small class="muted log-empty">Aún nada…</small></div>' : ''}
   `, { footer: '<button class="btn" data-close>Cerrar</button>', onClose: () => { stopCam(); onClose?.(); } });
   const $m = (s) => $(s, m.el);
   const log = $m('#scanLog');
@@ -374,12 +374,13 @@ function openScanner({ title = 'Escanear código', continuous = false, onCode, h
       beep(true);
       flash(true, `✅ ${code}${res ? ' · ' + res : ''}`);
       if (continuous) {
-        if (log.querySelector('small')) log.innerHTML = '';
+        log.querySelector('.log-empty')?.remove();
         log.insertAdjacentHTML('afterbegin', `<div>✅ <b>${esc(code)}</b> ${res ? '· ' + esc(res) : ''} <small class="muted">${via}</small></div>`);
       } else { busy = false; m.close(); return; }
     } catch (e) {
       beep(false);
       flash(false, `⛔ ${code} · ${e.message}`);
+      if (continuous) log.querySelector('.log-empty')?.remove();
       if (continuous) log.insertAdjacentHTML('afterbegin', `<div style="color:var(--bad)">⛔ <b>${esc(code)}</b> · ${esc(e.message)}</div>`);
       else toast(e.message, 'bad');
     } finally { busy = false; }
@@ -2912,6 +2913,7 @@ async function viewInventory(v) {
   $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
   $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => String(d.id) === tr.dataset.cust))));
   $$('tr[data-p]', v).forEach((tr) => (tr.onclick = () => productForm(JSON.parse(tr.dataset.p))));
+  const snProducts = r.rows.filter((x) => x.serialized);
   const scanMove = (type) => {
     let qtyEl;
     const m = openScanner({
@@ -2924,7 +2926,14 @@ async function viewInventory(v) {
           const res = await POST('/api/inventory/movements', { barcode: code, type: t, qty: t === 'ajuste' ? qty : Math.abs(qty), reference: $('#mref', m.el).value || 'Escaneo' });
           return `stock: ${res.stock}`;
         } catch (e) {
-          if (e.status === 404 && ONT_SN.test(code)) throw new Error('Es un número de serie de equipo: regístralo en Números de serie → Recibir equipos');
+          // un número de serie (HWTC…): en entradas se recibe como equipo del producto elegido
+          const snProd = $('#msnP', m.el)?.value;
+          if (e.status === 404 && type === 'entrada' && snProd && (ONT_SN.test(code) || SN_LIKE.test(code))) {
+            const r = await POST('/api/serials/receive', { product_id: snProd, serials: [code], warehouse_id: $('#msnW', m.el)?.value || null, reference: $('#mref', m.el).value || 'Entrada por escaneo' });
+            if (!r.received) throw new Error(r.errors[0]?.error || 'No se pudo registrar el equipo');
+            return `equipo recibido (${r.product}) · existencia ${r.stock}`;
+          }
+          if (e.status === 404 && ONT_SN.test(code)) throw new Error(type === 'entrada' ? 'Es un número de serie: activa "Controlar por número de serie" en el producto del módem' : 'Es un número de serie: para sacarlo usa Números de serie (baja) o asígnalo a un repartidor');
           if (e.status === 404) { productForm({ barcode: code }); throw new Error('No registrado: da de alta el producto'); }
           throw e;
         }
@@ -2934,8 +2943,11 @@ async function viewInventory(v) {
     m.el.querySelector('.body').insertAdjacentHTML('afterbegin', `<div class="grid g3" style="margin-bottom:12px">
       ${type === 'entrada' ? '' : '<label class="f">Tipo<select id="mtype"><option value="salida">Salida</option><option value="ajuste">Ajuste (+/-)</option><option value="devolucion">Devolución</option></select></label>'}
       <label class="f">Cantidad por lectura<input type="number" id="mqty" value="1" /></label>
-      <label class="f">Referencia<input id="mref" placeholder="Factura, OC, motivo…" /></label></div>`);
+      <label class="f">Referencia<input id="mref" placeholder="Factura, OC, motivo…" /></label></div>
+      ${type === 'entrada' && snProducts.length ? `<div class="grid g2" style="margin-bottom:12px"><label class="f">Si lees un número de serie, entra como<select id="msnP">${snProducts.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>
+        <label class="f">Almacén<select id="msnW"></select></label></div>` : ''}`);
     qtyEl = $('#mqty', m.el);
+    if ($('#msnW', m.el)) fillWarehouseSelect($('#msnW', m.el));
   };
   $('#scanIn').onclick = () => scanMove('entrada');
   $('#scanOut').onclick = () => scanMove('salida');
