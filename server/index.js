@@ -793,6 +793,7 @@ app.post(
       if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
     }
     if (enable && !dry) db.prepare('UPDATE products SET serialized=1 WHERE id=?').run(p.id);
+    const whId = (req.body.warehouse_id && db.prepare('SELECT id FROM warehouses WHERE id=? AND active=1').get(Number(req.body.warehouse_id))?.id) || whDefault()?.id || null;
     tx(() => {
       for (const sn of list) {
         if (seen.has(sn)) { results.push({ serial: sn, ok: false, error: 'Repetido en la lista' }); continue; }
@@ -801,7 +802,7 @@ app.post(
         const ex = db.prepare('SELECT s.status, p.name FROM serials s JOIN products p ON p.id=s.product_id WHERE s.serial = ?').get(sn);
         if (ex) { results.push({ serial: sn, ok: false, error: `Ya registrado (${ex.name}, ${ex.status})` }); continue; }
         if (dry) { results.push({ serial: sn, ok: true }); continue; }
-        const r = db.prepare('INSERT INTO serials (product_id, serial, reference) VALUES (?,?,?)').run(p.id, sn, ref || null);
+        const r = db.prepare('INSERT INTO serials (product_id, serial, reference, warehouse_id) VALUES (?,?,?,?)').run(p.id, sn, ref || null, whId);
         const sid = Number(r.lastInsertRowid);
         serialEvent(sid, 'recibido', null, req.user.id, ref || null);
         if (drv) {
@@ -936,6 +937,170 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
     return res.type('text/csv; charset=utf-8').send('﻿' + head.map(q).join(',') + '\n' + lines.join('\n'));
   }
   res.json({ account: a, from, to, rows, totals });
+}));
+
+// ---------- Expediente del personal ----------
+const PROFILE_TXT = ['hire_type', 'hire_date', 'end_date', 'birth_date', 'address', 'emergency_name', 'emergency_phone', 'rfc', 'curp', 'nss',
+  'bank_name', 'clabe', 'account_number', 'account_holder', 'pay_period', 'notes'];
+// Cumplimiento mínimo para dar de alta a personal (sobre todo externo)
+const STAFF_DOCS = [['ine', 'INE / identificación oficial'], ['domicilio', 'Comprobante de domicilio'], ['csf', 'Constancia de situación fiscal (RFC)'],
+  ['curp', 'CURP'], ['licencia', 'Licencia de manejo vigente'], ['antecedentes', 'Carta de no antecedentes penales'], ['contrato', 'Contrato / convenio firmado'],
+  ['banco', 'Estado de cuenta (CLABE)'], ['seguro', 'Seguro de la unidad (si usa vehículo propio)']];
+const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/;
+const CURP_RE = /^[A-Z][AEIOUX][A-Z]{2}\d{6}[HM][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[A-Z0-9]\d$/;
+function clabeOk(c) {
+  if (!/^\d{18}$/.test(c)) return false;
+  const w = [3, 7, 1];
+  const sum = [...c.slice(0, 17)].reduce((a, d, i) => a + ((Number(d) * w[i % 3]) % 10), 0);
+  return (10 - (sum % 10)) % 10 === Number(c[17]);
+}
+function profileOf(userId) {
+  const p = db.prepare('SELECT * FROM staff_profiles WHERE user_id=?').get(userId) || { user_id: Number(userId), hire_type: 'externo', pay_per_delivery: 0, pay_per_failed: 0, pay_period: 'semanal' };
+  const docs = (() => { try { return JSON.parse(p.docs_json || '{}'); } catch { return {}; } })();
+  const today0 = today();
+  // la licencia solo se pide a repartidores; el seguro de unidad es opcional
+  const role = db.prepare('SELECT role FROM users WHERE id=?').get(userId)?.role;
+  const need = STAFF_DOCS.filter(([k]) => k !== 'seguro' && (k !== 'licencia' || role === 'repartidor'));
+  const missing = need.filter(([k]) => !docs[k]?.ok).map(([, l]) => l);
+  const expired = STAFF_DOCS.filter(([k]) => docs[k]?.ok && docs[k]?.expires && docs[k].expires < today0).map(([, l]) => l);
+  return { ...p, docs, doc_list: STAFF_DOCS, missing, expired, complete: !missing.length && !expired.length };
+}
+app.get('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
+  if (!db.prepare('SELECT 1 FROM users WHERE id=?').get(req.params.id)) throw new HttpError(404, 'No encontrado');
+  res.json(profileOf(req.params.id));
+}));
+app.put('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
+  const u = db.prepare('SELECT id, name FROM users WHERE id=?').get(req.params.id);
+  if (!u) throw new HttpError(404, 'No encontrado');
+  const b = req.body || {};
+  const cur = db.prepare('SELECT * FROM staff_profiles WHERE user_id=?').get(u.id) || {};
+  const v = {};
+  for (const k of PROFILE_TXT) v[k] = b[k] === undefined ? cur[k] ?? null : String(b[k] ?? '').trim().slice(0, k === 'address' || k === 'notes' ? 400 : 120) || null;
+  v.hire_type = v.hire_type === 'interno' ? 'interno' : 'externo';
+  for (const k of ['rfc', 'curp']) if (v[k]) v[k] = v[k].toUpperCase().replace(/\s+/g, '');
+  if (v.rfc && !RFC_RE.test(v.rfc)) throw new HttpError(400, 'El RFC no tiene un formato válido (12 o 13 caracteres)');
+  if (v.curp && !CURP_RE.test(v.curp)) throw new HttpError(400, 'La CURP no tiene un formato válido (18 caracteres)');
+  if (v.clabe) { v.clabe = v.clabe.replace(/\D/g, ''); if (!clabeOk(v.clabe)) throw new HttpError(400, 'La CLABE debe tener 18 dígitos y su dígito verificador no coincide'); }
+  for (const k of ['pay_per_delivery', 'pay_per_failed']) {
+    const n = b[k] === undefined || b[k] === '' ? Number(cur[k] || 0) : Number(b[k]);
+    if (!Number.isFinite(n) || n < 0) throw new HttpError(400, 'El monto de pago debe ser un número positivo');
+    v[k] = Math.round(n * 100) / 100;
+  }
+  let docs = cur.docs_json || '{}';
+  if (b.docs && typeof b.docs === 'object') {
+    const clean = {};
+    for (const [k] of STAFF_DOCS) if (b.docs[k]) clean[k] = { ok: !!b.docs[k].ok, expires: /^\d{4}-\d{2}-\d{2}$/.test(b.docs[k].expires || '') ? b.docs[k].expires : null };
+    docs = JSON.stringify(clean);
+  }
+  let photo = cur.photo_path || null;
+  if (b.photo === null) photo = null;
+  else if (typeof b.photo === 'string' && b.photo.startsWith('data:')) photo = saveDataUrl(b.photo, 'personal');
+  const cols = [...PROFILE_TXT, 'pay_per_delivery', 'pay_per_failed'];
+  db.prepare(`INSERT INTO staff_profiles (user_id, ${cols.join(',')}, docs_json, photo_path, updated_at) VALUES (?, ${cols.map(() => '?').join(',')}, ?, ?, datetime('now'))
+    ON CONFLICT(user_id) DO UPDATE SET ${cols.map((c) => `${c}=excluded.${c}`).join(', ')}, docs_json=excluded.docs_json, photo_path=excluded.photo_path, updated_at=datetime('now')`)
+    .run(u.id, ...cols.map((c) => v[c]), docs, photo);
+  audit(req, 'personal.expediente', u.name);
+  res.json(profileOf(u.id));
+}));
+// Pago del periodo según entregas (y fallidos) registrados a su nombre
+app.get('/api/users/:id/pay', auth('admin'), wrap((req, res) => {
+  const p = profileOf(req.params.id);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : today().slice(0, 8) + '01';
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today();
+  const r = db.prepare(`SELECT SUM(result='entregado') delivered, SUM(result='fallido') failed FROM evidences
+    WHERE driver_id=? AND date(created_at) BETWEEN ? AND ?`).get(req.params.id, from, to);
+  const d = r.delivered || 0, f = r.failed || 0;
+  res.json({ from, to, delivered: d, failed: f, rate_delivery: p.pay_per_delivery, rate_failed: p.pay_per_failed,
+    amount: Math.round((d * p.pay_per_delivery + f * p.pay_per_failed) * 100) / 100 });
+}));
+
+// ---------- Almacenes ----------
+const whDefault = () => db.prepare('SELECT * FROM warehouses WHERE is_default=1 ORDER BY id LIMIT 1').get() || db.prepare('SELECT * FROM warehouses ORDER BY id LIMIT 1').get();
+app.get('/api/warehouses', auth(), wrap((req, res) => {
+  res.json(db.prepare(`SELECT w.*, (SELECT COUNT(*) FROM serials s WHERE s.warehouse_id = w.id AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado')) units
+    FROM warehouses w ORDER BY w.active DESC, w.is_default DESC, w.name`).all());
+}));
+function whBody(b) {
+  const name = String(b.name || '').trim().slice(0, 80);
+  if (!name) throw new HttpError(400, 'Escribe el nombre del almacén');
+  const num = (x) => (x === '' || x == null || !Number.isFinite(Number(x)) ? null : Number(x));
+  return { name, address: String(b.address || '').trim().slice(0, 250) || null, lat: num(b.lat), lng: num(b.lng),
+    phone: String(b.phone || '').trim().slice(0, 30) || null, manager: String(b.manager || '').trim().slice(0, 80) || null };
+}
+app.post('/api/warehouses', auth('admin'), wrap((req, res) => {
+  const b = whBody(req.body || {});
+  try {
+    const id = Number(db.prepare('INSERT INTO warehouses (name, address, lat, lng, phone, manager) VALUES (?,?,?,?,?,?)').run(b.name, b.address, b.lat, b.lng, b.phone, b.manager).lastInsertRowid);
+    audit(req, 'almacen.alta', b.name);
+    res.status(201).json({ id });
+  } catch (e) { if (String(e.message).includes('UNIQUE')) throw new HttpError(409, 'Ya existe un almacén con ese nombre'); throw e; }
+}));
+app.put('/api/warehouses/:id', auth('admin'), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id=?').get(req.params.id);
+  if (!w) throw new HttpError(404, 'No encontrado');
+  const b = whBody({ ...w, ...req.body });
+  const active = req.body.active === undefined ? w.active : req.body.active ? 1 : 0;
+  if (!active && w.is_default) throw new HttpError(409, 'No puedes desactivar el almacén principal; primero marca otro como principal');
+  tx(() => {
+    db.prepare('UPDATE warehouses SET name=?, address=?, lat=?, lng=?, phone=?, manager=?, active=? WHERE id=?').run(b.name, b.address, b.lat, b.lng, b.phone, b.manager, active, w.id);
+    if (req.body.is_default) {
+      db.prepare('UPDATE warehouses SET is_default = (id = ?)').run(w.id);
+      // el principal es el punto de salida por omisión de las rutas
+      if (b.lat != null) for (const [k, val] of [['depot_name', b.name], ['depot_lat', String(b.lat)], ['depot_lng', String(b.lng)]])
+        db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, val);
+    }
+  });
+  audit(req, 'almacen.editar', b.name);
+  res.json({ ok: true });
+}));
+// Traspaso de equipos con S/N entre almacenes
+app.post('/api/warehouses/:id/transfer', auth(...STAFF), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id=? AND active=1').get(req.params.id);
+  if (!w) throw new HttpError(404, 'Almacén no encontrado');
+  const list = (Array.isArray(req.body?.serials) ? req.body.serials : []).map(normSerial).filter(Boolean);
+  if (!list.length) throw new HttpError(400, 'Elige los equipos a mover');
+  let n = 0; const errors = [];
+  tx(() => {
+    for (const sn of list) {
+      const s = db.prepare('SELECT s.*, w.name wname FROM serials s LEFT JOIN warehouses w ON w.id = s.warehouse_id WHERE s.serial=?').get(sn);
+      if (!s) { errors.push({ serial: sn, error: 'No registrado' }); continue; }
+      if (s.holder_id || s.open_pool || !['disponible', 'asignado'].includes(s.status)) { errors.push({ serial: sn, error: 'No está en un almacén' }); continue; }
+      if (s.warehouse_id === w.id) { errors.push({ serial: sn, error: `Ya está en ${w.name}` }); continue; }
+      db.prepare("UPDATE serials SET warehouse_id=?, updated_at=datetime('now') WHERE id=?").run(w.id, s.id);
+      serialEvent(s.id, 'traspaso', s.order_id, req.user.id, `${s.wname || 'Sin almacén'} → ${w.name}`);
+      n++;
+    }
+  });
+  if (n) audit(req, 'almacen.traspaso', `${n} equipos → ${w.name}`);
+  res.json({ moved: n, errors });
+}));
+// Existencias: dónde está cada unidad (almacenes, repartidores, abierto) y lo apartado en pedidos
+app.get('/api/inventory/breakdown', auth(...STAFF), wrap((req, res) => {
+  const whs = db.prepare('SELECT id, name, is_default, active FROM warehouses ORDER BY is_default DESC, name').all();
+  const prods = db.prepare('SELECT id, name, sku, serialized, stock, unit FROM products ORDER BY name').all();
+  const out = prods.map((p) => {
+    const reserved = db.prepare(`SELECT COALESCE(SUM(oi.qty),0) n FROM order_items oi JOIN orders o ON o.id = oi.order_id
+      WHERE oi.product_id = ? AND o.status IN ('pendiente','asignado','cargado')`).get(p.id).n;
+    if (p.serialized) {
+      const byWh = whs.map((w) => ({ id: w.id, name: w.name, n: db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND warehouse_id=? AND holder_id IS NULL AND open_pool=0 AND status IN ('disponible','asignado')`).get(p.id, w.id).n }));
+      const noWh = db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND warehouse_id IS NULL AND holder_id IS NULL AND open_pool=0 AND status IN ('disponible','asignado')`).get(p.id).n;
+      const drivers = db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND holder_id IS NOT NULL AND status IN ('disponible','asignado')`).get(p.id).n;
+      const open = db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND open_pool=1 AND holder_id IS NULL AND status IN ('disponible','asignado')`).get(p.id).n;
+      const delivered = db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND status='entregado'`).get(p.id).n;
+      const inWh = byWh.reduce((a, x) => a + x.n, 0) + noWh;
+      return { ...p, reserved, warehouses: byWh, no_warehouse: noWh, in_warehouses: inWh, drivers, open, delivered, total: inWh + drivers + open };
+    }
+    const drivers = db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE product_id=?').get(p.id).n;
+    const open = db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(p.id)?.qty || 0;
+    const inWh = warehouseQty(p.id);
+    return { ...p, reserved, warehouses: null, in_warehouses: inWh, drivers, open, total: inWh + drivers + open };
+  });
+  res.json({ warehouses: whs, products: out });
+}));
+// Equipos con S/N dentro de un almacén (para revisar o traspasar)
+app.get('/api/warehouses/:id/serials', auth(...STAFF), wrap((req, res) => {
+  res.json(db.prepare(`SELECT s.serial, s.status, p.name product_name, o.tracking_code FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN orders o ON o.id = s.order_id
+    WHERE s.warehouse_id = ? AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') ORDER BY p.name, s.serial`).all(req.params.id));
 }));
 
 // ---------- Inventario asignado a repartidores ----------
@@ -1999,6 +2164,10 @@ app.get(
 
 // ---------- Rutas ----------
 function depotOf(s, body = {}) {
+  if (body.warehouse_id) {
+    const w = db.prepare('SELECT lat, lng FROM warehouses WHERE id=? AND lat IS NOT NULL').get(Number(body.warehouse_id));
+    if (w) return { lat: w.lat, lng: w.lng };
+  }
   return { lat: Number(body.depot_lat ?? s.depot_lat), lng: Number(body.depot_lng ?? s.depot_lng) };
 }
 function stopsFor(orderIds) {

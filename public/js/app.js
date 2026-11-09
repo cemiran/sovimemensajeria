@@ -1131,15 +1131,17 @@ async function viewRoutes(v) {
     if (!pending.length) return toast('No hay pedidos pendientes', 'bad');
     const m = modal('Auto-planificar rutas', `
       <p class="muted" style="margin-top:0">Se repartirán <b>${pending.length}</b> pedidos pendientes por zonas (barrido angular desde el almacén, respetando la capacidad de cada vehículo) y se optimizará la secuencia de cada ruta (vecino más cercano + 2-opt, prioridad urgente primero y ventanas horarias).</p>
-      <label class="f">Hora de salida<input type="time" id="stime" value="${esc(SETTINGS.start_time || '09:00')}" /></label>
+      <div class="grid g2"><label class="f">Salen del almacén<select id="swh"></select></label>
+      <label class="f">Hora de salida<input type="time" id="stime" value="${esc(SETTINGS.start_time || '09:00')}" /></label></div>
       <h3 style="margin-top:14px">Repartidores disponibles</h3>
       ${drivers.filter((d) => d.active).map((d) => `<label class="row" style="padding:6px 0"><input type="checkbox" value="${d.id}" checked /> <span class="grow">${esc(d.name)} <small class="muted">${esc(d.vehicle || '')}</small></span><small class="muted">cap. ${d.capacity}</small></label>`).join('')}`,
       { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="go">Generar rutas</button>' });
+    fillWarehouseSelect($('#swh', m.el), { located: true });
     $('#go', m.el).onclick = async () => {
       const ids = $$('input[type=checkbox]:checked', m.el).map((x) => Number(x.value));
       if (!ids.length) return toast('Elige al menos un repartidor', 'bad');
       try {
-        const r = await POST('/api/routes/auto', { date, driver_ids: ids, start_time: $('#stime', m.el).value });
+        const r = await POST('/api/routes/auto', { date, driver_ids: ids, start_time: $('#stime', m.el).value, warehouse_id: $('#swh', m.el).value || null });
         const saved = r.created.reduce((a, x) => a + (x.original_distance_km - x.distance_km), 0);
         toast(`${r.created.length} rutas creadas · ${fmtN(saved, 1)} km ahorrados${r.overflow.length ? ` · ${r.overflow.length} sin asignar (capacidad o sin GPS)` : ''}`, 'ok');
         m.close(); render();
@@ -1635,19 +1637,21 @@ function receiveSerials(products, preselect) {
   const m = modal('Recibir equipos por número de serie', `<div class="stack">
     <div class="grid g2"><label class="f">Producto<select id="rsP">${products.map((p) => `<option value="${p.id}" ${String(p.id) === String(preselect) ? 'selected' : ''}>${esc(p.name)} (${esc(p.sku)})</option>`).join('')}</select></label>
       <label class="f">Referencia<input id="rsRef" placeholder="Factura, remisión, lote…" maxlength="80" /></label></div>
-    <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="rsDrv"><option value="">— Dejar en almacén —</option></select></label>
+    <div class="grid g2"><label class="f">Almacén<select id="rsWh"></select></label>
+    <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="rsDrv"><option value="">— Dejar en almacén —</option></select></label></div>
     <div class="row"><button class="btn primary grow" id="rsScan">${icon('scan')} Escanear series</button></div>
     <label class="f">…o pega una lista (una serie por línea, p. ej. desde Excel)<textarea id="rsList" rows="5" placeholder="HWTCDE3D40BA&#10;HWTCDE3D40BB"></textarea></label>
     <div class="row"><button class="btn" id="rsPaste">Registrar lista</button><small class="muted" id="rsCount"></small></div>
     <div class="scan-log" id="rsLog"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Listo</button>', onClose: () => render() });
   const send = async (serials) => {
-    const r = await POST('/api/serials/receive', { product_id: $('#rsP', m.el).value, serials, reference: $('#rsRef', m.el).value, driver_id: $('#rsDrv', m.el).value || null });
+    const r = await POST('/api/serials/receive', { product_id: $('#rsP', m.el).value, serials, reference: $('#rsRef', m.el).value, driver_id: $('#rsDrv', m.el).value || null, warehouse_id: $('#rsWh', m.el).value || null });
     const log = $('#rsLog', m.el);
     for (const x of r.results) log.insertAdjacentHTML('afterbegin', `<div style="${x.ok ? '' : 'color:var(--bad)'}">${x.ok ? '✅' : '⛔'} <b>${esc(x.serial)}</b>${x.ok && r.driver ? ` → ${icon('truck')} ${esc(r.driver)}` : ''}${x.error ? ' · ' + esc(x.error) : ''}</div>`);
     $('#rsCount', m.el).textContent = `Existencia actual: ${r.stock}`;
     return r;
   };
   fillDriverSelect($('#rsDrv', m.el));
+  fillWarehouseSelect($('#rsWh', m.el));
   $('#rsList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#rsCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
   $('#rsPaste', m.el).onclick = async () => {
     const list = $('#rsList', m.el).value.split(/[\r\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
@@ -1838,6 +1842,146 @@ function mapSelection(v, map, pins, drivers, date) {
   };
   box.addEventListener('pointerup', finish, true);
   box.addEventListener('pointercancel', finish, true);
+}
+
+// ================= Almacenes y existencias =================
+async function fillWarehouseSelect(sel, { located = false } = {}) {
+  try {
+    const ws = (await GET('/api/warehouses')).filter((w) => w.active && (!located || w.lat != null));
+    sel.innerHTML = ws.map((w) => `<option value="${w.id}" ${w.is_default ? 'selected' : ''}>${esc(w.name)}${w.is_default ? ' (principal)' : ''}</option>`).join('');
+  } catch {}
+}
+function stockBreakdown(bd) {
+  const whs = bd.warehouses.filter((w) => w.active);
+  modal('Existencias: dónde está cada unidad', `<p class="muted" style="margin-top:0">Para equipos con número de serie se cuenta cada equipo por almacén. "Apartado" son unidades ya comprometidas en pedidos abiertos.</p>
+    <div class="table-wrap"><table><thead><tr><th>Producto</th>${whs.map((w) => `<th class="r">${esc(w.name)}</th>`).join('')}<th class="r">Con repartidores</th><th class="r">🔓 Abierto</th><th class="r"><b>Total</b></th><th class="r">Apartado en pedidos</th></tr></thead><tbody>
+    ${bd.products.map((p) => `<tr><td><b>${esc(p.name)}</b><br><small class="muted">${esc(p.sku)}${p.serialized ? ' · S/N' : ''}</small></td>
+      ${whs.map((w, i) => `<td class="r num">${p.warehouses ? p.warehouses.find((x) => x.id === w.id)?.n || 0 : i === 0 ? `${p.in_warehouses}<br><small class="muted">sin desglose</small>` : '—'}</td>`).join('')}
+      <td class="r num">${p.drivers}</td><td class="r num">${p.open}</td><td class="r num"><b>${p.total}</b></td><td class="r num">${p.reserved}</td></tr>`).join('')}
+    </tbody></table></div>
+    <small class="muted">Los productos sin número de serie se llevan como una sola existencia (se muestran en el almacén principal).</small>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
+}
+function warehouseForm(w) {
+  w = w || {};
+  const m = modal(w.id ? `Editar ${w.name}` : 'Nuevo almacén', `<form id="whF" class="stack">
+    <div class="grid g2"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Almacén Otay" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
+    <div class="grid g2"><label class="f">Dirección<input name="address" value="${esc(w.address)}" /></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(w.phone)}" /></label></div>
+    <small class="muted">Toca el mapa para fijar la ubicación: las rutas que salgan de este almacén se calculan desde ahí.</small>
+    <div id="whMap" class="map sm"></div><small class="muted num" id="whCoords">${w.lat ? `${w.lat.toFixed(5)}, ${w.lng.toFixed(5)}` : 'Sin ubicación'}</small>
+    <input type="hidden" name="lat" value="${w.lat ?? ''}" /><input type="hidden" name="lng" value="${w.lng ?? ''}" />
+    ${w.id ? `<label class="row"><input type="checkbox" name="is_default" ${w.is_default ? 'checked disabled' : ''} /> Almacén principal (punto de salida por omisión)</label>
+      ${w.is_default ? '' : `<label class="row"><input type="checkbox" name="active" ${w.active ? 'checked' : ''} /> Activo</label>`}` : ''}</form>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="whSave">Guardar</button>' });
+  const f = $('#whF', m.el);
+  const map = makeMap($('#whMap', m.el), w.lat ? [w.lat, w.lng] : null, w.lat ? 15 : 12);
+  let mk = w.lat ? L.marker([w.lat, w.lng]).addTo(map) : null;
+  map.on('click', (e) => { f.lat.value = e.latlng.lat.toFixed(6); f.lng.value = e.latlng.lng.toFixed(6); $('#whCoords', m.el).textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`; if (mk) mk.setLatLng(e.latlng); else mk = L.marker(e.latlng).addTo(map); });
+  setTimeout(() => map.invalidateSize(), 200);
+  $('#whSave', m.el).onclick = async () => {
+    if (!f.reportValidity()) return;
+    const b = Object.fromEntries(new FormData(f));
+    if (w.id) { b.is_default = !!f.is_default?.checked && !w.is_default; if (!w.is_default) b.active = !!f.active?.checked; }
+    try { if (w.id) await PUT('/api/warehouses/' + w.id, b); else await POST('/api/warehouses', b); toast('Almacén guardado', 'ok'); m.close(); render(); }
+    catch (e) { toast(e.message, 'bad'); }
+  };
+}
+async function warehouseDetail(id, whs) {
+  const w = whs.find((x) => x.id === id);
+  const list = await GET(`/api/warehouses/${id}/serials`);
+  const others = whs.filter((x) => x.id !== id && x.active);
+  const m = modal(w.name, `<div class="stack">
+    <div class="row between"><div>${w.is_default ? '<span class="chip ok">Principal</span> ' : ''}<small class="muted">${esc(w.address || '')}${w.manager ? ' · ' + esc(w.manager) : ''}${w.phone ? ' · ' + esc(w.phone) : ''}</small></div>
+      ${store.user.role === 'admin' ? `<button class="btn sm" id="whEdit">${icon('cog')} Editar</button>` : ''}</div>
+    <div class="row between"><b>${list.length} equipos con S/N en este almacén</b>${list.length ? `<label class="row"><input type="checkbox" id="whAll" /> Todos</label>` : ''}</div>
+    <input id="whQ" placeholder="Buscar S/N o producto" />
+    <div class="table-wrap" style="max-height:340px"><table><tbody>${list.map((s) => `<tr data-row="${esc(s.serial + ' ' + s.product_name).toLowerCase()}"><td style="width:30px"><input type="checkbox" data-ws="${esc(s.serial)}" /></td><td class="mono">${esc(s.serial)}</td><td><small>${esc(s.product_name)}</small></td><td><small class="muted">${s.tracking_code ? 'Pedido ' + esc(s.tracking_code) : 'Libre'}</small></td></tr>`).join('') || '<tr><td class="muted">Sin equipos</td></tr>'}</tbody></table></div>
+    ${others.length && list.length ? `<div class="row"><select id="whTo">${others.map((o) => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select><button class="btn primary" id="whMove">${icon('truck')} Traspasar seleccionados</button><small class="muted" id="whN"></small></div>`
+      : !others.length ? '<small class="muted">Da de alta otro almacén para poder hacer traspasos.</small>' : ''}</div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>', onClose: () => render() });
+  const cnt = () => { const n = $$('[data-ws]:checked', m.el).length; const el = $('#whN', m.el); if (el) el.textContent = n ? `${n} seleccionados` : ''; };
+  $$('[data-ws]', m.el).forEach((c) => (c.onchange = cnt));
+  $('#whAll', m.el)?.addEventListener('change', (e) => { $$('tr[data-row]', m.el).filter((r) => !r.hidden).forEach((r) => (r.querySelector('input').checked = e.target.checked)); cnt(); });
+  $('#whQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase(); $$('tr[data-row]', m.el).forEach((r) => (r.hidden = !r.dataset.row.includes(q))); };
+  $('#whEdit', m.el)?.addEventListener('click', () => { m.close(); warehouseForm(w); });
+  $('#whMove', m.el)?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const serials = $$('[data-ws]:checked', m.el).map((c) => c.dataset.ws);
+    if (!serials.length) return toast('Marca los equipos a traspasar', 'bad');
+    const to = $('#whTo', m.el);
+    if (!(await confirmDlg(`¿Traspasar ${serials.length} equipo(s) de ${w.name} a ${to.selectedOptions[0].text}?`))) return;
+    btn.disabled = true;
+    try { const r = await POST(`/api/warehouses/${to.value}/transfer`, { serials }); toast(`${r.moved} equipos traspasados${r.errors.length ? ` · ${r.errors.length} con error` : ''}`, 'ok'); m.close(); }
+    catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  });
+}
+
+// ================= Expediente del personal (interno o externo) =================
+async function staffProfile(box, u) {
+  const p = await GET(`/api/users/${u.id}/profile`);
+  const first = today().slice(0, 8) + '01';
+  let photo;
+  box.innerHTML = `<form id="pf2" class="stack">
+    <div class="row" style="gap:14px;align-items:flex-start">
+      <div class="staff-photo">${p.photo_path ? `<img src="/uploads/${esc(p.photo_path)}" alt="Fotografía de ${esc(u.name)}" />` : `<span class="muted">${icon('person')}</span>`}
+        <label class="btn sm block" style="margin-top:6px">${icon('camera')} Fotografía<input type="file" accept="image/*" id="pfPhoto" hidden /></label></div>
+      <div class="grow stack">
+        <div class="row">${p.complete ? '<span class="chip ok">Expediente completo</span>' : `<span class="chip warn">Faltan ${p.missing.length} documento(s)</span>`}${p.expired.length ? ` <span class="chip off">${p.expired.length} vencido(s)</span>` : ''}</div>
+        <div class="grid g3"><label class="f">Tipo de contratación<select name="hire_type"><option value="externo" ${p.hire_type !== 'interno' ? 'selected' : ''}>Externo (por servicio)</option><option value="interno" ${p.hire_type === 'interno' ? 'selected' : ''}>Interno (nómina)</option></select></label>
+          <label class="f">Fecha de alta<input type="date" name="hire_date" value="${esc(p.hire_date)}" /></label><label class="f">Fecha de baja<input type="date" name="end_date" value="${esc(p.end_date)}" /></label></div></div></div>
+    <fieldset><legend>${icon('person')} Datos personales</legend><div class="grid g3">
+      <label class="f">Fecha de nacimiento<input type="date" name="birth_date" value="${esc(p.birth_date)}" /></label>
+      <label class="f">RFC<input name="rfc" value="${esc(p.rfc)}" maxlength="13" style="text-transform:uppercase" placeholder="XAXX010101000" /></label>
+      <label class="f">CURP<input name="curp" value="${esc(p.curp)}" maxlength="18" style="text-transform:uppercase" /></label></div>
+      <div class="grid g3"><label class="f"><span>NSS <small class="muted">(si aplica)</small></span><input name="nss" value="${esc(p.nss)}" maxlength="11" /></label>
+      <label class="f">Contacto de emergencia<input name="emergency_name" value="${esc(p.emergency_name)}" /></label>
+      <label class="f">Teléfono de emergencia<input name="emergency_phone" type="tel" value="${esc(p.emergency_phone)}" /></label></div>
+      <label class="f">Domicilio<input name="address" value="${esc(p.address)}" /></label></fieldset>
+    <fieldset><legend>${icon('key')} Datos bancarios</legend><div class="grid g2">
+      <label class="f">Banco<input name="bank_name" value="${esc(p.bank_name)}" /></label><label class="f">Titular de la cuenta<input name="account_holder" value="${esc(p.account_holder)}" /></label>
+      <label class="f">CLABE (18 dígitos)<input name="clabe" value="${esc(p.clabe)}" inputmode="numeric" maxlength="18" /></label><label class="f">Número de cuenta / tarjeta<input name="account_number" value="${esc(p.account_number)}" inputmode="numeric" /></label></div></fieldset>
+    <fieldset><legend>💲 Pago</legend><div class="grid g3">
+      <label class="f">Pago por entrega exitosa ($)<input type="number" name="pay_per_delivery" min="0" step="0.01" value="${p.pay_per_delivery || ''}" placeholder="0.00" /></label>
+      <label class="f">Pago por intento fallido ($)<input type="number" name="pay_per_failed" min="0" step="0.01" value="${p.pay_per_failed || ''}" placeholder="0.00" /></label>
+      <label class="f">Periodo de pago<select name="pay_period">${['semanal', 'quincenal', 'mensual'].map((x) => `<option ${p.pay_period === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+      <div class="row" style="margin-top:6px"><input type="date" id="payFrom" value="${first}" style="width:auto" /><input type="date" id="payTo" value="${today()}" style="width:auto" /><button type="button" class="btn sm" id="payGo">Calcular pago</button></div>
+      <div id="payOut" class="muted" style="margin-top:6px"></div></fieldset>
+    <fieldset><legend>${icon('shield')} Cumplimiento mínimo (documentos)</legend>
+      ${p.doc_list.map(([k, l]) => `<div class="row doc-row"><label class="row grow"><input type="checkbox" data-doc="${k}" ${p.docs[k]?.ok ? 'checked' : ''} /> ${esc(l)}${k === 'seguro' || (k === 'licencia' && u.role !== 'repartidor') ? ' <small class="muted">(opcional)</small>' : ''}</label>
+        <label class="row"><small class="muted">Vence</small><input type="date" data-exp="${k}" value="${esc(p.docs[k]?.expires || '')}" style="width:auto" /></label></div>`).join('')}
+      ${p.missing.length ? `<small class="muted">Faltan: ${p.missing.map(esc).join(', ')}</small>` : ''}</fieldset>
+    <label class="f">Notas<textarea name="notes">${esc(p.notes)}</textarea></label>
+    <div class="row" style="justify-content:flex-end"><button type="button" class="btn primary" id="pfSave">Guardar expediente</button></div>
+    <small class="muted">🔒 Estos datos solo los ve el administrador.</small></form>`;
+  const f = $('#pf2', box);
+  $('#pfPhoto', box).onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    // reducir sin sello de fecha (es una foto de identificación)
+    photo = await new Promise((ok, fail) => {
+      const img = new Image();
+      img.onload = () => { const k = Math.min(1, 800 / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(img.src); ok(c.toDataURL('image/jpeg', 0.85)); };
+      img.onerror = () => fail(new Error('No se pudo leer la imagen'));
+      img.src = URL.createObjectURL(file);
+    }).catch((er) => { toast(er.message, 'bad'); return null; });
+    if (!photo) return;
+    box.querySelector('.staff-photo').firstElementChild.outerHTML = `<img src="${photo}" alt="Fotografía nueva" />`;
+  };
+  const pay = async () => {
+    try {
+      const r = await GET(`/api/users/${u.id}/pay?from=${$('#payFrom', box).value}&to=${$('#payTo', box).value}`);
+      $('#payOut', box).innerHTML = `${r.delivered} entregas × ${mxn(r.rate_delivery)}${r.failed ? ` + ${r.failed} fallidos × ${mxn(r.rate_failed)}` : ''} = <b style="color:var(--text);font-size:1.1rem">${mxn(r.amount)}</b>`;
+    } catch (e) { $('#payOut', box).textContent = e.message; }
+  };
+  $('#payGo', box).onclick = pay;
+  pay();
+  $('#pfSave', box).onclick = async (e) => {
+    const btn = e.currentTarget;
+    const b = Object.fromEntries(new FormData(f));
+    b.docs = Object.fromEntries($$('[data-doc]', box).map((c) => [c.dataset.doc, { ok: c.checked, expires: $(`[data-exp="${c.dataset.doc}"]`, box).value || null }]));
+    if (photo) b.photo = photo;
+    btn.disabled = true;
+    try { await PUT(`/api/users/${u.id}/profile`, b); toast('Expediente guardado', 'ok'); staffProfile(box, u); }
+    catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
 }
 
 // ================= Clientes mayoristas =================
@@ -2483,7 +2627,8 @@ function importInventory() {
         <p class="muted" style="margin:0">Cada S/N se registra como un equipo en el almacén y suma 1 a la existencia del producto.</p>
         <label class="f">¿A qué producto pertenecen estas series?<select id="snProd"></select></label>
         <label class="f">Referencia<input id="snRef" value="Importación ${esc(sourceName.split(' · ')[0]).slice(0, 40)} ${today()}" maxlength="80" /></label>
-        <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="snDrv"><option value="">— Dejar en almacén —</option></select></label></fieldset>
+        <div class="grid g2"><label class="f">Almacén<select id="snWh"></select></label>
+        <label class="f"><span>${icon('truck')} Entregar de inmediato a repartidor <small class="muted">(opcional)</small></span><select id="snDrv"><option value="">— Dejar en almacén —</option></select></label></div></fieldset>
       <fieldset id="stBox"><legend>${icon('inv')} Existencias</legend>
         <label class="radio"><input type="radio" name="sm" value="reemplazar" checked /> <span><b>Reemplazar</b> por la cantidad del archivo <small class="muted">(conteo físico; se registra un ajuste por la diferencia)</small></span></label>
         <label class="radio"><input type="radio" name="sm" value="sumar" /> <span><b>Sumar</b> la cantidad del archivo <small class="muted">(llegada de mercancía; se registra una entrada)</small></span></label>
@@ -2499,6 +2644,7 @@ function importInventory() {
       $('#snBox', body).hidden = !on; $('#stBox', body).hidden = on;
       $('#prev', body).innerHTML = on ? `${icon('search')} Revisar series` : `${icon('search')} Revisar antes de importar`;
       if (on && $('#snDrv', body).options.length === 1) fillDriverSelect($('#snDrv', body));
+      if (on && !$('#snWh', body).options.length) fillWarehouseSelect($('#snWh', body));
       if (on && !$('#snProd', body).options.length) {
         const ps = (await GET('/api/products?limit=500')).rows;
         const list = [...ps.filter((p) => p.serialized), ...ps.filter((p) => !p.serialized && !p.stock)];
@@ -2514,7 +2660,7 @@ function importInventory() {
       if (mp.serial != null) {
         const serials = data.map((r) => String(r[mp.serial] ?? '').trim()).filter(Boolean);
         if (!serials.length) return toast('La columna de S/N está vacía', 'bad');
-        const opts = { product_id: $('#snProd', body).value, reference: $('#snRef', body).value, enable_serial: true, driver_id: $('#snDrv', body).value || null };
+        const opts = { product_id: $('#snProd', body).value, reference: $('#snRef', body).value, enable_serial: true, driver_id: $('#snDrv', body).value || null, warehouse_id: $('#snWh', body).value || null };
         const btn = e.currentTarget;
         btn.disabled = true;
         try { stepSerials(serials, opts, await POST('/api/serials/receive', { serials, ...opts, dry_run: true })); }
@@ -2614,13 +2760,17 @@ async function viewInventory(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const q = p.get('q') || '';
   const low = p.get('low') === '1';
-  const [r, movs, cust] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody')]);
-  const totalUnits = r.rows.reduce((a, x) => a + x.stock, 0);
+  const [r, movs, cust, bd, whs] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody'), GET('/api/inventory/breakdown'), GET('/api/warehouses')]);
+  const totalUnits = bd.products.reduce((a, x) => a + x.in_warehouses, 0);
+  const outUnits = bd.products.reduce((a, x) => a + x.drivers + x.open, 0);
   const withDrv = cust.drivers.filter((d) => d.total);
   v.innerHTML = topbar('Inventario', `<button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
-    <div class="card kpi"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div></div>
+    <button class="card kpi kpi-btn" id="kpiWh" title="Ver dónde está cada unidad"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div><div class="sub">${fmtN(outUnits)} fuera · ver detalle ›</div></button>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>
+  <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('building')} Almacenes</h2><div class="row"><button class="btn sm" id="whStock">${icon('inv')} Existencias por almacén</button>${store.user.role === 'admin' ? `<button class="btn sm primary" id="whNew">${icon('plus')} Almacén</button>` : ''}</div></div>
+    <div class="grid g3" style="margin-top:8px">${whs.map((w) => `<button class="card kpi-btn" data-wh="${w.id}" style="text-align:left;padding:12px;${w.active ? '' : 'opacity:.55'}"><b>${esc(w.name)}</b>${w.is_default ? ' <span class="chip ok">Principal</span>' : ''}${w.active ? '' : ' <span class="chip off">Inactivo</span>'}
+      <br><small class="muted">${esc(w.address || (w.lat ? 'Ubicado en el mapa' : 'Sin ubicación'))}</small><div style="font-size:22px;font-weight:700;margin-top:4px">${fmtN(w.units)} <small class="muted" style="font-size:12px">equipos con S/N</small></div></button>`).join('')}</div></div>
   <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('truck')} Con repartidores</h2><small class="muted">${fmtN(withDrv.reduce((a, d) => a + d.total, 0))} unidades fuera del almacén</small></div>
     ${withDrv.length ? `<div class="table-wrap"><table><thead><tr><th>Repartidor</th><th>Trae</th><th class="r">Unidades</th><th></th></tr></thead><tbody>
       ${withDrv.map((d) => `<tr class="click" data-cust="${d.id}"><td><b>${esc(d.name)}</b>${d.vehicle ? `<br><small class="muted">${esc(d.vehicle)}</small>` : ''}</td><td><small>${d.items.map((it) => `${esc(it.name)}: <b>${it.qty}</b>`).join(' · ')}</small></td><td class="r num"><b>${d.total}</b></td><td class="r"><button class="btn sm">Ver / devolver</button></td></tr>`).join('')}
@@ -2635,6 +2785,9 @@ async function viewInventory(v) {
   $('#iq').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/inventory?q=${encodeURIComponent(f.get('q'))}&low=${f.get('low') || ''}`; };
   $('#newP').onclick = () => productForm(null);
   $('#impInv').onclick = importInventory;
+  $('#kpiWh').onclick = $('#whStock').onclick = () => stockBreakdown(bd);
+  $('#whNew')?.addEventListener('click', () => warehouseForm(null));
+  $$('[data-wh]', v).forEach((b) => (b.onclick = () => warehouseDetail(Number(b.dataset.wh), whs)));
   $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
   $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => String(d.id) === tr.dataset.cust))));
   $$('tr[data-p]', v).forEach((tr) => (tr.onclick = () => productForm(JSON.parse(tr.dataset.p))));
@@ -2873,7 +3026,8 @@ async function userPanel(id) {
       <div><small>Alta</small><b>${fmtDT(u.created_at).split(',')[0]}</b></div>
       ${u.role === 'repartidor' ? `<div><small>Entregas</small><b>${s.delivered || 0}</b></div><div><small>Éxito</small><b>${done ? fmtN(((s.delivered || 0) / done) * 100, 0) + '%' : '—'}</b></div>` : ''}
     </div>
-    <div class="pill-tabs" id="uTabs"><button class="on" data-t="datos">Datos</button><button data-t="seg">Seguridad</button><button data-t="act">Actividad</button></div>
+    <div class="pill-tabs" id="uTabs"><button class="on" data-t="datos">Datos</button><button data-t="exp">Expediente y pago</button><button data-t="seg">Seguridad</button><button data-t="act">Actividad</button></div>
+    <div data-pane="exp" hidden><div id="expBox" style="margin-top:14px"><p class="muted">Cargando…</p></div></div>
     <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u)}</form></div>
     <div data-pane="seg" hidden><div class="stack" style="margin-top:14px">
       <div class="sec-row"><div>${icon('key')}</div><div class="grow"><b>Restablecer contraseña</b><br><small class="muted">Genera una contraseña temporal y cierra sus sesiones abiertas.</small></div><button class="btn" id="rst">Restablecer</button></div>
@@ -2891,6 +3045,7 @@ async function userPanel(id) {
     $$('#uTabs button', m.el).forEach((x) => x.classList.toggle('on', x === b));
     $$('[data-pane]', m.el).forEach((p) => (p.hidden = p.dataset.pane !== b.dataset.t));
     $('#saveU', m.el).hidden = b.dataset.t !== 'datos';
+    if (b.dataset.t === 'exp' && !$('#pf2', m.el)) staffProfile($('#expBox', m.el), u);
   }));
   const reload = async () => { m.close(); await render(); userPanel(id); };
   $('#saveU', m.el).onclick = async () => {

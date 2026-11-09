@@ -441,4 +441,38 @@ CREATE TABLE IF NOT EXISTS accounts (
 addCols('orders', [['account_id', 'INTEGER REFERENCES accounts(id)']]);
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, scheduled_date)');
 
+// ---- Expediente del personal (interno o externo): datos personales, fiscales, bancarios y pago ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS staff_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  hire_type TEXT NOT NULL DEFAULT 'externo' CHECK (hire_type IN ('interno','externo')),
+  hire_date TEXT, end_date TEXT, birth_date TEXT,
+  address TEXT, emergency_name TEXT, emergency_phone TEXT,
+  rfc TEXT, curp TEXT, nss TEXT,
+  bank_name TEXT, clabe TEXT, account_number TEXT, account_holder TEXT,
+  pay_per_delivery REAL NOT NULL DEFAULT 0, pay_per_failed REAL NOT NULL DEFAULT 0, pay_period TEXT DEFAULT 'semanal',
+  photo_path TEXT, docs_json TEXT, notes TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+// ---- Varios almacenes: los equipos con S/N saben en qué almacén están ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS warehouses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  address TEXT, lat REAL, lng REAL, phone TEXT, manager TEXT,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+addCols('serials', [['warehouse_id', 'INTEGER REFERENCES warehouses(id)']]);
+addCols('routes', [['warehouse_id', 'INTEGER']]);
+if (!db.prepare('SELECT 1 FROM warehouses LIMIT 1').get()) {
+  const g = (k) => db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value;
+  const id = Number(db.prepare('INSERT INTO warehouses (name, lat, lng, is_default) VALUES (?,?,?,1)')
+    .run(g('depot_name') || 'Almacén central', Number(g('depot_lat')) || null, Number(g('depot_lng')) || null).lastInsertRowid);
+  db.prepare('UPDATE serials SET warehouse_id=? WHERE warehouse_id IS NULL').run(id);
+}
+
 module.exports = { db, tx, getSettings, DATA_DIR, UPLOAD_DIR };

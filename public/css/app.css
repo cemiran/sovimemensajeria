@@ -727,3 +727,7 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .pin-sel { filter: drop-shadow(0 0 0 #ef7d2d) drop-shadow(0 0 6px #ef7d2d); transform-origin: bottom center; z-index: 900 !important; }
 .pin-sel > * { outline: 3px solid #ef7d2d; outline-offset: 1px; border-radius: 50%; }
 #mapSelBar { position: static; margin-top: 10px; }
+.staff-photo { width: 120px; flex: none; text-align: center; }
+.staff-photo img, .staff-photo > span { width: 120px; height: 140px; object-fit: cover; border-radius: 12px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; background: var(--bg); }
+.staff-photo > span .ic { width: 48px; height: 48px; }
+.doc-row { justify-content: space-between; padding: 4px 0; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 6px; }
