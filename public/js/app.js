@@ -4215,7 +4215,7 @@ function viewNewCustomer(v) {
   $('#dcq').q.oninput = (e) => { clearTimeout(t); t = setTimeout(() => search(e.target.value), 350); };
 
   async function pickForCustomer(cid) {
-    const [c, mine, myRoute] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null)]);
+    const [c, mine, myRoute, av] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null), GET('/api/my/available').catch(() => ({ serialized: [], plain: [] }))]);
     const mineOpen = (myRoute?.stops || []).filter((s) => s.customer_id === c.id && ['asignado', 'cargado'].includes(s.status));
     // lo suyo + lo abierto (cualquier repartidor puede entregarlo)
     const items = (mine.items || []).map((it) => ({ ...it, serials: it.serials.map((x) => ({ ...x, pool: false })), own: it.qty, pool: 0 }));
@@ -4225,6 +4225,16 @@ function viewNewCustomer(v) {
       it.serials.push(...op.serials.map((x) => ({ ...x, pool: true })));
       it.pool += op.qty; it.qty += op.qty;
     }
+    // sin inventario asignado (o si le falta): puede elegir lo disponible en almacén que trae en su unidad
+    const assigned = items.reduce((a, it) => a + it.qty, 0);
+    for (const w of [...av.serialized.filter((x) => x.serials.length), ...av.plain]) {
+      let it = items.find((x) => x.product_id === w.product_id);
+      if (!it) { it = { product_id: w.product_id, name: w.name, sku: w.sku, serialized: !!w.serials, serials: [], qty: 0, own: 0, pool: 0 }; items.push(it); }
+      it.wh = w.serials ? w.serials.length : w.available;
+      it.qty += it.wh;
+      if (w.serials) it.serials.push(...w.serials.map((x) => ({ serial: x, wh: true })));
+    }
+    const snProducts = av.serialized;
     const box = $('#dcPick');
     box.innerHTML = `<div class="card" style="margin-top:12px">
       <div class="row between"><div><b style="font-size:18px">${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}</small><br>
@@ -4232,15 +4242,21 @@ function viewNewCustomer(v) {
 </div>
       ${mineOpen.length ? `<div class="info-bar" style="margin-top:10px">${icon('box')} Ya tienes ${mineOpen.length === 1 ? 'un pedido' : mineOpen.length + ' pedidos'} para este cliente en tu ruta: ${mineOpen.map((s) => `<button class="btn sm primary" data-dlv="${s.id}">Entregar ${esc(s.tracking_code)}</button>`).join(' ')}</div>` : ''}
       <h3>¿Qué le vas a entregar?</h3>
-      ${items.length ? `<div class="row" style="margin-bottom:8px"><input id="dcPq" class="grow" placeholder="Buscar producto o S/N en lo que traes" autocomplete="off" /></div>
+      ${!assigned ? `<div class="info-bar" style="margin-bottom:8px">${icon('info')} No tienes inventario asignado. Elige lo que traes en tu unidad de lo disponible en almacén 📦, o escribe/escanea el S/N del equipo.</div>` : ''}
+      ${items.length ? `<div class="row" style="margin-bottom:8px"><input id="dcPq" class="grow" placeholder="Buscar producto o S/N" autocomplete="off" /></div>
         <div id="dcSel" class="muted" style="margin-bottom:6px">Nada seleccionado</div>` : ''}
-      ${items.length ? items.map((it) => `<div class="card dc-item" data-name="${esc(normH(it.name + ' ' + it.sku))}" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">${it.own ? `traes ${it.own}` : ''}${it.own && it.pool ? ' · ' : ''}${it.pool ? `🔓 abiertos ${it.pool}` : ''}</small></div>
-        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row dc-sn" data-s="${esc(normH(s.serial))}" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span>${s.pool ? ' <small class="chip">🔓 abierto</small>' : ''}</label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
+      ${items.length ? items.map((it) => `<div class="card dc-item" data-name="${esc(normH(it.name + ' ' + it.sku))}" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">${[it.own ? `traes ${it.own}` : '', it.pool ? `🔓 abiertos ${it.pool}` : '', it.wh ? `📦 almacén ${it.wh}` : ''].filter(Boolean).join(' · ')}</small></div>
+        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row dc-sn" data-s="${esc(normH(s.serial))}" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span>${s.pool ? ' <small class="chip">🔓 abierto</small>' : s.wh ? ' <small class="chip">📦 almacén</small>' : ''}</label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
           : `<div class="row" style="margin-top:6px"><label class="row"><input type="checkbox" data-pp="${it.product_id}" /> Entregar</label><input type="number" min="1" max="${it.qty}" value="1" data-pq="${it.product_id}" style="width:90px" /></div>`}</div>`).join('')
-        : '<div class="card empty">No traes inventario asignado. Pide al almacén que te lo asigne.</div>'}
-      ${items.some((it) => it.serialized) ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
+        : '<div class="card empty">No hay inventario disponible. Escribe o escanea el S/N del equipo que traes.</div>'}
+      <div class="card" id="dcNewBox" style="padding:10px 12px;margin-bottom:8px" ${snProducts.length ? '' : 'hidden'}><b>¿Traes un equipo que no aparece?</b>
+        <div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap"><input id="dcNew" class="grow" placeholder="Escribe el S/N (ej. HWTCDE3CE28A)" autocomplete="off" style="text-transform:uppercase" />
+          ${snProducts.length > 1 ? `<select id="dcNewP">${snProducts.map((x) => `<option value="${x.product_id}">${esc(x.name)}</option>`).join('')}</select>` : ''}
+          <button type="button" class="btn" id="dcAdd">${icon('plus')} Agregar</button></div>
+        <div id="dcNewList"></div><small class="muted">Se registra en el inventario al crear la entrega.</small></div>
+      ${snProducts.length ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
       <label class="f" style="margin-top:8px">Nota<input id="dcNote" maxlength="300" placeholder="Ej. instalación, cambio de equipo…" /></label>
-      <button class="btn primary lg block" id="dcGo" style="margin-top:10px" ${items.length ? '' : 'disabled'}>${icon('sign')} Crear entrega y registrar</button></div>`;
+      <button class="btn primary lg block" id="dcGo" style="margin-top:10px">${icon('sign')} Crear entrega y registrar</button></div>`;
     box.scrollIntoView({ behavior: 'smooth' });
     $$('[data-dlv]', box).forEach((b) => (b.onclick = () => (location.hash = '#/deliver/' + b.dataset.dlv)));
     // buscar dentro de lo que trae: por nombre / SKU del producto o por número de serie
@@ -4264,14 +4280,28 @@ function viewNewCustomer(v) {
         card.hidden = !(byName || anySn);
       });
     });
+    // equipos que trae y no estaban registrados
+    let newProduct = null;
+    const addNew = (raw) => {
+      const sn = String(raw || '').trim().replace(/^S\/?N[:\s]*/i, '').toUpperCase();
+      if (!/^[A-Z0-9][A-Z0-9._/-]{3,63}$/.test(sn)) return toast('Escribe un S/N válido', 'bad');
+      if ($$('[data-sn]', box).some((x) => x.dataset.sn === sn)) { const cb = $$('[data-sn]', box).find((x) => x.dataset.sn === sn); cb.checked = true; updSel(); return; }
+      newProduct = Number($('#dcNewP', box)?.value || snProducts[0]?.product_id) || null;
+      $('#dcNewList', box).insertAdjacentHTML('beforeend', `<label class="row dc-sn" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(sn)}" checked /> <span class="mono">${esc(sn)}</span> <small class="chip warn">nuevo</small></label>`);
+      $$('[data-sn]', $('#dcNewList', box)).forEach((x) => (x.onchange = updSel));
+      $('#dcNew', box).value = '';
+      updSel();
+    };
+    $('#dcAdd', box)?.addEventListener('click', () => addNew($('#dcNew', box).value));
+    $('#dcNew', box)?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addNew(e.target.value); } });
     $('#dcScan')?.addEventListener('click', () => openScanner({
       title: 'Escanear S/N a entregar',
       onCode: async (code) => {
         const sn = String(code).trim().replace(/^S\/?N[:\s]*/i, '').toUpperCase();
         const cb = $$('[data-sn]', box).find((x) => x.dataset.sn.toUpperCase() === sn);
-        if (!cb) throw new Error('Ese S/N no está en tu inventario libre');
+        if (!cb) { addNew(sn); return sn + ' agregado (equipo nuevo)'; }
         cb.checked = true;
-        cb.closest('.dc-item').hidden = false; cb.closest('.dc-sn').hidden = false;
+        cb.closest('.dc-item')?.removeAttribute('hidden'); cb.closest('.dc-sn')?.removeAttribute('hidden');
         updSel();
         return sn + ' seleccionado';
       },
@@ -4283,7 +4313,7 @@ function viewNewCustomer(v) {
       if (!serials.length && !its.length) return toast('Marca lo que vas a entregar', 'bad');
       btn.disabled = true;
       try {
-        const o = await POST('/api/my/orders', { customer_id: c.id, serials, items: its, notes: $('#dcNote').value });
+        const o = await POST('/api/my/orders', { customer_id: c.id, serials, items: its, notes: $('#dcNote').value, new_serial_product_id: newProduct });
         toast(`Entrega ${o.tracking_code} creada`, 'ok');
         location.hash = '#/deliver/' + o.id;
       } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }

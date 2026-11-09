@@ -1255,6 +1255,15 @@ app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 30`).all(req.user.id);
   res.json({ ...me, log, open_items: openPool().items });
 }));
+// Repartidor sin inventario asignado: puede elegir lo disponible en almacén que trae en su unidad
+app.get('/api/my/available', auth('repartidor'), wrap((req, res) => {
+  const prods = db.prepare('SELECT id, name, sku, unit, serialized FROM products ORDER BY name').all();
+  const sn = db.prepare(`SELECT product_id, serial FROM serials WHERE holder_id IS NULL AND open_pool = 0 AND status = 'disponible' ORDER BY serial`).all();
+  res.json({
+    serialized: prods.filter((p) => p.serialized).map((p) => ({ product_id: p.id, name: p.name, sku: p.sku, serials: sn.filter((x) => x.product_id === p.id).map((x) => x.serial) })),
+    plain: prods.filter((p) => !p.serialized).map((p) => ({ product_id: p.id, name: p.name, sku: p.sku, unit: p.unit, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
+  });
+}));
 // El repartidor arma una entrega en campo: elige cliente y productos de lo que él trae (S/N o cantidad).
 // Se crea el pedido ya cargado en su unidad y se agrega a su ruta del día, listo para registrar la entrega.
 app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
@@ -1271,14 +1280,26 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
       VALUES (?,?,?,?,?,?,?,?)`).run(code, c.id, today(), 'normal', String(b.notes || '').trim().slice(0, 300) || null, me, crypto.randomBytes(12).toString('hex'), 'general').lastInsertRowid);
     const qtyBy = new Map();
     for (const sn of serials) {
-      const s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial=?').get(sn);
-      if (!s) throw new HttpError(409, `El S/N ${sn} no está registrado`);
+      let s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial=?').get(sn);
+      if (!s) {
+        // equipo que el repartidor trae en su unidad pero no estaba registrado: se da de alta en campo
+        if (!SERIAL_RE.test(sn)) throw new HttpError(400, `El S/N ${sn} no tiene un formato válido`);
+        const prod = db.prepare('SELECT id, name FROM products WHERE id=? AND serialized=1').get(Number(b.new_serial_product_id))
+          || (db.prepare('SELECT COUNT(*) n FROM products WHERE serialized=1').get().n === 1 ? db.prepare('SELECT id, name FROM products WHERE serialized=1').get() : null);
+        if (!prod) throw new HttpError(409, `El S/N ${sn} no está registrado; elige a qué producto pertenece`);
+        const sid = Number(db.prepare('INSERT INTO serials (product_id, serial, reference, warehouse_id, holder_id, held_at) VALUES (?,?,?,?,?,datetime(\'now\'))')
+          .run(prod.id, sn, 'Alta en campo por el repartidor', whDefault()?.id || null, me).lastInsertRowid);
+        serialEvent(sid, 'alta', null, me, 'Registrado en campo: el repartidor lo traía en su unidad');
+        custodyLog(me, prod.id, 1, 'asignado', me, { serial: sn, reference: 'Alta en campo (lo traía en su unidad)' });
+        s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.id=?').get(sid);
+      }
       const fromOpen = s.holder_id == null && s.open_pool === 1;
-      if (s.holder_id !== me && !fromOpen) throw new HttpError(409, `El S/N ${sn} no está en tu inventario`);
+      const fromWh = s.holder_id == null && !s.open_pool && s.status === 'disponible';
+      if (s.holder_id !== me && !fromOpen && !fromWh) throw new HttpError(409, `El S/N ${sn} lo trae otro repartidor`);
       if (s.status !== 'disponible') throw new HttpError(409, `El S/N ${sn} ya está ligado a otro pedido`);
-      if (fromOpen) {
+      if (fromOpen || fromWh) {
         db.prepare("UPDATE serials SET holder_id=?, open_pool=0, held_at=datetime('now') WHERE id=?").run(me, s.id);
-        custodyLog(me, s.product_id, 1, 'asignado', me, { serial: sn, reference: 'Tomado del inventario abierto' });
+        custodyLog(me, s.product_id, 1, 'asignado', me, { serial: sn, reference: fromOpen ? 'Tomado del inventario abierto' : 'Tomado del almacén (lo traía en su unidad)' });
       }
       db.prepare("UPDATE serials SET status='asignado', order_id=?, assigned_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(oid, s.id);
       serialEvent(s.id, 'asignado', oid, me, `Pedido ${code} (armado por el repartidor)`);
@@ -1290,13 +1311,17 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
       if (p.serialized) throw new HttpError(400, `${p.name} se entrega por número de serie`);
       const held = db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(me, p.id)?.qty || 0;
       const pool = db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(p.id)?.qty || 0;
-      if (it.qty > held + pool) throw new HttpError(409, `Solo hay ${held + pool} de ${p.name} (tuyos ${held}, abiertos ${pool})`);
-      const take = Math.max(0, it.qty - held); // lo que falta se toma de lo abierto y pasa a ser suyo
-      if (take) {
-        db.prepare("UPDATE open_stock SET qty = qty - ?, updated_at=datetime('now') WHERE product_id=?").run(take, p.id);
+      const wh = warehouseQty(p.id);
+      if (it.qty > held + pool + wh) throw new HttpError(409, `Solo hay ${held + pool + wh} de ${p.name} (tuyos ${held}, abiertos ${pool}, almacén ${wh})`);
+      // lo que falta se toma primero de lo abierto y luego del almacén; pasa a ser suyo
+      const fromPool = Math.min(pool, Math.max(0, it.qty - held));
+      const fromWh = Math.max(0, it.qty - held - fromPool);
+      if (fromPool) db.prepare("UPDATE open_stock SET qty = qty - ?, updated_at=datetime('now') WHERE product_id=?").run(fromPool, p.id);
+      if (fromPool + fromWh) {
         db.prepare(`INSERT INTO driver_stock (user_id, product_id, qty) VALUES (?,?,?)
-          ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(me, p.id, take);
-        custodyLog(me, p.id, take, 'asignado', me, { reference: 'Tomado del inventario abierto' });
+          ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(me, p.id, fromPool + fromWh);
+        if (fromPool) custodyLog(me, p.id, fromPool, 'asignado', me, { reference: 'Tomado del inventario abierto' });
+        if (fromWh) custodyLog(me, p.id, fromWh, 'asignado', me, { reference: 'Tomado del almacén (lo traía en su unidad)' });
       }
       qtyBy.set(p.id, (qtyBy.get(p.id) || 0) + it.qty);
     }
