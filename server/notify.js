@@ -228,13 +228,14 @@ ${m.body}` };
 }
 
 // ---------- Google Sheets (Apps Script Web App) ----------
-// Formato de la hoja "Entregas" de Sovime: A–K con los datos del pedido (teléfonos: Telnor en D, móvil en E y adicional en F;
-// el Dashboard cuenta Estatus en I y Repartidor en J) y la evidencia a partir de la L.
-// Las columnas se escriben por posición: si se cambia el orden aquí, hay que mover la columna en la hoja igual.
+// Formato de la hoja "Entregas" de Sovime (orden definido por el usuario en la hoja): teléfonos Telnor D, móvil E, adicional F,
+// números de serie G; el Dashboard cuenta Estatus en J y Repartidor en K; la evidencia a partir de la M.
+// Las columnas se escriben por posición: si se cambia el orden aquí, hay que mover la columna en la hoja igual (y viceversa).
 const SHEET_NAME = 'Entregas';
-const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
+const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Números de serie',
+  'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
   'Recibió', 'Parentesco', 'Identificación', 'Tipo de entrega', 'Motivo', 'Ruta', 'Latitud', 'Longitud', 'Distancia al domicilio (m)',
-  'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante', 'Números de serie',
+  'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante',
   'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable'];
 function fmtPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
@@ -266,12 +267,13 @@ function sheetRow(evidenceId) {
   const note = e.notes || (ok ? `Recibió ${e.receiver_name || ''}${e.receiver_relation ? ' (' + e.receiver_relation + ')' : ''}${counter ? ' en mostrador' : ''}` : `Motivo: ${e.reason || ''}`);
   const iso = new Date(String(e.created_at).replace(' ', 'T') + 'Z').toISOString();
   return [
-    e.tracking_code, iso, e.cname, fmtPhone(e.ctelnor), fmtPhone(e.cphone), fmtPhone(e.cphone2), e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
+    e.tracking_code, iso, e.cname, fmtPhone(e.ctelnor), fmtPhone(e.cphone), fmtPhone(e.cphone2),
+    db.prepare('SELECT GROUP_CONCAT(serial, \', \') sn FROM (SELECT serial FROM serials WHERE order_id = ? ORDER BY serial)').get(e.order_id)?.sn || '',
+    e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
     ok ? 'Entregado' : 'No Entregado', counter ? 'Mostrador' : e.dname || '', note,
     e.receiver_name || '', e.receiver_relation || '', e.receiver_id_doc || '', counter ? 'Mostrador' : 'En ruta', e.reason || '', e.rname || '',
     e.lat ?? '', e.lng ?? '', e.distance_to_customer_m ?? '', e.barcode_verified ? 'Sí' : 'No', e.cod_amount || 0,
     up(e.photo_path), up(e.signature_path), trackLink(s, e.public_token),
-    db.prepare('SELECT GROUP_CONCAT(serial, \', \') sn FROM (SELECT serial FROM serials WHERE order_id = ? ORDER BY serial)').get(e.order_id)?.sn || '',
     ...(() => {
       let c = null;
       try { c = JSON.parse(e.compliance_json || 'null'); } catch {}
