@@ -847,7 +847,7 @@ async function orderDetail(id) {
         <dl class="kv">
           <dt>Estado</dt><dd>${badge(o.status)} ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</dd>
           ${staff ? `<dt>Mayorista</dt><dd id="oAcc">${o.account_name ? `<b>${esc(o.account_name)}</b>` : '<span class="muted">Sin mayorista</span>'} <button class="btn sm ghost" id="oAccEd">Cambiar</button></dd>` : ''}
-          <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b>${o.customer_phone ? `<br>Móvil: <a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}${o.customer_phone_alt ? `<br>Adicional: <a href="tel:${esc(o.customer_phone_alt)}">${esc(o.customer_phone_alt)}</a>` : ''}</dd>
+          <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b>${o.customer_phone ? `<br>Móvil: <a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}${o.customer_phone_alt ? `<br>Adicional: <a href="tel:${esc(o.customer_phone_alt)}">${esc(o.customer_phone_alt)}</a>` : ''}${o.telnor_phone ? `<br>Telnor: <span class="mono">${esc(o.telnor_phone)}</span>` : ''}</dd>
           <dt>Dirección</dt><dd>${esc(o.address)}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}</dd>
           <dt>Ventana</dt><dd>${o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
           <dt>Fecha</dt><dd>${esc(o.scheduled_date)}</dd>
@@ -999,6 +999,7 @@ function customerForm(c, done) {
         <label class="f"><span>Teléfono móvil <small class="muted">(WhatsApp y SMS)</small></span><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /></label>
         <label class="f">Teléfono adicional<input name="phone_alt" type="tel" inputmode="tel" value="${esc(c.phone_alt)}" placeholder="Casa, trabajo o familiar" /></label>
       </div>
+      <label class="f"><span>Teléfono Telnor <small class="muted">(número de la línea / servicio)</small></span><input name="external_id" type="tel" inputmode="tel" value="${esc(c.external_id)}" placeholder="10 dígitos de la línea Telnor" /></label>
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
       <div class="grid g3">
         <label class="f">Ciudad<input name="city" value="${esc(c.city || SETTINGS.default_city || 'Tijuana')}" /></label>
@@ -1063,7 +1064,7 @@ async function viewCustomers(v) {
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
@@ -2082,8 +2083,8 @@ async function exportAssignedExcel(date, driverId) {
     const used = new Set(['Resumen']);
     for (const d of list) {
       const rows = [[`${company} · Hoja de ruta y carga`], [`Repartidor: ${d.name}`, '', `Vehículo: ${d.vehicle || '—'}`], [`Fecha: ${fecha}`, '', `Pedidos: ${d.orders.length}`], [],
-        ['#', 'Guía', 'Cliente', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
-      d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
+        ['#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
+      d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.telnor || '', o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
         o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '', '']));
       if (!d.orders.length) rows.push(['', 'Sin pedidos asignados en esta fecha']);
       rows.push([], ['Inventario que trae'], ['Producto', 'Cantidad', 'Números de serie']);
@@ -2091,7 +2092,7 @@ async function exportAssignedExcel(date, driverId) {
       if (!d.inventory.length) rows.push(['Sin inventario asignado']);
       rows.push([], [], ['Entregó (almacén): ____________________', '', '', 'Recibió (repartidor): ____________________']);
       const ws = X.utils.aoa_to_sheet(rows);
-      ws['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }, { wch: 30 }];
+      ws['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }, { wch: 30 }];
       let name = d.name.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || 'Repartidor';
       while (used.has(name)) name = name.slice(0, 26) + '_' + used.size;
       used.add(name);
@@ -2417,7 +2418,7 @@ const CUST_FIELDS = [
   ['name', 'Nombre', ['nombre completo', 'nombre', 'cliente', 'razon social', 'titular linea', 'titular']],
   ['phone', 'Teléfono móvil (WhatsApp/SMS)', ['contacto sugerido', 'celular', 'cel registro', 'movil', 'whatsapp', 'telefono celular']],
   ['phone2', 'Celular 2 (si falta el 1)', ['cel registro', 'cel ivr', 'cel queja']],
-  ['phone_line', 'Teléfono fijo / línea', ['telefono', 'tel registro', 'linea', 'telefono fijo']],
+  ['phone_line', 'Teléfono fijo (se usa como adicional)', ['telefono', 'tel registro', 'linea', 'telefono fijo']],
   ['phone_alt', 'Teléfono adicional', ['contacto alterno', 'telefono alterno']],
   ['email', 'Correo', ['correo sugerido', 'correo', 'email', 'e mail']],
   ['street', 'Calle', ['calle']],
@@ -2427,7 +2428,7 @@ const CUST_FIELDS = [
   ['city', 'Ciudad', ['ciudad nombre', 'ciudad', 'municipio']],
   ['zip', 'C.P.', ['cp', 'codigo postal', 'c p']],
   ['reference', 'Referencias', ['referencia', 'referencias', 'entre calles']],
-  ['external_id', 'Identificador único (evita duplicados)', ['telefono', 'linea', 'cuenta', 'id cliente', 'folio']],
+  ['external_id', 'Teléfono Telnor (identifica al cliente)', ['telefono', 'linea', 'cuenta', 'id cliente', 'folio']],
   ['lat', 'Latitud', ['latitud', 'lat']],
   ['lng', 'Longitud', ['longitud', 'lng', 'lon']],
 ];
@@ -4257,7 +4258,7 @@ function viewNewCustomer(v) {
   const search = async (q) => {
     if (q.trim().length < 2) return ($('#dcRes').innerHTML = '<p class="muted">Escribe al menos 2 letras o números.</p>');
     const r = await GET('/api/customers?limit=30&q=' + encodeURIComponent(q.trim()));
-    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}</small></span>${c.active_orders ? `<span class="chip">${c.active_orders} pedido${c.active_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
+    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}${c.external_id ? ' · Telnor ' + esc(c.external_id) : ''}</small></span>${c.active_orders ? `<span class="chip">${c.active_orders} pedido${c.active_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
     $$('[data-c]', v).forEach((b) => (b.onclick = () => pickForCustomer(Number(b.dataset.c))));
   };
   let t;
