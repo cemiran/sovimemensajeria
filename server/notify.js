@@ -228,14 +228,14 @@ ${m.body}` };
 }
 
 // ---------- Google Sheets (Apps Script Web App) ----------
-// Formato compatible con la hoja "Entregas" de Sovime: columnas A–I iguales a las existentes
-// (el Dashboard cuenta Estatus en G y Repartidor en H) y la evidencia a partir de la J.
+// Formato de la hoja "Entregas" de Sovime: A–J con los datos del pedido (teléfono móvil en D y adicional en E;
+// el Dashboard cuenta Estatus en H y Repartidor en I) y la evidencia a partir de la K.
+// Las columnas se escriben por posición: si se cambia el orden aquí, hay que mover la columna en la hoja igual.
 const SHEET_NAME = 'Entregas';
-const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono móvil', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
+const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
   'Recibió', 'Parentesco', 'Identificación', 'Tipo de entrega', 'Motivo', 'Ruta', 'Latitud', 'Longitud', 'Distancia al domicilio (m)',
   'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante', 'Números de serie',
-  'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable',
-  'Teléfono adicional'];
+  'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable'];
 function fmtPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
   return d.length === 10 ? `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}` : String(p || '');
@@ -266,7 +266,7 @@ function sheetRow(evidenceId) {
   const note = e.notes || (ok ? `Recibió ${e.receiver_name || ''}${e.receiver_relation ? ' (' + e.receiver_relation + ')' : ''}${counter ? ' en mostrador' : ''}` : `Motivo: ${e.reason || ''}`);
   const iso = new Date(String(e.created_at).replace(' ', 'T') + 'Z').toISOString();
   return [
-    e.tracking_code, iso, e.cname, fmtPhone(e.cphone), e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
+    e.tracking_code, iso, e.cname, fmtPhone(e.cphone), fmtPhone(e.cphone2), e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
     ok ? 'Entregado' : 'No Entregado', counter ? 'Mostrador' : e.dname || '', note,
     e.receiver_name || '', e.receiver_relation || '', e.receiver_id_doc || '', counter ? 'Mostrador' : 'En ruta', e.reason || '', e.rname || '',
     e.lat ?? '', e.lng ?? '', e.distance_to_customer_m ?? '', e.barcode_verified ? 'Sí' : 'No', e.cod_amount || 0,
@@ -281,7 +281,6 @@ function sheetRow(evidenceId) {
       return [types[c.shipment_type] || '', c.temp_c ?? '', yn(c.temp_in_range), c.seal_number ? `${c.seal_number}${c.seal_ok == null ? '' : c.seal_ok ? ' (íntegro)' : ' (dañado)'}` : yn(c.seal_ok),
         c.vehicle?.plates || '', c.check ? (c.check.passed ? 'Aprobado' : 'Con observaciones') : '', c.trusted ? `${c.trusted.folio}${c.trusted.valid ? '' : ' (vencido)'}` : ''];
     })(),
-    fmtPhone(e.cphone2),
   ];
 }
 function queueSheet(evidenceId, orderId) {
