@@ -481,6 +481,7 @@ app.delete(
     if (held.length) throw new HttpError(409, `No se puede eliminar: ${held.map((h) => `${h.name} trae ${h.qty}`).join(', ')}. Primero regrésalo al almacén.`);
     tx(() => {
       db.prepare('DELETE FROM driver_stock WHERE product_id=?').run(p.id);
+      db.prepare('DELETE FROM open_stock WHERE product_id=?').run(p.id);
       db.prepare('DELETE FROM custody_log WHERE product_id=?').run(p.id);
       db.prepare('DELETE FROM inventory_movements WHERE product_id=?').run(p.id);
       db.prepare('DELETE FROM products WHERE id=?').run(p.id);
@@ -963,20 +964,38 @@ function custodyOf(driverId) {
     return { ...d, total: list.reduce((a, x) => a + x.qty, 0), items: list };
   });
 }
+// Lo que está "abierto": fuera del almacén y disponible para cualquier repartidor
+function openPool() {
+  const prods = new Map(db.prepare('SELECT id, name, sku, serialized FROM products').all().map((p) => [p.id, p]));
+  const items = new Map();
+  const item = (pid) => {
+    if (!items.has(pid)) { const p = prods.get(pid) || { name: '?', sku: '' }; items.set(pid, { product_id: pid, name: p.name, sku: p.sku, serialized: !!p.serialized, qty: 0, serials: [] }); }
+    return items.get(pid);
+  };
+  for (const s of db.prepare(`SELECT s.product_id, s.serial, s.status, s.held_at, o.tracking_code FROM serials s LEFT JOIN orders o ON o.id = s.order_id
+    WHERE s.open_pool = 1 AND s.holder_id IS NULL AND s.status IN ('disponible','asignado') ORDER BY s.serial`).all()) {
+    const it = item(s.product_id); it.qty++; it.serials.push({ serial: s.serial, status: s.status, order: s.tracking_code, since: s.held_at });
+  }
+  for (const q of db.prepare('SELECT product_id, qty FROM open_stock WHERE qty > 0').all()) item(q.product_id).qty += q.qty;
+  const list = [...items.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return { id: 'open', name: 'Abierto · cualquier repartidor', open: true, active: 1, vehicle: null, total: list.reduce((a, x) => a + x.qty, 0), items: list };
+}
+const isOpen = (v) => v === 'open' || v === 'abierto';
 // Unidades físicas de un producto sin S/N que siguen en el almacén: existencia libre + lo apartado en pedidos abiertos − lo que ya traen repartidores
 function warehouseQty(productId) {
   const p = db.prepare('SELECT stock FROM products WHERE id=?').get(productId);
   const open = db.prepare(`SELECT COALESCE(SUM(oi.qty),0) n FROM order_items oi JOIN orders o ON o.id = oi.order_id
     WHERE oi.product_id = ? AND o.status IN ('pendiente','asignado','cargado','en_camino')`).get(productId).n;
-  const held = db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE product_id=?').get(productId).n;
+  const held = db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE product_id=?').get(productId).n
+    + (db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(productId)?.qty || 0);
   return Math.max(0, (p?.stock || 0) + open - held);
 }
-app.get('/api/custody', auth(...STAFF), wrap((req, res) => res.json({ drivers: custodyOf(null) })));
+app.get('/api/custody', auth(...STAFF), wrap((req, res) => res.json({ drivers: [openPool(), ...custodyOf(null)] })));
 // Lo que hay en el almacén para asignar: equipos con S/N que nadie trae y productos sin S/N con su cantidad disponible
 app.get('/api/custody/available', auth(...STAFF), wrap((req, res) => {
   const prods = db.prepare('SELECT id, name, sku, unit, serialized, location FROM products ORDER BY name').all();
   const sn = db.prepare(`SELECT s.product_id, s.serial, s.status, o.tracking_code, c.name customer FROM serials s LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id
-    WHERE s.holder_id IS NULL AND s.status IN ('disponible','asignado') ORDER BY s.status DESC, s.serial`).all();
+    WHERE s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') ORDER BY s.status DESC, s.serial`).all();
   res.json({
     serialized: prods.filter((p) => p.serialized).map((p) => ({ ...p, serials: sn.filter((s) => s.product_id === p.id) })).filter((p) => p.serials.length),
     plain: prods.filter((p) => !p.serialized).map((p) => ({ ...p, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
@@ -987,7 +1006,7 @@ app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
   const log = db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
     JOIN products p ON p.id = l.product_id LEFT JOIN orders o ON o.id = l.order_id LEFT JOIN users u ON u.id = l.by_user
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 30`).all(req.user.id);
-  res.json({ ...me, log });
+  res.json({ ...me, log, open_items: openPool().items });
 }));
 // El repartidor arma una entrega en campo: elige cliente y productos de lo que él trae (S/N o cantidad).
 // Se crea el pedido ya cargado en su unidad y se agrega a su ruta del día, listo para registrar la entrega.
@@ -1007,8 +1026,13 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
     for (const sn of serials) {
       const s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial=?').get(sn);
       if (!s) throw new HttpError(409, `El S/N ${sn} no está registrado`);
-      if (s.holder_id !== me) throw new HttpError(409, `El S/N ${sn} no está en tu inventario`);
+      const fromOpen = s.holder_id == null && s.open_pool === 1;
+      if (s.holder_id !== me && !fromOpen) throw new HttpError(409, `El S/N ${sn} no está en tu inventario`);
       if (s.status !== 'disponible') throw new HttpError(409, `El S/N ${sn} ya está ligado a otro pedido`);
+      if (fromOpen) {
+        db.prepare("UPDATE serials SET holder_id=?, open_pool=0, held_at=datetime('now') WHERE id=?").run(me, s.id);
+        custodyLog(me, s.product_id, 1, 'asignado', me, { serial: sn, reference: 'Tomado del inventario abierto' });
+      }
       db.prepare("UPDATE serials SET status='asignado', order_id=?, assigned_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(oid, s.id);
       serialEvent(s.id, 'asignado', oid, me, `Pedido ${code} (armado por el repartidor)`);
       qtyBy.set(s.product_id, (qtyBy.get(s.product_id) || 0) + 1);
@@ -1018,7 +1042,15 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
       if (!p) throw new HttpError(400, 'Producto no encontrado');
       if (p.serialized) throw new HttpError(400, `${p.name} se entrega por número de serie`);
       const held = db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(me, p.id)?.qty || 0;
-      if (it.qty > held) throw new HttpError(409, `Solo traes ${held} de ${p.name}`);
+      const pool = db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(p.id)?.qty || 0;
+      if (it.qty > held + pool) throw new HttpError(409, `Solo hay ${held + pool} de ${p.name} (tuyos ${held}, abiertos ${pool})`);
+      const take = Math.max(0, it.qty - held); // lo que falta se toma de lo abierto y pasa a ser suyo
+      if (take) {
+        db.prepare("UPDATE open_stock SET qty = qty - ?, updated_at=datetime('now') WHERE product_id=?").run(take, p.id);
+        db.prepare(`INSERT INTO driver_stock (user_id, product_id, qty) VALUES (?,?,?)
+          ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(me, p.id, take);
+        custodyLog(me, p.id, take, 'asignado', me, { reference: 'Tomado del inventario abierto' });
+      }
       qtyBy.set(p.id, (qtyBy.get(p.id) || 0) + it.qty);
     }
     for (const [pid, qty] of qtyBy) {
@@ -1039,6 +1071,7 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
   res.status(201).json(out);
 }));
 app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
+  if (isOpen(req.params.driverId)) return res.json([]);
   res.json(db.prepare(`SELECT l.action, l.qty, l.serial, l.reference, l.created_at, p.name product_name, o.tracking_code, u.name by_name FROM custody_log l
     JOIN products p ON p.id = l.product_id LEFT JOIN orders o ON o.id = l.order_id LEFT JOIN users u ON u.id = l.by_user
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 60`).all(req.params.driverId));
@@ -1046,7 +1079,8 @@ app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
 // Asignar: { driver_id, serials:[...] } para equipos con S/N, o { driver_id, product_id, qty } para productos sin S/N
 app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
   const b = req.body || {};
-  const d = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+  const open = isOpen(b.driver_id);
+  const d = open ? { id: null, name: 'Abierto (cualquier repartidor)', active: 1 } : db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
   if (!d) throw new HttpError(400, 'Elige el repartidor');
   if (!d.active) throw new HttpError(409, `${d.name} está desactivado`);
   const ref = String(b.reference || '').trim().slice(0, 80) || null;
@@ -1064,13 +1098,14 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
         const s = db.prepare('SELECT s.*, p.name pname, u.name holder_name FROM serials s JOIN products p ON p.id=s.product_id LEFT JOIN users u ON u.id=s.holder_id WHERE s.serial=?').get(sn);
         if (!s) { results.push({ serial: sn, ok: false, error: 'No está registrado en el inventario' }); continue; }
         if (['entregado', 'baja'].includes(s.status)) { results.push({ serial: sn, ok: false, error: s.status === 'entregado' ? 'Ya fue entregado a un cliente' : 'Está dado de baja' }); continue; }
-        if (s.holder_id === d.id) { results.push({ serial: sn, ok: false, error: `${d.name} ya lo trae` }); continue; }
-        results.push({ serial: sn, ok: true, product: s.pname, note: s.holder_id ? `Se pasa de ${s.holder_name}` : null });
+        if (!open && s.holder_id === d.id) { results.push({ serial: sn, ok: false, error: `${d.name} ya lo trae` }); continue; }
+        if (open && s.open_pool === 1 && s.holder_id == null) { results.push({ serial: sn, ok: false, error: 'Ya está abierto' }); continue; }
+        results.push({ serial: sn, ok: true, product: s.pname, note: s.holder_id ? `Se pasa de ${s.holder_name}` : s.open_pool ? 'Sale de abierto' : null });
         if (dry) continue;
         if (s.holder_id) custodyLog(s.holder_id, s.product_id, 1, 'devuelto', req.user.id, { serial: sn, reference: `Reasignado a ${d.name}` });
-        db.prepare("UPDATE serials SET holder_id=?, held_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(d.id, s.id);
-        serialEvent(s.id, 'repartidor', s.order_id, req.user.id, `Entregado a ${d.name}${ref ? ' · ' + ref : ''}`);
-        custodyLog(d.id, s.product_id, 1, 'asignado', req.user.id, { serial: sn, reference: ref });
+        db.prepare("UPDATE serials SET holder_id=?, open_pool=?, held_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(d.id, open ? 1 : 0, s.id);
+        serialEvent(s.id, open ? 'abierto' : 'repartidor', s.order_id, req.user.id, `${open ? 'Abierto para cualquier repartidor' : 'Entregado a ' + d.name}${ref ? ' · ' + ref : ''}`);
+        if (!open) custodyLog(d.id, s.product_id, 1, 'asignado', req.user.id, { serial: sn, reference: ref });
       }
     }
     // productos sin S/N por cantidad: items:[{product_id, qty}] (varios a la vez) o product_id + qty (uno)
@@ -1085,7 +1120,10 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
       const avail = warehouseQty(p.id);
       if (qty > avail) throw new HttpError(409, `Solo hay ${avail} ${p.unit || 'pza'} de ${p.name} en el almacén`);
       results.push({ product: p.name, qty, ok: true });
-      if (!dry) {
+      if (!dry && open) {
+        db.prepare(`INSERT INTO open_stock (product_id, qty) VALUES (?,?)
+          ON CONFLICT(product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(p.id, qty);
+      } else if (!dry) {
         db.prepare(`INSERT INTO driver_stock (user_id, product_id, qty) VALUES (?,?,?)
           ON CONFLICT(user_id, product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(d.id, p.id, qty);
         custodyLog(d.id, p.id, qty, 'asignado', req.user.id, { reference: ref });
@@ -1100,6 +1138,28 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
 // Devolver al almacén: { driver_id, serials:[...] } | { driver_id, product_id, qty } | { driver_id, all: true }
 app.post('/api/custody/return', auth(...STAFF), wrap((req, res) => {
   const b = req.body || {};
+  if (isOpen(b.driver_id)) {
+    let n = 0;
+    const ref = String(b.reference || '').trim().slice(0, 80) || null;
+    tx(() => {
+      const back = (s) => { db.prepare("UPDATE serials SET open_pool=0, held_at=NULL, updated_at=datetime('now') WHERE id=?").run(s.id); serialEvent(s.id, 'almacen', s.order_id, req.user.id, `Regresó de abierto al almacén${ref ? ' · ' + ref : ''}`); n++; };
+      if (b.all) {
+        for (const s of db.prepare('SELECT * FROM serials WHERE open_pool=1 AND holder_id IS NULL').all()) back(s);
+        n += db.prepare('SELECT COALESCE(SUM(qty),0) n FROM open_stock').get().n;
+        db.prepare('DELETE FROM open_stock').run();
+      } else if (Array.isArray(b.serials) && b.serials.length) {
+        for (const raw of b.serials) { const s = db.prepare('SELECT * FROM serials WHERE serial=? AND open_pool=1').get(normSerial(raw)); if (s) back(s); }
+      } else {
+        const q = db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(Number(b.product_id));
+        const qty = Math.trunc(Number(b.qty));
+        if (!q || !(qty > 0) || qty > q.qty) throw new HttpError(409, `En abierto solo hay ${q?.qty || 0} de ese producto`);
+        db.prepare("UPDATE open_stock SET qty = qty - ?, updated_at=datetime('now') WHERE product_id=?").run(qty, Number(b.product_id));
+        n += qty;
+      }
+    });
+    if (n) audit(req, 'inventario.devolver', `Abierto: ${n} de regreso al almacén`);
+    return res.json({ returned: n, errors: [] });
+  }
   const d = db.prepare("SELECT id, name FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
   if (!d) throw new HttpError(400, 'Elige el repartidor');
   const ref = String(b.reference || '').trim().slice(0, 80) || null;
@@ -1140,6 +1200,7 @@ app.post('/api/custody/return', auth(...STAFF), wrap((req, res) => {
 }));
 // Al entregar un pedido, lo que el repartidor traía de ese pedido sale de su inventario
 function custodyOnDelivery(orderId, driverId, userId) {
+  db.prepare('UPDATE serials SET open_pool=0 WHERE order_id=?').run(orderId);
   for (const s of db.prepare('SELECT * FROM serials WHERE order_id=? AND holder_id IS NOT NULL').all(orderId)) {
     db.prepare('UPDATE serials SET holder_id=NULL, held_at=NULL WHERE id=?').run(s.id);
     custodyLog(s.holder_id, s.product_id, 1, 'entregado', userId, { serial: s.serial, orderId });

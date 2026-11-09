@@ -409,6 +409,15 @@ CREATE TABLE IF NOT EXISTS custody_log (
 );
 CREATE INDEX IF NOT EXISTS idx_custody_driver ON custody_log(driver_id, created_at);
 `);
+// Inventario "abierto": salió del almacén y lo puede entregar cualquier repartidor
+addCols('serials', [['open_pool', 'INTEGER NOT NULL DEFAULT 0']]);
+db.exec(`
+CREATE TABLE IF NOT EXISTS open_stock (
+  product_id INTEGER PRIMARY KEY REFERENCES products(id),
+  qty INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
 
 // ---- Clientes mayoristas (empresas a las que Sovime da el servicio de entrega) ----
 db.exec(`

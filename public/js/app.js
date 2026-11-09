@@ -1559,7 +1559,7 @@ async function viewGuide(v) {
 // ================= Números de serie =================
 const SN_STATUS = { disponible: ['En almacén', 'ok'], asignado: ['Asignado a pedido', 'warn'], entregado: ['Entregado', ''], baja: ['Baja', 'off'] };
 const snChip = (st) => `<span class="chip ${SN_STATUS[st]?.[1] || ''}">${SN_STATUS[st]?.[0] || esc(st)}</span>`;
-const SN_EVENT = { recibido: 'Recibido en almacén', alta: 'Registrado al asignar', asignado: 'Asignado al pedido', liberado: 'Liberado del pedido', entregado: 'Entregado al cliente', baja: 'Dado de baja', reingreso: 'Reingresado', devolucion: 'Devuelto por el cliente', repartidor: 'Entregado a repartidor', almacen: 'Devuelto al almacén por el repartidor' };
+const SN_EVENT = { recibido: 'Recibido en almacén', alta: 'Registrado al asignar', asignado: 'Asignado al pedido', liberado: 'Liberado del pedido', entregado: 'Entregado al cliente', baja: 'Dado de baja', reingreso: 'Reingresado', devolucion: 'Devuelto por el cliente', repartidor: 'Entregado a repartidor', almacen: 'Devuelto al almacén por el repartidor', abierto: 'Abierto para cualquier repartidor' };
 
 // Escanear los S/N que le faltan a un pedido (despacho, mostrador o repartidor)
 function ensureSerials(order, onDone) {
@@ -1958,7 +1958,8 @@ function assignToDriver(drivers, products, preDriver) {
   const act = drivers.filter((d) => d.active);
   if (!act.length) return toast('Primero da de alta repartidores en Usuarios', 'bad');
   const m = modal('Asignar inventario a repartidor', `<div class="stack">
-    <div class="grid g2"><label class="f">Repartidor<select id="adDrv">${act.map((d) => `<option value="${d.id}" ${d.id === preDriver ? 'selected' : ''}>${esc(d.name)}${d.total ? ` (ya trae ${d.total})` : ''}</option>`).join('')}</select></label>
+    <div class="grid g2"><label class="f">Repartidor<select id="adDrv">${act.filter((d) => !d.open).map((d) => `<option value="${d.id}" ${d.id === preDriver ? 'selected' : ''}>${esc(d.name)}${d.total ? ` (ya trae ${d.total})` : ''}</option>`).join('')}
+        <option value="open" ${preDriver === 'open' ? 'selected' : ''}>🔓 Abierto · lo entrega cualquier repartidor${(drivers.find((d) => d.open)?.total) ? ` (ya hay ${drivers.find((d) => d.open).total})` : ''}</option></select></label>
       <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, turno…" maxlength="80" /></label></div>
     <div class="pill-tabs" id="adMode"><button class="on" data-m="pick">${icon('check')} Elegir del almacén</button><button data-m="sn">${icon('scan')} Escanear o pegar S/N</button></div>
     <div data-p="pick" class="stack">
@@ -1972,7 +1973,7 @@ function assignToDriver(drivers, products, preDriver) {
       <div class="row"><button class="btn" id="adPaste">Asignar lista</button><small class="muted" id="adCount"></small></div></div>
     <div class="scan-log" id="adLog"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Listo</button>', onClose: () => render() });
   const drv = () => $('#adDrv', m.el).value;
-  const drvName = () => $('#adDrv', m.el).selectedOptions[0].text.replace(/ \(ya trae.*$/, '');
+  const drvName = () => ($('#adDrv', m.el).value === 'open' ? 'Abierto' : $('#adDrv', m.el).selectedOptions[0].text.replace(/ \(ya trae.*$/, ''));
   const ref = () => $('#adRef', m.el).value;
   const log = (ok, txt) => $('#adLog', m.el).insertAdjacentHTML('afterbegin', `<div style="${ok ? '' : 'color:var(--bad)'}">${ok ? '✅' : '⛔'} ${txt}</div>`);
   $$('#adMode button', m.el).forEach((b) => (b.onclick = () => { $$('#adMode button', m.el).forEach((x) => x.classList.toggle('on', x === b)); $$('[data-p]', m.el).forEach((p) => (p.hidden = p.dataset.p !== b.dataset.m)); }));
@@ -2062,12 +2063,26 @@ function assignToDriver(drivers, products, preDriver) {
 
 function custodyDetail(d) {
   const m = modal(`Inventario de ${d.name}`, `<div class="stack">
-    <div class="row between"><b>${d.total} unidades</b><div class="row"><button class="btn sm" id="cdAdd">${icon('plus')} Asignar más</button><button class="btn sm bad" id="cdAll">Devolver todo al almacén</button></div></div>
+    <div class="row between"><b>${d.total} unidades</b><div class="row"><button class="btn sm" id="cdAdd">${icon('plus')} Asignar más</button>${d.open ? '' : `<button class="btn sm" id="cdOpen" title="Lo podrá entregar cualquier repartidor">🔓 Pasar a abierto</button>`}<button class="btn sm bad" id="cdAll">Devolver todo al almacén</button></div></div>
     ${d.items.map((it) => `<div class="card" style="padding:12px"><div class="row between"><div><b>${esc(it.name)}</b> <small class="muted">${esc(it.sku)}</small></div><b>${it.qty}</b></div>
       ${it.serialized ? `<div class="table-wrap" style="max-height:220px"><table><tbody>${it.serials.map((s) => `<tr><td class="mono">${esc(s.serial)}</td><td><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Sin pedido'} · desde ${fmtDT(s.since)}</small></td><td class="r"><button class="btn sm" data-ret-sn="${esc(s.serial)}">Devolver</button></td></tr>`).join('')}</tbody></table></div>`
         : `<div class="row" style="margin-top:8px"><input type="number" min="1" max="${it.qty}" value="${it.qty}" style="width:90px" data-ret-qty="${it.product_id}" /><button class="btn sm" data-ret-p="${it.product_id}">Devolver al almacén</button></div>`}</div>`).join('')}
     <div><h3>Movimientos</h3><div class="timeline" id="cdLog"><p class="muted">Cargando…</p></div></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>', onClose: () => render() });
   const ret = async (body, msg) => { try { const r = await POST('/api/custody/return', { driver_id: d.id, ...body }); toast(`${r.returned} ${msg}`, 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } };
+  $('#cdOpen', m.el)?.addEventListener('click', async () => {
+    if (!(await confirmDlg(`¿Pasar a "abierto" lo que trae ${d.name} y que aún no está ligado a un pedido? Lo podrá entregar cualquier repartidor.`))) return;
+    try {
+      const serials = d.items.flatMap((it) => it.serials.filter((x) => !x.order).map((x) => x.serial));
+      const plain = d.items.filter((it) => !it.serialized && it.qty > 0);
+      let n = 0;
+      if (serials.length) n += (await POST('/api/custody/assign', { driver_id: 'open', serials, reference: `Liberado por ${d.name}` })).assigned;
+      for (const it of plain) {
+        await POST('/api/custody/return', { driver_id: d.id, product_id: it.product_id, qty: it.qty });
+        n += (await POST('/api/custody/assign', { driver_id: 'open', items: [{ product_id: it.product_id, qty: it.qty }], reference: `Liberado por ${d.name}` })).assigned;
+      }
+      toast(`${n} unidades ahora están abiertas para cualquier repartidor`, 'ok'); m.close();
+    } catch (e) { toast(e.message, 'bad'); }
+  });
   $('#cdAll', m.el).onclick = async () => { if (await confirmDlg(`¿${d.name} devolvió al almacén todo lo que traía (${d.total} unidades)?`)) ret({ all: true }, 'unidades devueltas al almacén'); };
   $('#cdAdd', m.el).onclick = async () => { m.close(); const [c, p] = await Promise.all([GET('/api/custody'), GET('/api/products?limit=500')]); assignToDriver(c.drivers, p.rows, d.id); };
   $$('[data-ret-sn]', m.el).forEach((b) => (b.onclick = () => ret({ serials: [b.dataset.retSn] }, 'equipo devuelto al almacén')));
@@ -2085,6 +2100,8 @@ async function viewMyStock(v) {
       <div class="card kpi"><div class="label">Productos</div><div class="value">${r.items?.length || 0}</div></div></div>
     ${(r.items || []).map((it) => `<div class="card" style="margin-top:12px"><div class="row between"><div><b>${esc(it.name)}</b><br><small class="muted">${esc(it.sku)}</small></div><b style="font-size:22px">${it.qty}</b></div>
       ${it.serialized ? `<div class="sn-list" style="margin-top:8px">${it.serials.map((s) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono">${esc(s.serial)}</span><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Libre'}</small></div>`).join('')}</div>` : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">No traes inventario asignado. El almacén te lo asigna antes de salir.</div>'}
+    ${(r.open_items || []).length ? `<div class="card" style="margin-top:12px"><h2>🔓 Abierto · cualquier repartidor</h2><p class="muted" style="margin-top:0">Inventario que puede entregar cualquiera. Al usarlo en una entrega pasa a ser tuyo.</p>
+      ${r.open_items.map((it) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span><b>${esc(it.name)}</b>${it.serialized ? `<br><small class="muted mono">${it.serials.map((x) => esc(x.serial)).join(' · ')}</small>` : ''}</span><b>${it.qty}</b></div>`).join('')}</div>` : ''}
     <div class="card" style="margin-top:12px"><h2>Movimientos</h2><div class="timeline">${custodyLogHtml(r.log || [])}</div></div>`;
 }
 
@@ -2609,7 +2626,7 @@ async function viewInventory(v) {
   $('#newP').onclick = () => productForm(null);
   $('#impInv').onclick = importInventory;
   $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
-  $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => d.id === Number(tr.dataset.cust)))));
+  $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => String(d.id) === tr.dataset.cust))));
   $$('tr[data-p]', v).forEach((tr) => (tr.onclick = () => productForm(JSON.parse(tr.dataset.p))));
   const scanMove = (type) => {
     let qtyEl;
@@ -3963,7 +3980,14 @@ function viewNewCustomer(v) {
   async function pickForCustomer(cid) {
     const [c, mine, myRoute] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null)]);
     const mineOpen = (myRoute?.stops || []).filter((s) => s.customer_id === c.id && ['asignado', 'cargado'].includes(s.status));
-    const items = mine.items || [];
+    // lo suyo + lo abierto (cualquier repartidor puede entregarlo)
+    const items = (mine.items || []).map((it) => ({ ...it, serials: it.serials.map((x) => ({ ...x, pool: false })), own: it.qty, pool: 0 }));
+    for (const op of mine.open_items || []) {
+      let it = items.find((x) => x.product_id === op.product_id);
+      if (!it) { it = { ...op, serials: [], qty: 0, own: 0, pool: 0 }; items.push(it); }
+      it.serials.push(...op.serials.map((x) => ({ ...x, pool: true })));
+      it.pool += op.qty; it.qty += op.qty;
+    }
     const box = $('#dcPick');
     box.innerHTML = `<div class="card" style="margin-top:12px">
       <div class="row between"><div><b style="font-size:18px">${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}</small><br>
@@ -3973,8 +3997,8 @@ function viewNewCustomer(v) {
       <h3>¿Qué le vas a entregar?</h3>
       ${items.length ? `<div class="row" style="margin-bottom:8px"><input id="dcPq" class="grow" placeholder="Buscar producto o S/N en lo que traes" autocomplete="off" /></div>
         <div id="dcSel" class="muted" style="margin-bottom:6px">Nada seleccionado</div>` : ''}
-      ${items.length ? items.map((it) => `<div class="card dc-item" data-name="${esc(normH(it.name + ' ' + it.sku))}" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">traes ${it.qty}</small></div>
-        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row dc-sn" data-s="${esc(normH(s.serial))}" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span></label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
+      ${items.length ? items.map((it) => `<div class="card dc-item" data-name="${esc(normH(it.name + ' ' + it.sku))}" style="padding:10px 12px;margin-bottom:8px"><div class="row between"><b>${esc(it.name)}</b><small class="muted">${it.own ? `traes ${it.own}` : ''}${it.own && it.pool ? ' · ' : ''}${it.pool ? `🔓 abiertos ${it.pool}` : ''}</small></div>
+        ${it.serialized ? (it.serials.filter((s) => !s.order).map((s) => `<label class="row dc-sn" data-s="${esc(normH(s.serial))}" style="padding:6px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" /> <span class="mono">${esc(s.serial)}</span>${s.pool ? ' <small class="chip">🔓 abierto</small>' : ''}</label>`).join('') || '<small class="muted">Todos los que traes ya están ligados a pedidos.</small>')
           : `<div class="row" style="margin-top:6px"><label class="row"><input type="checkbox" data-pp="${it.product_id}" /> Entregar</label><input type="number" min="1" max="${it.qty}" value="1" data-pq="${it.product_id}" style="width:90px" /></div>`}</div>`).join('')
         : '<div class="card empty">No traes inventario asignado. Pide al almacén que te lo asigne.</div>'}
       ${items.some((it) => it.serialized) ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
