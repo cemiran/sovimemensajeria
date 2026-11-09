@@ -1963,7 +1963,7 @@ function assignToDriver(drivers, products, preDriver) {
       <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, turno…" maxlength="80" /></label></div>
     <div class="pill-tabs" id="adMode"><button class="on" data-m="pick">${icon('check')} Elegir del almacén</button><button data-m="sn">${icon('scan')} Escanear o pegar S/N</button></div>
     <div data-p="pick" class="stack">
-      <div class="row"><input id="adQ" class="grow" placeholder="Buscar producto, S/N, pedido o cliente" /><button class="btn sm" id="adNone">Quitar selección</button></div>
+      <div class="row"><input id="adQ" class="grow" placeholder="Buscar producto, S/N, pedido o cliente" /><button class="btn sm primary" id="adAll" title="Marca todos los equipos y productos que se ven en la lista (respeta la búsqueda)">${icon('check')} Seleccionar todo</button><button class="btn sm" id="adNone">Quitar selección</button></div>
       <div id="adAvail" class="stack" style="max-height:48vh;overflow:auto"><p class="muted">Cargando inventario disponible…</p></div>
       <div class="row between assign-bar" style="position:sticky;bottom:0;background:var(--surface);padding-top:8px;border-top:1px solid var(--border)">
         <small id="adSel" class="muted">Nada seleccionado</small><button class="btn primary" id="adPick" disabled>${icon('truck')} Asignar</button></div></div>
@@ -1983,6 +1983,7 @@ function assignToDriver(drivers, products, preDriver) {
   const box = $('#adAvail', m.el);
   const selSN = new Set();
   const selQty = new Map(); // product_id -> qty
+  let vis = { ser: [], pl: [], q: '' }; // lo que se ve en la lista (según la búsqueda)
   const updateBar = () => {
     const nP = [...selQty.values()].reduce((a, q) => a + q, 0);
     const parts = [selSN.size ? `${selSN.size} equipo${selSN.size === 1 ? '' : 's'} con S/N` : '', nP ? `${nP} pieza${nP === 1 ? '' : 's'} de ${selQty.size} producto${selQty.size === 1 ? '' : 's'}` : ''].filter(Boolean);
@@ -1996,6 +1997,7 @@ function assignToDriver(drivers, products, preDriver) {
     const hit = (...t) => !q || t.some((x) => normH(x).includes(q));
     const ser = avail.serialized.map((p) => ({ ...p, list: hit(p.name, p.sku) ? p.serials : p.serials.filter((s) => hit(s.serial, s.tracking_code, s.customer)) })).filter((p) => p.list.length);
     const pl = avail.plain.filter((p) => hit(p.name, p.sku));
+    vis = { ser, pl, q };
     box.innerHTML = (ser.map((p) => {
       const on = p.list.filter((s) => selSN.has(s.serial)).length;
       return `<div class="card" style="padding:10px 12px"><div class="row between"><label class="row"><input type="checkbox" data-allp="${p.id}" ${on === p.list.length ? 'checked' : ''} /> <b>${esc(p.name)}</b> <small class="muted">${esc(p.sku)}</small></label>
@@ -2024,6 +2026,14 @@ function assignToDriver(drivers, products, preDriver) {
   const load = async () => { try { avail = await GET('/api/custody/available'); draw(); } catch (e) { box.innerHTML = `<p class="muted">⚠️ ${esc(e.message)}</p>`; } };
   $('#adQ', m.el).oninput = draw;
   $('#adNone', m.el).onclick = () => { selSN.clear(); selQty.clear(); draw(); };
+  // todo lo visible: todos los S/N y cada producto por cantidad con todo lo disponible
+  $('#adAll', m.el).onclick = () => {
+    vis.ser.forEach((p) => p.list.forEach((x) => selSN.add(x.serial)));
+    vis.pl.forEach((p) => selQty.set(p.id, p.available));
+    draw();
+    const n = selSN.size + [...selQty.values()].reduce((a, q) => a + q, 0);
+    if (n) toast(`${n} unidades seleccionadas${vis.q ? ' (según la búsqueda)' : ''}`, 'ok');
+  };
   $('#adDrv', m.el).onchange = updateBar;
   $('#adPick', m.el).onclick = async (e) => {
     const btn = e.currentTarget;
