@@ -1914,6 +1914,66 @@ async function warehouseDetail(id, whs) {
   });
 }
 
+// ================= Documentos del expediente =================
+const DOC_ST = { aprobado: ['Aprobado', 'ok'], pendiente: ['En revisión', 'warn'], rechazado: ['Rechazado', 'off'] };
+function staffDocChip(d) {
+  if (!d) return '';
+  const venc = d.expires && d.expires < today();
+  if (venc) return '<span class="chip off">Vencido</span>';
+  const st = DOC_ST[d.status] || (d.ok ? DOC_ST.aprobado : null);
+  return st ? `<span class="chip ${st[1]}">${st[0]}</span>` : '';
+}
+// Foto (reducida) o PDF como data URL
+function fileToDataUrl(file) {
+  if (file.size > 12 * 1024 * 1024) return Promise.reject(new Error('El archivo es muy grande (máx. 12 MB)'));
+  if (file.type === 'application/pdf') return new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => fail(new Error('No se pudo leer el PDF')); r.readAsDataURL(file); });
+  if (!file.type.startsWith('image/')) return Promise.reject(new Error('Sube una foto o un PDF'));
+  return new Promise((ok, fail) => {
+    const img = new Image();
+    img.onload = () => { const k = Math.min(1, 1800 / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(img.src); ok(c.toDataURL('image/jpeg', 0.85)); };
+    img.onerror = () => fail(new Error('No se pudo leer la imagen'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+async function openDocFile(userId, doc) {
+  const w = window.open('', '_blank');
+  try {
+    const r = await fetch(`/api/users/${userId}/documents/${doc}/file`, { headers: { Authorization: 'Bearer ' + store.token } });
+    if (!r.ok) throw new Error('No se pudo abrir el documento');
+    const url = URL.createObjectURL(await r.blob());
+    if (w) w.location = url; else window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+  } catch (e) { w?.close(); toast(e.message, 'bad'); }
+}
+// Colaborador: sube sus propios documentos desde Mi perfil
+async function myDocuments(box, u) {
+  const r = await GET('/api/me/documents');
+  const need = r.doc_list.filter((d) => !d.optional);
+  const done = need.filter((d) => r.docs[d.key]?.ok && !(r.docs[d.key]?.expires && r.docs[d.key].expires < today())).length;
+  box.innerHTML = `<h2>Mis documentos</h2>
+    <p class="muted" style="margin:0">Sube una foto clara o el PDF de cada documento. El administrador lo revisa y queda en tu expediente.</p>
+    <div class="row"><b>${done}/${need.length} aprobados</b><div class="progress grow"><i style="width:${need.length ? (done / need.length) * 100 : 0}%;background:var(--ok)"></i></div></div>
+    ${r.doc_list.map((d) => { const x = r.docs[d.key] || {}; return `<div class="doc-row stack" style="gap:6px">
+      <div class="row between"><span><b>${esc(d.label)}</b>${d.optional ? ' <small class="muted">(opcional)</small>' : ''}</span>${staffDocChip(x) || '<span class="chip">Falta</span>'}</div>
+      ${x.status === 'rechazado' && x.note ? `<small style="color:var(--bad)">${esc(x.note)}</small>` : ''}
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <label class="btn sm ${x.has_file ? '' : 'primary'}">${icon('camera')} ${x.has_file ? 'Reemplazar' : 'Subir foto o PDF'}<input type="file" accept="image/*,application/pdf" data-mup="${d.key}" hidden /></label>
+        ${x.has_file ? `<button type="button" class="btn sm" data-mview="${d.key}">${icon('ext')} Ver</button>` : ''}
+        <label class="row"><small class="muted">Vence</small><input type="date" data-mexp="${d.key}" value="${esc(x.expires || '')}" style="width:auto" /></label></div></div>`; }).join('')}`;
+  $$('[data-mview]', box).forEach((b) => (b.onclick = () => openDocFile(u.id, b.dataset.mview)));
+  $$('[data-mup]', box).forEach((i) => (i.onchange = async () => {
+    const f = i.files[0];
+    if (!f) return;
+    const k = i.dataset.mup;
+    toast('Subiendo…', '');
+    try {
+      await POST('/api/me/documents/' + k, { file: await fileToDataUrl(f), expires: $(`[data-mexp="${k}"]`, box).value || undefined });
+      toast('Documento enviado a revisión', 'ok');
+      myDocuments(box, u);
+    } catch (e) { toast(e.message, 'bad'); }
+  }));
+}
+
 // ================= Expediente del personal (interno o externo) =================
 async function staffProfile(box, u) {
   const p = await GET(`/api/users/${u.id}/profile`);
@@ -1945,8 +2005,12 @@ async function staffProfile(box, u) {
       <div class="row" style="margin-top:6px"><input type="date" id="payFrom" value="${first}" style="width:auto" /><input type="date" id="payTo" value="${today()}" style="width:auto" /><button type="button" class="btn sm" id="payGo">Calcular pago</button></div>
       <div id="payOut" class="muted" style="margin-top:6px"></div></fieldset>
     <fieldset><legend>${icon('shield')} Cumplimiento mínimo (documentos)</legend>
-      ${p.doc_list.map(([k, l]) => `<div class="row doc-row"><label class="row grow"><input type="checkbox" data-doc="${k}" ${p.docs[k]?.ok ? 'checked' : ''} /> ${esc(l)}${k === 'seguro' || (k === 'licencia' && u.role !== 'repartidor') ? ' <small class="muted">(opcional)</small>' : ''}</label>
-        <label class="row"><small class="muted">Vence</small><input type="date" data-exp="${k}" value="${esc(p.docs[k]?.expires || '')}" style="width:auto" /></label></div>`).join('')}
+      ${p.pending_docs ? `<div class="info-bar">${icon('info')} ${p.pending_docs} documento(s) subido(s) por el colaborador esperan tu revisión.</div>` : ''}
+      ${p.doc_list.map(([k, l]) => { const d = p.docs[k] || {}; return `<div class="row doc-row"><label class="row grow"><input type="checkbox" data-doc="${k}" ${d.ok ? 'checked' : ''} /> ${esc(l)}${k === 'seguro' || (k === 'licencia' && u.role !== 'repartidor') ? ' <small class="muted">(opcional)</small>' : ''} ${staffDocChip(d)}</label>
+        <div class="row" style="gap:6px">${d.has_file ? `<button type="button" class="btn sm" data-view="${k}">${icon('ext')} Ver</button>` : ''}
+          ${d.status === 'pendiente' ? `<button type="button" class="btn sm ok" data-ok="${k}">Aprobar</button><button type="button" class="btn sm bad" data-no="${k}">Rechazar</button>` : ''}
+          <label class="btn sm">${icon('upload')} Subir<input type="file" accept="image/*,application/pdf" data-up="${k}" hidden /></label>
+          <label class="row"><small class="muted">Vence</small><input type="date" data-exp="${k}" value="${esc(d.expires || '')}" style="width:auto" /></label></div></div>`; }).join('')}
       ${p.missing.length ? `<small class="muted">Faltan: ${p.missing.map(esc).join(', ')}</small>` : ''}</fieldset>
     <label class="f">Notas<textarea name="notes">${esc(p.notes)}</textarea></label>
     <div class="row" style="justify-content:flex-end"><button type="button" class="btn primary" id="pfSave">Guardar expediente</button></div>
@@ -1973,6 +2037,12 @@ async function staffProfile(box, u) {
   };
   $('#payGo', box).onclick = pay;
   pay();
+  // documentos: ver, subir (queda aprobado), aprobar o rechazar lo que subió el colaborador
+  const docAct = async (k, body, msg) => { try { await POST(`/api/users/${u.id}/documents/${k}`, body); toast(msg, 'ok'); staffProfile(box, u); } catch (e) { toast(e.message, 'bad'); } };
+  $$('[data-view]', box).forEach((b) => (b.onclick = () => openDocFile(u.id, b.dataset.view)));
+  $$('[data-ok]', box).forEach((b) => (b.onclick = () => docAct(b.dataset.ok, { status: 'aprobado', expires: $(`[data-exp="${b.dataset.ok}"]`, box).value || undefined }, 'Documento aprobado')));
+  $$('[data-no]', box).forEach((b) => (b.onclick = () => { const note = prompt('Motivo del rechazo (lo verá el colaborador):', 'Ilegible, vuelve a subirlo'); if (note !== null) docAct(b.dataset.no, { status: 'rechazado', note }, 'Documento rechazado'); }));
+  $$('[data-up]', box).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; try { docAct(i.dataset.up, { file: await fileToDataUrl(f), expires: $(`[data-exp="${i.dataset.up}"]`, box).value || undefined }, 'Documento guardado'); } catch (e) { toast(e.message, 'bad'); } }));
   $('#pfSave', box).onclick = async (e) => {
     const btn = e.currentTarget;
     const b = Object.fromEntries(new FormData(f));
@@ -3174,6 +3244,7 @@ async function viewProfile(v) {
         ${pwdField('current', 'Contraseña actual', { auto: 'current-password', min: 0 })}
         <div class="grid g2">${pwdField('password', 'Nueva contraseña', { meter: true })}${pwdField('confirm', 'Repite la nueva')}</div>
         <div><button class="btn primary">Actualizar contraseña</button></div></form>
+      ${u.role !== 'admin' ? '<div class="card stack" id="myDocs"><h2>Mis documentos</h2><p class="muted" style="margin:0">Cargando…</p></div>' : ''}
     </div>
     <div class="stack">
       <div class="card stack"><h2>Apariencia</h2>
@@ -3187,6 +3258,7 @@ async function viewProfile(v) {
     </div>
   </div>`;
   wirePwd(v);
+  if ($('#myDocs')) myDocuments($('#myDocs'), u);
   $('#pf').onsubmit = async (e) => {
     e.preventDefault();
     try { const r = await PUT('/api/me', Object.fromEntries(new FormData(e.target))); store.user = { ...store.user, ...r }; toast('Datos guardados', 'ok'); render(); }

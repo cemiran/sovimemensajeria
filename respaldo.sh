@@ -12,3 +12,8 @@ if (!fs.existsSync(f)) new DatabaseSync("/app/data/ultimamilla.db").prepare("VAC
 console.log(new Date().toISOString(), "respaldo listo:", f);
 '
 find /docker/sovime/data/respaldos -name "ultimamilla-*.db" -mtime +14 -delete
+# documentos del expediente del personal (privados): copia comprimida diaria
+if [ -d /docker/sovime/data/expedientes ]; then
+  tar -czf "/docker/sovime/data/respaldos/expedientes-$D.tar.gz" -C /docker/sovime/data expedientes
+  find /docker/sovime/data/respaldos -name "expedientes-*.tar.gz" -mtime +14 -delete
+fi

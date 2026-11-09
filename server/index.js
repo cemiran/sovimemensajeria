@@ -963,7 +963,8 @@ function profileOf(userId) {
   const need = STAFF_DOCS.filter(([k]) => k !== 'seguro' && (k !== 'licencia' || role === 'repartidor'));
   const missing = need.filter(([k]) => !docs[k]?.ok).map(([, l]) => l);
   const expired = STAFF_DOCS.filter(([k]) => docs[k]?.ok && docs[k]?.expires && docs[k].expires < today0).map(([, l]) => l);
-  return { ...p, docs, doc_list: STAFF_DOCS, missing, expired, complete: !missing.length && !expired.length };
+  return { ...p, docs: publicDocs(docs), doc_list: STAFF_DOCS, missing, expired, complete: !missing.length && !expired.length,
+    pending_docs: Object.values(docs).filter((d) => d.status === 'pendiente').length };
 }
 app.get('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
   if (!db.prepare('SELECT 1 FROM users WHERE id=?').get(req.params.id)) throw new HttpError(404, 'No encontrado');
@@ -988,8 +989,15 @@ app.put('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
   }
   let docs = cur.docs_json || '{}';
   if (b.docs && typeof b.docs === 'object') {
+    const prev = (() => { try { return JSON.parse(cur.docs_json || '{}'); } catch { return {}; } })();
     const clean = {};
-    for (const [k] of STAFF_DOCS) if (b.docs[k]) clean[k] = { ok: !!b.docs[k].ok, expires: /^\d{4}-\d{2}-\d{2}$/.test(b.docs[k].expires || '') ? b.docs[k].expires : null };
+    for (const [k] of STAFF_DOCS) {
+      if (!b.docs[k] && !prev[k]) continue;
+      const nd = b.docs[k] || prev[k];
+      const ok = !!nd.ok;
+      clean[k] = { ...prev[k], ok, expires: /^\d{4}-\d{2}-\d{2}$/.test(nd.expires || '') ? nd.expires : null,
+        status: ok ? 'aprobado' : prev[k]?.status === 'aprobado' ? (prev[k]?.file ? 'pendiente' : null) : prev[k]?.status || null };
+    }
     docs = JSON.stringify(clean);
   }
   let photo = cur.photo_path || null;
@@ -1012,6 +1020,80 @@ app.get('/api/users/:id/pay', auth('admin'), wrap((req, res) => {
   const d = r.delivered || 0, f = r.failed || 0;
   res.json({ from, to, delivered: d, failed: f, rate_delivery: p.pay_per_delivery, rate_failed: p.pay_per_failed,
     amount: Math.round((d * p.pay_per_delivery + f * p.pay_per_failed) * 100) / 100 });
+}));
+
+// ---------- Documentos del expediente (los sube el colaborador o el administrador) ----------
+// Se guardan fuera de la carpeta pública: solo los ve el administrador o el propio colaborador.
+const DOCS_DIR = path.join(DATA_DIR, 'expedientes');
+fs.mkdirSync(DOCS_DIR, { recursive: true });
+const DOC_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'application/pdf': 'pdf' };
+function saveDocFile(dataUrl, userId, doc) {
+  const m = /^data:([\w/+.-]+);base64,(.+)$/.exec(String(dataUrl || ''));
+  if (!m || !DOC_TYPES[m[1]]) throw new HttpError(400, 'Sube una foto (JPG, PNG) o un PDF');
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 8 * 1024 * 1024) throw new HttpError(413, 'El archivo es demasiado grande (máx. 8 MB)');
+  const name = `u${userId}_${doc}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.${DOC_TYPES[m[1]]}`;
+  fs.writeFileSync(path.join(DOCS_DIR, name), buf);
+  return name;
+}
+const docsOf = (userId) => { try { return JSON.parse(db.prepare('SELECT docs_json FROM staff_profiles WHERE user_id=?').get(userId)?.docs_json || '{}'); } catch { return {}; } };
+function saveDocs(userId, docs) {
+  db.prepare(`INSERT INTO staff_profiles (user_id, docs_json, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(user_id) DO UPDATE SET docs_json=excluded.docs_json, updated_at=datetime('now')`).run(userId, JSON.stringify(docs));
+}
+const docListFor = (role) => STAFF_DOCS.map(([k, l]) => ({ key: k, label: l, optional: k === 'seguro' || (k === 'licencia' && role !== 'repartidor') }));
+const publicDocs = (docs) => Object.fromEntries(Object.entries(docs).map(([k, d]) => [k, { ok: !!d.ok, status: d.status || (d.ok ? 'aprobado' : null), expires: d.expires || null, has_file: !!d.file, uploaded_at: d.uploaded_at || null, uploaded_by: d.uploaded_by || null, note: d.note || null, mime: d.file ? (d.file.endsWith('.pdf') ? 'pdf' : 'img') : null }]));
+function putDoc(req, userId, doc, { admin }) {
+  if (!STAFF_DOCS.some(([k]) => k === doc)) throw new HttpError(400, 'Documento no válido');
+  const b = req.body || {};
+  const docs = docsOf(userId);
+  const d = { ...(docs[doc] || {}) };
+  if (b.file) {
+    const old = d.file;
+    d.file = saveDocFile(b.file, userId, doc);
+    d.uploaded_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    d.uploaded_by = req.user.name;
+    if (old) fs.rm(path.join(DOCS_DIR, old), { force: true }, () => {});
+    d.status = admin ? 'aprobado' : 'pendiente';
+    d.ok = !!admin;
+    d.note = null;
+  }
+  if (b.expires !== undefined) d.expires = /^\d{4}-\d{2}-\d{2}$/.test(b.expires || '') ? b.expires : null;
+  if (admin && ['aprobado', 'rechazado'].includes(b.status)) {
+    if (!d.file && b.status === 'aprobado' && !b.file) d.status = 'aprobado';
+    d.status = b.status; d.ok = b.status === 'aprobado';
+    d.note = b.status === 'rechazado' ? String(b.note || '').trim().slice(0, 200) || 'Rechazado: vuelve a subirlo' : null;
+  }
+  docs[doc] = d;
+  saveDocs(userId, docs);
+  return d;
+}
+// Colaborador: sus documentos
+app.get('/api/me/documents', auth(), wrap((req, res) => {
+  res.json({ doc_list: docListFor(req.user.role), docs: publicDocs(docsOf(req.user.id)) });
+}));
+app.post('/api/me/documents/:doc', auth(), wrap((req, res) => {
+  if (!req.body?.file) throw new HttpError(400, 'Adjunta la foto o el PDF del documento');
+  const d = putDoc(req, req.user.id, req.params.doc, { admin: false });
+  audit(req, 'personal.documento', `${req.user.name} subió ${STAFF_DOCS.find(([k]) => k === req.params.doc)[1]}`);
+  res.json(publicDocs({ [req.params.doc]: d })[req.params.doc]);
+}));
+// Administrador: subir, aprobar o rechazar
+app.post('/api/users/:id/documents/:doc', auth('admin'), wrap((req, res) => {
+  const u = db.prepare('SELECT id, name FROM users WHERE id=?').get(req.params.id);
+  if (!u) throw new HttpError(404, 'No encontrado');
+  const d = putDoc(req, u.id, req.params.doc, { admin: true });
+  audit(req, 'personal.documento', `${u.name}: ${STAFF_DOCS.find(([k]) => k === req.params.doc)[1]} ${d.status || ''}`);
+  res.json(publicDocs({ [req.params.doc]: d })[req.params.doc]);
+}));
+// Ver el archivo (administrador o el propio colaborador)
+app.get('/api/users/:id/documents/:doc/file', auth(), wrap((req, res) => {
+  const uid = Number(req.params.id);
+  if (req.user.role !== 'admin' && req.user.id !== uid) throw new HttpError(403, 'Sin permiso');
+  const f = docsOf(uid)[req.params.doc]?.file;
+  if (!f) throw new HttpError(404, 'Sin archivo');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.sendFile(path.join(DOCS_DIR, path.basename(f)));
 }));
 
 // ---------- Almacenes ----------
