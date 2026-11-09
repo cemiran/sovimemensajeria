@@ -228,11 +228,11 @@ ${m.body}` };
 }
 
 // ---------- Google Sheets (Apps Script Web App) ----------
-// Formato de la hoja "Entregas" de Sovime: A–J con los datos del pedido (teléfono móvil en D y adicional en E;
-// el Dashboard cuenta Estatus en H y Repartidor en I) y la evidencia a partir de la K.
+// Formato de la hoja "Entregas" de Sovime: A–K con los datos del pedido (teléfonos: Telnor en D, móvil en E y adicional en F;
+// el Dashboard cuenta Estatus en I y Repartidor en J) y la evidencia a partir de la L.
 // Las columnas se escriben por posición: si se cambia el orden aquí, hay que mover la columna en la hoja igual.
 const SHEET_NAME = 'Entregas';
-const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
+const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Zona', 'Estatus', 'Repartidor', 'Notas',
   'Recibió', 'Parentesco', 'Identificación', 'Tipo de entrega', 'Motivo', 'Ruta', 'Latitud', 'Longitud', 'Distancia al domicilio (m)',
   'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante', 'Números de serie',
   'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable'];
@@ -252,7 +252,7 @@ function zoneOf(s, lat, lng) {
 function sheetRow(evidenceId) {
   const e = db
     .prepare(
-      `SELECT e.*, o.tracking_code, o.cod_amount, o.public_token, c.name cname, c.phone cphone, c.phone_alt cphone2, c.address, c.lat clat, c.lng clng,
+      `SELECT e.*, o.tracking_code, o.cod_amount, o.public_token, c.name cname, c.phone cphone, c.phone_alt cphone2, c.external_id ctelnor, c.address, c.lat clat, c.lng clng,
               u.name dname, r.name rname
        FROM evidences e JOIN orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id
        LEFT JOIN users u ON u.id=e.driver_id LEFT JOIN routes r ON r.id=o.route_id WHERE e.id=?`
@@ -266,7 +266,7 @@ function sheetRow(evidenceId) {
   const note = e.notes || (ok ? `Recibió ${e.receiver_name || ''}${e.receiver_relation ? ' (' + e.receiver_relation + ')' : ''}${counter ? ' en mostrador' : ''}` : `Motivo: ${e.reason || ''}`);
   const iso = new Date(String(e.created_at).replace(' ', 'T') + 'Z').toISOString();
   return [
-    e.tracking_code, iso, e.cname, fmtPhone(e.cphone), fmtPhone(e.cphone2), e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
+    e.tracking_code, iso, e.cname, fmtPhone(e.ctelnor), fmtPhone(e.cphone), fmtPhone(e.cphone2), e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
     ok ? 'Entregado' : 'No Entregado', counter ? 'Mostrador' : e.dname || '', note,
     e.receiver_name || '', e.receiver_relation || '', e.receiver_id_doc || '', counter ? 'Mostrador' : 'En ruta', e.reason || '', e.rname || '',
     e.lat ?? '', e.lng ?? '', e.distance_to_customer_m ?? '', e.barcode_verified ? 'Sí' : 'No', e.cod_amount || 0,
