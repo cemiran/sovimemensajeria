@@ -2408,13 +2408,42 @@ const custodyLogHtml = (l) => l.map((x) => `<div><b>${CUST_ACT[x.action]?.[0] ||
 async function viewMyStock(v) {
   const r = await GET('/api/my/custody');
   v.innerHTML = topbar('Mi inventario', '', 'Equipos y productos que te entregó el almacén. Al entregar un pedido se descuentan solos.') + `
+    <div class="card"><h2 style="margin-top:0">${icon('search')} Buscar producto</h2>
+      <form class="row" id="msQ"><input name="q" class="grow" placeholder="Nombre, SKU, código de barras o S/N" autocomplete="off" /><button type="button" class="btn" id="msScan">${icon('scan')}</button><button class="btn primary">Buscar</button></form>
+      <div id="msRes" style="margin-top:8px"></div></div>`;
+  v.insertAdjacentHTML('beforeend', `
     <div class="grid g2"><div class="card kpi"><div class="label">Unidades que traes</div><div class="value">${r.total || 0}</div></div>
       <div class="card kpi"><div class="label">Productos</div><div class="value">${r.items?.length || 0}</div></div></div>
     ${(r.items || []).map((it) => `<div class="card" style="margin-top:12px"><div class="row between"><div><b>${esc(it.name)}</b><br><small class="muted">${esc(it.sku)}</small></div><b style="font-size:22px">${it.qty}</b></div>
       ${it.serialized ? `<div class="sn-list" style="margin-top:8px">${it.serials.map((s) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono">${esc(s.serial)}</span><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Libre'}</small></div>`).join('')}</div>` : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">No traes inventario asignado. El almacén te lo asigna antes de salir.</div>'}
     ${(r.open_items || []).length ? `<div class="card" style="margin-top:12px"><h2>🔓 Abierto · cualquier repartidor</h2><p class="muted" style="margin-top:0">Inventario que puede entregar cualquiera. Al usarlo en una entrega pasa a ser tuyo.</p>
       ${r.open_items.map((it) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span><b>${esc(it.name)}</b>${it.serialized ? `<br><small class="muted mono">${it.serials.map((x) => esc(x.serial)).join(' · ')}</small>` : ''}</span><b>${it.qty}</b></div>`).join('')}</div>` : ''}
-    <div class="card" style="margin-top:12px"><h2>Movimientos</h2><div class="timeline">${custodyLogHtml(r.log || [])}</div></div>`;
+    <div class="card" style="margin-top:12px"><h2>Movimientos</h2><div class="timeline">${custodyLogHtml(r.log || [])}</div></div>`);
+  wireStockSearch(v);
+}
+// Repartidor: buscar producto o S/N y ver dónde está (contigo, abierto, almacén, otro repartidor o entregado)
+const SN_WHERE = { tuyo: ['Lo traes tú', 'ok'], abierto: ['🔓 Abierto (puedes entregarlo)', 'ok'], almacen: ['📦 En almacén', ''], otro: ['Lo trae otro repartidor', 'warn'], entregado: ['Entregado', 'off'], baja: ['Dado de baja', 'off'] };
+function wireStockSearch(v) {
+  const out = $('#msRes', v);
+  let t;
+  const run = async (q) => {
+    q = String(q || '').trim();
+    if (q.length < 2) { out.innerHTML = ''; return; }
+    out.innerHTML = '<small class="muted">Buscando…</small>';
+    try {
+      const r = await GET('/api/my/lookup?q=' + encodeURIComponent(q));
+      out.innerHTML = (r.serials.map((s) => { const w = SN_WHERE[s.where] || [s.where, '']; return `<div class="row between" style="padding:8px 0;border-top:1px solid var(--border);gap:8px">
+          <span><b class="mono">${esc(s.serial)}</b><br><small class="muted">${esc(s.product)}${s.order ? ' · pedido ' + esc(s.order) : ''}${s.customer ? ' · ' + esc(s.customer) : ''}${s.holder ? ' · ' + esc(s.holder) : ''}</small></span>
+          <span class="chip ${w[1]}">${w[0]}</span></div>`; }).join('') +
+        r.products.map((p) => `<div style="padding:8px 0;border-top:1px solid var(--border)"><div class="row between"><b>${esc(p.name)}</b><small class="muted">${esc(p.sku)}${p.serialized ? ' · con S/N' : ''}</small></div>
+          <div class="row" style="gap:6px;margin-top:4px;flex-wrap:wrap"><span class="chip ${p.mine ? 'ok' : ''}">Traes ${p.mine}</span><span class="chip">🔓 Abiertos ${p.open}</span><span class="chip">📦 Almacén ${p.warehouse}</span></div></div>`).join(''))
+        || '<p class="muted" style="margin:6px 0 0">No se encontró ningún producto ni número de serie con eso.</p>';
+    } catch (e) { out.innerHTML = `<small style="color:var(--bad)">${esc(e.message)}</small>`; }
+  };
+  const f = $('#msQ', v);
+  f.onsubmit = (e) => { e.preventDefault(); run(f.q.value); };
+  f.q.oninput = () => { clearTimeout(t); t = setTimeout(() => run(f.q.value), 350); };
+  $('#msScan', v).onclick = () => openScanner({ title: 'Buscar producto o S/N', onCode: async (c) => { f.q.value = c; run(c); return 'buscando'; } });
 }
 
 const snState = { q: '', status: '', product_id: '' };

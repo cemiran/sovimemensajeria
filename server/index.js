@@ -1255,6 +1255,33 @@ app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 30`).all(req.user.id);
   res.json({ ...me, log, open_items: openPool().items });
 }));
+// Repartidor: buscar un producto o número de serie y saber dónde está (suyo, abierto, almacén, otro repartidor, entregado)
+app.get('/api/my/lookup', auth('repartidor'), wrap((req, res) => {
+  const me = req.user.id;
+  const q = String(req.query.q || '').trim().replace(/^S\/?N[:\s]*/i, '');
+  if (q.length < 2) return res.json({ products: [], serials: [] });
+  const like = `%${q}%`;
+  const serials = db.prepare(`SELECT s.serial, s.status, s.holder_id, s.open_pool, p.name product, u.name holder, o.tracking_code, c.name customer
+      FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN users u ON u.id = s.holder_id
+      LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id
+      WHERE s.serial LIKE ? ORDER BY (s.serial = ?) DESC, s.serial LIMIT 20`).all(like, q.toUpperCase())
+    .map((s) => ({
+      serial: s.serial, product: s.product, order: s.tracking_code || null,
+      where: s.status === 'entregado' ? 'entregado' : s.status === 'baja' ? 'baja' : s.holder_id === me ? 'tuyo' : s.holder_id ? 'otro' : s.open_pool ? 'abierto' : 'almacen',
+      holder: s.holder_id && s.holder_id !== me ? s.holder : null,
+      customer: s.status === 'entregado' || s.order_id ? s.customer : null,
+    }));
+  const products = db.prepare(`SELECT id, name, sku, barcode, unit, serialized FROM products
+      WHERE name LIKE ? OR sku LIKE ? OR barcode LIKE ? ORDER BY name LIMIT 20`).all(like, like, like)
+    .map((p) => {
+      const sn = (cond, ...a) => db.prepare(`SELECT COUNT(*) n FROM serials WHERE product_id=? AND status IN ('disponible','asignado') AND ${cond}`).get(p.id, ...a).n;
+      return p.serialized
+        ? { ...p, mine: sn('holder_id = ?', me), open: sn('holder_id IS NULL AND open_pool = 1'), warehouse: sn("holder_id IS NULL AND open_pool = 0 AND status = 'disponible'") }
+        : { ...p, mine: db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(me, p.id)?.qty || 0,
+          open: db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(p.id)?.qty || 0, warehouse: warehouseQty(p.id) };
+    });
+  res.json({ products, serials });
+}));
 // Repartidor sin inventario asignado: puede elegir lo disponible en almacén que trae en su unidad
 app.get('/api/my/available', auth('repartidor'), wrap((req, res) => {
   const prods = db.prepare('SELECT id, name, sku, unit, serialized FROM products ORDER BY name').all();
