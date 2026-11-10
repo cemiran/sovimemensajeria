@@ -98,10 +98,14 @@ const store = {
 };
 let SETTINGS = {};
 
+// Modo repartidor: un supervisor o despachador con "También reparte" puede usar la app como repartidor
+const canDeliver = () => !!store.user && store.user.role !== 'repartidor' && !!store.user.can_deliver;
+const driverMode = () => !!store.user && (store.user.role === 'repartidor' || (canDeliver() && (() => { try { return localStorage.getItem('modo') === 'repartidor'; } catch { return false; } })()));
+function setMode(driver) { try { localStorage.setItem('modo', driver ? 'repartidor' : 'oficina'); } catch {} location.hash = driver ? '#/my' : '#/dashboard'; render(); }
 async function api(method, url, body) {
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json', ...(store.token ? { Authorization: 'Bearer ' + store.token } : {}) },
+    headers: { 'Content-Type': 'application/json', ...(store.token ? { Authorization: 'Bearer ' + store.token } : {}), ...(canDeliver() && driverMode() ? { 'X-As-Driver': '1' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401 && url !== '/api/auth/login') {
@@ -644,7 +648,7 @@ function showCredentials(name, email, pwd, title = 'Contraseña temporal') {
 function afterLogin(r) {
   store.token = r.token;
   store.user = r.user;
-  location.hash = r.user.role === 'repartidor' ? '#/my' : '#/dashboard';
+  location.hash = driverMode() ? '#/my' : '#/dashboard';
   render();
 }
 function viewLogin() {
@@ -728,7 +732,7 @@ const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
 function shell(active, content) {
   const u = store.user;
-  const driver = u.role === 'repartidor';
+  const driver = driverMode();
   const groups = driver ? [['Mi trabajo', DRIVER_NAV]] : navGroups(u);
   const all = groups.flatMap((g) => g[1]);
   const title = (all.find(([k]) => k === active) || [, active === 'profile' ? 'Mi perfil' : ''])[1];
@@ -738,6 +742,7 @@ function shell(active, content) {
   <div class="shell">
     <aside class="side">
       <a class="side-logo" href="#/${driver ? 'my' : 'dashboard'}">${logo()}</a>
+      ${canDeliver() ? `<button class="btn block ${driver ? '' : 'primary'}" id="modeSw2" style="margin:0 10px 10px;width:calc(100% - 20px)">${driver ? '⇄ Volver a modo supervisor' : `${icon('truck')} Modo repartidor`}</button>` : ''}
       <nav class="nav">${groups.map(([g, items]) => `<div class="nav-group">${esc(g)}</div>${items.map(([k, l, i]) => `<a href="#/${k}" class="${k === active ? 'active' : ''}">${icon(i)}${l}</a>`).join('')}`).join('')}</nav>
       <a class="who ${active === 'profile' ? 'active' : ''}" href="#/profile" title="Mi perfil">${avatar(u)}<span class="grow"><b>${esc(u.name)}</b><small>${ROLE[u.role]}</small></span>${icon('chev')}</a>
     </aside>
@@ -745,6 +750,7 @@ function shell(active, content) {
       <header class="appbar">
         <a class="appbar-logo" href="#/${driver ? 'my' : 'dashboard'}">${logo('sm')}</a>
         <span class="appbar-title">${driver ? '<i class="gps-dot" title="Estado del GPS"></i>' : ''}${esc(title)}</span>
+        ${canDeliver() ? `<button class="btn sm" id="modeSw" title="Cambiar de modo">${driver ? '⇄ Supervisor' : '⇄ Repartir'}</button>` : ''}
         <a class="appbar-av" href="#/profile" aria-label="Mi perfil">${avatar(u)}</a>
       </header>
       <main class="main" id="view">${content || ''}</main>
@@ -753,6 +759,8 @@ function shell(active, content) {
   <nav class="bottomnav">${mobile.map(([k, l, i]) => `<a href="#/${k}" class="${k === active ? 'active' : ''}">${icon(i)}<span>${l}</span></a>`).join('')}
     ${driver ? '' : `<button class="${moreActive ? 'active' : ''}" id="moreBtn">${icon('more')}<span>Más</span></button>`}</nav>`;
   $('#moreBtn')?.addEventListener('click', () => moreSheet(groups, active));
+  $('#modeSw')?.addEventListener('click', () => setMode(!driver));
+  $('#modeSw2')?.addEventListener('click', () => setMode(!driver));
   return $('#view');
 }
 function moreSheet(groups, active) {
@@ -845,7 +853,7 @@ async function viewOrders(v) {
 
 async function orderDetail(id) {
   const o = await GET('/api/orders/' + id);
-  const staff = store.user.role !== 'repartidor';
+  const staff = !driverMode();
   const m = modal(`Pedido ${o.tracking_code}`, `
     <div class="grid g2">
       <div class="stack">
@@ -1022,7 +1030,7 @@ function customerForm(c, done) {
         <label class="f">Recibe desde<input type="time" name="window_start" value="${esc(c.window_start)}" /></label>
         <label class="f">Recibe hasta<input type="time" name="window_end" value="${esc(c.window_end)}" /></label>
       </div>
-      ${c.id && store.user.role !== 'repartidor' ? `<fieldset id="schedBox"><legend>${icon('truck')} Programar entrega</legend><div id="schedBody"><small class="muted">Cargando pedidos…</small></div></fieldset>` : ''}
+      ${c.id && !driverMode() ? `<fieldset id="schedBox"><legend>${icon('truck')} Programar entrega</legend><div id="schedBody"><small class="muted">Cargando pedidos…</small></div></fieldset>` : ''}
       <div><div class="row between"><small class="muted">Toca el mapa para fijar la ubicación exacta</small><button type="button" class="btn sm" id="here">📍 Estoy aquí</button></div>
         <div id="cmap" class="map sm" style="margin-top:6px"></div><small class="muted num" id="coords"></small></div>
       <input type="hidden" name="lat" value="${c.lat ?? ''}" /><input type="hidden" name="lng" value="${c.lng ?? ''}" />
@@ -1108,7 +1116,7 @@ async function viewCustomers(v) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
   const offF = new URLSearchParams(location.hash.split('?')[1] || '').get('office_id') || '';
   const r = await GET(`/api/customers?limit=300&q=${encodeURIComponent(q)}&office_id=${offF}`);
-  const staffC = store.user.role !== 'repartidor';
+  const staffC = !driverMode();
   const offList = staffC ? await GET('/api/warehouses').catch(() => []) : [];
   const geoSt = staffC ? await GET('/api/customers/geocode').catch(() => null) : null;
   const pend = geoSt ? (geoSt.stats.pendiente || 0) : 0;
@@ -1661,7 +1669,7 @@ async function withSerials(fn, orderHint) {
 async function serialDetail(sn) {
   const s = await GET('/api/serials/lookup/' + encodeURIComponent(sn));
   if (s.mine === false) return modal(`S/N ${s.serial}`, `<p>${esc(s.product_name)} · ${snChip(s.status)}</p><p class="muted">Este equipo no pertenece a tus pedidos.</p>`);
-  const staff = store.user.role !== 'repartidor';
+  const staff = !driverMode();
   const acts = staff ? {
     disponible: `<button class="btn bad" data-act="baja">Dar de baja</button>`,
     baja: `<button class="btn" data-act="reingreso">Reingresar al almacén</button>`,
@@ -2802,7 +2810,7 @@ function excelSerialsInto(textarea) {
 // Asignar (a repartidor) o pasar (a oficina) clientes desde un Excel
 async function excelAssign({ mode = 'driver', office = null } = {}) {
   const dr = await GET('/api/users?role=repartidor&active=1&limit=500').catch(() => []);
-  const drivers = (Array.isArray(dr) ? dr : dr.rows || []).filter((u) => u.role === 'repartidor' && u.active);
+  const drivers = (Array.isArray(dr) ? dr : dr.rows || []).filter((u) => (u.role === 'repartidor' || u.can_deliver) && u.active);
   const title = mode === 'office' ? `Pasar clientes por Excel a ${office.name}` : 'Asignar a repartidor por Excel';
   const m = modal(title, '<div class="stack" id="eaB"></div>', { wide: true, onClose: () => render() });
   const B = $('#eaB', m.el);
@@ -3594,15 +3602,23 @@ function userFields(u) {
     <div class="grid g2"><label class="f">Nombre completo<input name="name" required value="${esc(u.name)}" autocomplete="off" /></label>
     <label class="f">Correo (usuario para entrar)<input name="email" type="email" required value="${esc(u.email)}" autocomplete="off" /></label></div>
     <div class="grid g2"><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label><span></span></div>
+    <label class="row staff-only" style="gap:8px"><input type="checkbox" name="can_deliver" ${u.can_deliver ? 'checked' : ''} /> <span><b>También reparte</b><br><small class="muted">Supervisor o despachador que además entrega: aparece en las listas de repartidores y puede cambiar a modo repartidor en la app.</small></span></label>
     <fieldset class="driver-only"><legend>${icon('truck')} Datos del vehículo</legend><div class="grid g2">
       <label class="f">Vehículo / placas<input name="vehicle" value="${esc(u.vehicle)}" placeholder="Moto · ABC-123" /></label>
-      <label class="f">Capacidad (paquetes)<input type="number" min="1" name="capacity" value="${u.capacity ?? 30}" /></label></div></fieldset>
+      <label class="f">Capacidad (paquetes)<input type="number" min="1" name="capacity" value="${u.capacity || 30}" /></label></div></fieldset>
     <label class="f">Notas internas<textarea name="notes" placeholder="Turno, zona, contacto de emergencia…">${esc(u.notes)}</textarea></label>`;
 }
 function wireRole(f) {
   // los datos del vehículo solo aplican a repartidores: ocultos se desactivan para que no bloqueen el "Guardar"
-  const upd = () => { const d = f.role.value === 'repartidor'; f.classList.toggle('is-driver', d); $$('.driver-only', f).forEach((x) => (x.disabled = !d)); };
+  const upd = () => {
+    const isDrv = f.role.value === 'repartidor';
+    const d = isDrv || !!f.can_deliver?.checked;
+    f.classList.toggle('is-driver', d);
+    $$('.driver-only', f).forEach((x) => { x.disabled = !d; x.hidden = !d; });
+    $$('.staff-only', f).forEach((x) => (x.hidden = isDrv));
+  };
   $$('input[name=role]', f).forEach((r) => (r.onchange = upd));
+  if (f.can_deliver) f.can_deliver.onchange = upd;
   upd();
 }
 function userForm() {
@@ -3669,7 +3685,7 @@ async function userPanel(id) {
   const reload = async () => { m.close(); await render(); userPanel(id); };
   $('#saveU', m.el).onclick = async () => {
     if (!f.reportValidity()) return;
-    try { await PUT('/api/users/' + id, { ...Object.fromEntries(new FormData(f)), active: u.active }); toast('Cambios guardados', 'ok'); m.close(); render(); }
+    try { await PUT('/api/users/' + id, { ...Object.fromEntries(new FormData(f)), can_deliver: !!f.can_deliver?.checked, active: u.active }); toast('Cambios guardados', 'ok'); m.close(); render(); }
     catch (e) { toast(e.message, 'bad'); }
   };
   $('#rst', m.el).onclick = async () => {
@@ -4400,7 +4416,7 @@ function haversineM(a, b) {
 }
 const gpsListeners = new Set();
 function startTracking() {
-  if (watchId != null || !navigator.geolocation || store.user?.role !== 'repartidor') return;
+  if (watchId != null || !navigator.geolocation || !driverMode()) return;
   GPS.state = 'wait'; paintGps();
   watchId = navigator.geolocation.watchPosition((p) => {
     GPS.state = 'on';
@@ -4683,7 +4699,7 @@ async function viewDeliver(v, id, mode) {
   const o = await GET('/api/orders/' + id);
   const scannedParam = new URLSearchParams(location.hash.split('?')[1] || '').get('scanned') === '1';
   // entrega armada en campo por el mismo repartidor: no trae etiqueta impresa; el equipo ya se eligió por su S/N
-  let verified = scannedParam || (o.created_by === store.user.id && store.user.role === 'repartidor');
+  let verified = scannedParam || (o.created_by === store.user.id && driverMode());
   let photo = null;
   const isFail = mode === 'fail';
   const needPhoto = !isFail && SETTINGS.require_photo === '1';
@@ -4894,7 +4910,8 @@ async function render() {
   try { if (!SETTINGS.depot_lat) SETTINGS = await GET('/api/settings'); } catch { if (!store.token) return; }
   const [path] = location.hash.slice(2).split('?');
   const [view, param] = path.split('/');
-  const driver = store.user.role === 'repartidor';
+  if (store.user.can_deliver === undefined) { try { store.user = { ...store.user, ...(await GET('/api/me')) }; } catch {} }
+  const driver = driverMode();
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
     : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };

@@ -95,8 +95,9 @@ function auth(...roles) {
     if (!token) return res.status(401).json({ error: 'No autenticado' });
     try {
       const p = jwt.verify(token, JWT_SECRET);
-      const u = db.prepare('SELECT id, name, email, role, active, token_version, office_id FROM users WHERE id = ?').get(p.sub);
+      const u = db.prepare('SELECT id, name, email, role, active, token_version, office_id, can_deliver FROM users WHERE id = ?').get(p.sub);
       if (!u || !u.active) return res.status(401).json({ error: 'Usuario inactivo' });
+      if (req.headers['x-as-driver'] === '1' && u.can_deliver && u.role !== 'repartidor') { u.real_role = u.role; u.role = 'repartidor'; }
       if ((p.tv || 0) !== u.token_version) return res.status(401).json({ error: 'Tu sesión se cerró, vuelve a entrar' });
       if (roles.length && !roles.includes(u.role)) return res.status(403).json({ error: 'Sin permiso' });
       delete u.token_version;
@@ -128,7 +129,7 @@ function tempPassword() {
   return Array.from(crypto.randomBytes(10), (b) => abc[b % abc.length]).join('');
 }
 const signToken = (u) => jwt.sign({ sub: u.id, role: u.role, tv: u.token_version || 0 }, JWT_SECRET, { expiresIn: '12h' });
-const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, last_login, must_change_password, created_at';
+const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, last_login, must_change_password, created_at';
 
 app.post(
   '/api/auth/login',
@@ -176,7 +177,7 @@ app.post(
 );
 
 // ---------- Usuarios (administración) ----------
-const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.active, u.notes,
+const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes,
   u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
 
 app.get(
@@ -186,7 +187,8 @@ app.get(
     const { role, q, active } = req.query;
     const where = [];
     const args = [];
-    if (role) {
+    if (role === 'repartidor') where.push("(u.role = 'repartidor' OR u.can_deliver = 1)"); // incluye supervisores que también reparten
+    else if (role) {
       where.push('u.role = ?');
       args.push(role);
     }
@@ -252,6 +254,8 @@ function createUser(b) {
         String(b.name).trim(), String(b.email).trim(), bcrypt.hashSync(pwd, 10), b.role, b.phone || null, b.vehicle || null,
         Number(b.capacity) || 40, b.notes || null, b.password && !b.force_change ? 0 : 1
       );
+    const cd = b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(b.can_deliver) ? 1 : 0;
+    if (cd) db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(Number(r.lastInsertRowid));
     return { id: Number(r.lastInsertRowid), temp_password: b.password ? null : pwd };
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `El correo ${b.email} ya está registrado`);
@@ -305,6 +309,8 @@ app.put(
         String(b.name).trim(), String(b.email).trim(), b.role, b.phone || null, b.vehicle || null, Number(b.capacity) || 40, b.active,
         b.notes || null, u.id
       );
+      if (req.body.can_deliver !== undefined || b.role === 'repartidor')
+        db.prepare('UPDATE users SET can_deliver=? WHERE id=?').run(b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(req.body.can_deliver) ? 1 : 0, u.id);
     } catch (e) {
       if (String(e.message).includes('UNIQUE')) throw new HttpError(409, 'Ese correo ya está registrado');
       throw e;
@@ -796,7 +802,7 @@ app.post(
     // opcional: los equipos recibidos se entregan de inmediato a un repartidor
     let drv = null;
     if (req.body.driver_id) {
-      drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(req.body.driver_id));
+      drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(req.body.driver_id));
       if (!drv) throw new HttpError(400, 'Repartidor no encontrado');
       if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
     }
@@ -1245,7 +1251,7 @@ const custodyLog = (driverId, productId, qty, action, byUser, { serial = null, o
   db.prepare('INSERT INTO custody_log (driver_id, product_id, qty, serial, action, order_id, by_user, reference) VALUES (?,?,?,?,?,?,?,?)')
     .run(driverId, productId, qty, serial, action, orderId, byUser, reference);
 function custodyOf(driverId) {
-  const where = driverId ? 'WHERE u.id = ?' : "WHERE u.role = 'repartidor'";
+  const where = driverId ? 'WHERE u.id = ?' : "WHERE (u.role = 'repartidor' OR u.can_deliver = 1)";
   const args = driverId ? [driverId] : [];
   const drivers = db.prepare(`SELECT u.id, u.name, u.vehicle, u.active FROM users u ${where} ORDER BY u.active DESC, u.name`).all(...args);
   const sn = db.prepare(`SELECT s.holder_id, s.product_id, s.serial, s.status, s.held_at, o.tracking_code FROM serials s LEFT JOIN orders o ON o.id = s.order_id
@@ -1436,7 +1442,7 @@ app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
 app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
   const b = req.body || {};
   const open = isOpen(b.driver_id);
-  const d = open ? { id: null, name: 'Abierto (cualquier repartidor)', active: 1 } : db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+  const d = open ? { id: null, name: 'Abierto (cualquier repartidor)', active: 1 } : db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
   if (!d) throw new HttpError(400, 'Elige el repartidor');
   if (!d.active) throw new HttpError(409, `${d.name} está desactivado`);
   const ref = String(b.reference || '').trim().slice(0, 80) || null;
@@ -1516,7 +1522,7 @@ app.post('/api/custody/return', auth(...STAFF), wrap((req, res) => {
     if (n) audit(req, 'inventario.devolver', `Abierto: ${n} de regreso al almacén`);
     return res.json({ returned: n, errors: [] });
   }
-  const d = db.prepare("SELECT id, name FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+  const d = db.prepare("SELECT id, name FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
   if (!d) throw new HttpError(400, 'Elige el repartidor');
   const ref = String(b.reference || '').trim().slice(0, 80) || null;
   let n = 0;
@@ -1742,7 +1748,7 @@ app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
   const rows = (Array.isArray(req.body?.rows) ? req.body.rows : []).slice(0, 3000);
   if (!rows.length) throw new HttpError(400, 'El archivo no tiene filas');
   const offSql = inOffice(req, 'c');
-  const drivers = db.prepare(`SELECT u.id, u.name FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')}`).all();
+  const drivers = db.prepare(`SELECT u.id, u.name FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice(req, 'u')}`).all();
   const norm = (x) => String(x ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
   const findDriver = (name) => {
     const n = norm(name);
@@ -2620,7 +2626,7 @@ app.post(
     const { driver_id, date, order_ids = [], name, start_time } = req.body;
     if (!driver_id || !order_ids.length) throw new HttpError(400, 'Selecciona repartidor y pedidos');
     const s = getSettings();
-    const drv = db.prepare("SELECT name FROM users WHERE id=? AND role='repartidor'").get(driver_id);
+    const drv = db.prepare("SELECT name FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(driver_id);
     if (!drv) throw new HttpError(400, 'Repartidor inválido');
     const d = date || today();
     const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body), orderIds: order_ids.map(Number), settings: s, startTime: start_time });
@@ -2634,7 +2640,7 @@ app.get(
   wrap((req, res) => {
     const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
     const only = req.query.driver_id ? Number(req.query.driver_id) : null;
-    const drivers = db.prepare(`SELECT id, name, vehicle, phone FROM users WHERE role='repartidor' ${only ? 'AND id=?' : 'AND active=1'} ORDER BY name`).all(...(only ? [only] : []));
+    const drivers = db.prepare(`SELECT id, name, vehicle, phone FROM users WHERE (role='repartidor' OR can_deliver=1) ${only ? 'AND id=?' : 'AND active=1'} ORDER BY name`).all(...(only ? [only] : []));
     const custody = new Map(custodyOf(only).map((d) => [d.id, d.items]));
     const out = drivers.map((d) => {
       const orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.stop_seq, o.eta, o.scheduled_date, o.notes, o.cod_amount,
@@ -2657,7 +2663,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     const b = req.body || {};
-    const drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND role='repartidor'").get(Number(b.driver_id));
+    const drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
     if (!drv) throw new HttpError(400, 'Elige el repartidor');
     if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
     const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : today();
@@ -2713,7 +2719,7 @@ app.post(
     // el personal de una oficina planifica solo su oficina, saliendo de ella
     const depot = depotOf(s, req.user.office && !req.body.warehouse_id ? { ...req.body, warehouse_id: req.user.office } : req.body);
     let driverIds = (req.body.driver_ids || []).map(Number);
-    const offDrivers = db.prepare(`SELECT u.id FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')}`).all().map((r) => r.id);
+    const offDrivers = db.prepare(`SELECT u.id FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice(req, 'u')}`).all().map((r) => r.id);
     if (!driverIds.length) driverIds = offDrivers;
     else if (req.user.office) driverIds = driverIds.filter((id) => offDrivers.includes(id));
     const drivers = driverIds.map((id) => db.prepare('SELECT id, name, capacity FROM users WHERE id=?').get(id)).filter(Boolean);
@@ -2837,7 +2843,7 @@ app.get(
         `SELECT u.id, u.name, u.vehicle, u.last_lat, u.last_lng, u.last_seen,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status IN ('asignado','cargado')) pending,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status='entregado') delivered
-         FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')} ORDER BY u.name`
+         FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice(req, 'u')} ORDER BY u.name`
       )
       .all(today(), today());
     res.json(rows);
@@ -2890,7 +2896,7 @@ app.get(
            FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
         (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e WHERE e.driver_id=u.id AND date(e.created_at,'localtime') BETWEEN ? AND ?) avg_gps_dev_m
        FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND ${IN}
-       WHERE u.role='repartidor' ${inOffice(req, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
+       WHERE (u.role='repartidor' OR u.can_deliver=1) ${inOffice(req, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
       .map((d) => ({
         ...d,
         success_rate: d.delivered + d.failed ? +((d.delivered / (d.delivered + d.failed)) * 100).toFixed(1) : null,
@@ -3401,7 +3407,7 @@ app.get(
     const url = notify.baseUrl(s);
     const qr = (await require('qrcode').toDataURL(url, { margin: 1, width: 340, color: { dark: '#1d5a96', light: '#ffffff' } })).split(',')[1];
     const staffN = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role<>'admin'");
-    const drivers = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role='repartidor'");
+    const drivers = n("SELECT COUNT(*) n FROM users WHERE active=1 AND (role='repartidor' OR can_deliver=1)");
     const noLoc = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND geo_quality='no_encontrada'");
     const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia')");
     const pendingGeo = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='')");
