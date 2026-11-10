@@ -2711,21 +2711,27 @@ app.post(
     }
     ids = [...new Set(ids)].slice(0, 2000);
     if (!ids.length) throw new HttpError(400, 'No hay pedidos abiertos para asignar en la selección');
-    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+    res.json(assignOrdersTo(req, drv, ids, date));
+  })
+);
+function assignOrdersTo(req, drv, ids, date) {
+  {
+    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
     const skipped = [];
     const take = [];
     for (const o of rows) {
       if (!['pendiente', 'asignado'].includes(o.status)) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
-      else if (o.driver_id === drv.id && o.route_id) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
+      else if (o.driver_id === drv.id && o.route_id && o.scheduled_date === date) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
       else take.push(o);
     }
-    if (!take.length) return res.json({ assigned: 0, skipped, route_id: null });
+    if (!take.length) return { assigned: 0, skipped, route_id: null, driver: drv.name, date };
     const s = getSettings();
     const fromRoutes = [...new Set(take.map((o) => o.route_id).filter(Boolean))];
     const result = tx(() => {
       // se sueltan de su ruta anterior
-      const free = db.prepare("UPDATE orders SET route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, status='pendiente' WHERE id=?");
-      for (const o of take) free.run(o.id);
+      // se sueltan de su ruta anterior y quedan programados para el día de la ruta
+      const free = db.prepare("UPDATE orders SET route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, status='pendiente', scheduled_date=? WHERE id=?");
+      for (const o of take) free.run(date, o.id);
       // ruta del repartidor para ese día (abierta) o una nueva
       const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(drv.id, date);
       const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
@@ -2743,7 +2749,60 @@ app.post(
       return out;
     });
     audit(req, 'pedidos.asignar', `${take.length} pedidos → ${drv.name} (${date})`);
-    res.json({ assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0 });
+    return { assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0 };
+  }
+}
+// Programar varios pedidos en un rango de días para un repartidor: se reparten por cercanía, N por día
+app.post(
+  '/api/routes/assign-range',
+  auth(...STAFF),
+  wrap((req, res) => {
+    const b = req.body || {};
+    const drv = db.prepare("SELECT id, name, active, capacity FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
+    if (!drv) throw new HttpError(400, 'Elige el repartidor');
+    if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
+    const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+    if (!okD(b.date_from) || !okD(b.date_to)) throw new HttpError(400, 'Elige el rango de fechas');
+    const [d1, d2] = [b.date_from, b.date_to].sort();
+    const days = [];
+    for (let d = new Date(d1 + 'T12:00:00'); d.toLocaleDateString('en-CA') <= d2 && days.length < 62; d.setDate(d.getDate() + 1)) {
+      if (b.skip_sunday && d.getDay() === 0) continue;
+      if (b.skip_saturday && d.getDay() === 6) continue;
+      days.push(d.toLocaleDateString('en-CA'));
+    }
+    if (!days.length) throw new HttpError(400, 'El rango no tiene días hábiles');
+    let ids = (Array.isArray(b.order_ids) ? b.order_ids : []).map(Number).filter(Boolean);
+    if (Array.isArray(b.customer_ids) && b.customer_ids.length) {
+      const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
+      ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN ('pendiente','asignado')`).all(...cids).map((r) => r.id));
+    }
+    ids = [...new Set(ids)].slice(0, 3000);
+    const list = ids.length ? db.prepare(`SELECT o.id, o.status, c.lat, c.lng FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (${ids.map(() => '?').join(',')}) AND o.status IN ('pendiente','asignado')`).all(...ids) : [];
+    if (!list.length) throw new HttpError(400, 'No hay pedidos abiertos para programar en la selección');
+    const perDay = Math.max(1, Math.trunc(Number(b.per_day)) || Math.ceil(list.length / days.length));
+    // orden por cercanía (vecino más cercano desde la oficina): cada día queda en una zona compacta
+    const dep = depotOf(getSettings(), {}, drv.id);
+    const geo = list.filter((o) => o.lat != null), noGeo = list.filter((o) => o.lat == null);
+    const ordered = [];
+    let cur = { lat: dep.lat, lng: dep.lng };
+    while (geo.length) {
+      let bi = 0, bd = Infinity;
+      for (let i = 0; i < geo.length; i++) { const dd = (geo[i].lat - cur.lat) ** 2 + (geo[i].lng - cur.lng) ** 2; if (dd < bd) { bd = dd; bi = i; } }
+      cur = geo.splice(bi, 1)[0]; ordered.push(cur);
+    }
+    ordered.push(...noGeo);
+    const plan = [];
+    const skipped = [];
+    let k = 0;
+    for (const day of days) {
+      const chunk = ordered.slice(k, k + perDay); k += chunk.length;
+      if (!chunk.length) break;
+      const r = assignOrdersTo(req, drv, chunk.map((o) => o.id), day);
+      plan.push({ date: day, assigned: r.assigned, unlocated: r.unlocated || 0 });
+      skipped.push(...r.skipped);
+    }
+    const left = ordered.length - k;
+    res.json({ driver: drv.name, per_day: perDay, days: plan, assigned: plan.reduce((a, x) => a + x.assigned, 0), not_scheduled: left, skipped });
   })
 );
 // Planificación automática: reparte todos los pendientes del día entre los repartidores elegidos

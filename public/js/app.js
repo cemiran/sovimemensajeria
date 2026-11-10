@@ -1813,10 +1813,14 @@ async function bulkAssign(v, kind) {
     bar.hidden = !ids.length;
     if (!ids.length) return;
     if (!drivers) drivers = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
-    const prev = { d: $('#bkDrv', bar)?.value, f: $('#bkDate', bar)?.value };
+    const prev = { d: $('#bkDrv', bar)?.value, f: $('#bkDate', bar)?.value, multi: $('#bkMulti', bar)?.checked, t: $('#bkTo', bar)?.value, pd: $('#bkPer', bar)?.value, sun: $('#bkSun', bar)?.checked ?? true };
     bar.innerHTML = `<b>${ids.length} ${kind === 'customers' ? 'cliente' : 'pedido'}${ids.length === 1 ? '' : 's'}</b>
       <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
-      <input type="date" id="bkDate" value="${prev.f || today()}" title="Fecha de la ruta" />
+      <input type="date" id="bkDate" value="${prev.f || today()}" title="Fecha de la ruta (o inicio del rango)" />
+      <label class="row" style="gap:4px" title="Reparte los pedidos en varios días, por zonas cercanas"><input type="checkbox" id="bkMulti" ${prev.multi ? 'checked' : ''} /> Varios días</label>
+      <span id="bkRange" class="row" style="gap:6px" ${prev.multi ? '' : 'hidden'}><small>hasta</small><input type="date" id="bkTo" value="${prev.t || (() => { const d = new Date(); d.setDate(d.getDate() + 4); return d.toLocaleDateString('en-CA'); })()}" />
+        <input type="number" id="bkPer" min="1" placeholder="Por día" title="Pedidos por día (vacío = repartir parejo)" value="${prev.pd || ''}" style="width:90px" />
+        <label class="row" style="gap:4px"><input type="checkbox" id="bkSun" ${prev.sun ? 'checked' : ''} /> Sin domingos</label></span>
       <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button>
       <span class="bulk-sep"></span>
       <select id="bkSt"><option value="">Cambiar estado…</option><option value="pendiente">Pendiente (quitar de ruta / reprogramar)</option><option value="fallido">Fallido (intento no exitoso)</option>${store.user.role === 'admin' ? '<option value="entregado">Entregado (registro manual)</option>' : ''}<option value="cancelado">Cancelado</option></select>
@@ -1824,6 +1828,7 @@ async function bulkAssign(v, kind) {
       <button class="btn ghost" id="bkClr">Quitar selección</button>`;
     $('#bkStGo', bar).onclick = () => bulkStatus($('#bkSt', bar).value, kind, picked());
     if (prev.d) $('#bkDrv', bar).value = prev.d;
+    $('#bkMulti', bar).onchange = (e) => { $('#bkRange', bar).hidden = !e.target.checked; };
     $('#bkClr', bar).onclick = () => { boxes().forEach((c) => (c.checked = false)); draw(); };
     $('#bkGo', bar).onclick = async (e) => {
       const btn = e.currentTarget; // después de un await, e.currentTarget ya es null
@@ -1831,6 +1836,19 @@ async function bulkAssign(v, kind) {
       if (!drv.value) return toast('Elige el repartidor', 'bad');
       const name = drv.selectedOptions[0].text.split(' · ')[0];
       const n = picked().length;
+      if ($('#bkMulti', bar).checked) {
+        const from = $('#bkDate', bar).value, to = $('#bkTo', bar).value, per = Number($('#bkPer', bar).value) || null;
+        if (!(await confirmDlg(`¿Programar ${n} ${kind === 'customers' ? 'cliente(s) (sus pedidos abiertos)' : 'pedido(s)'} con ${name} del ${from} al ${to}${per ? `, ${per} por día` : ', repartidos parejo'}${$('#bkSun', bar).checked ? ', sin domingos' : ''}? Se agrupan por cercanía: cada día queda en una zona.`))) return;
+        btn.disabled = true;
+        try {
+          const r = await POST('/api/routes/assign-range', { driver_id: drv.value, date_from: from, date_to: to, per_day: per, skip_sunday: $('#bkSun', bar).checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: picked() });
+          modal(`Programación de ${esc(r.driver)}`, `<p style="margin-top:0">${r.assigned} pedido(s) programados · ${r.per_day} por día${r.not_scheduled ? ` · <b style="color:var(--warn)">${r.not_scheduled} no cupieron en el rango</b> (siguen pendientes)` : ''}</p>
+            <div class="table-wrap"><table><thead><tr><th>Día</th><th class="r">Pedidos</th><th></th></tr></thead><tbody>${r.days.map((d) => `<tr><td>${new Date(d.date + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'short' })}</td><td class="r num"><b>${d.assigned}</b></td><td><small class="muted">${d.unlocated ? d.unlocated + ' sin ubicación' : ''}</small></td></tr>`).join('')}</tbody></table></div>
+            ${r.skipped.length ? `<h3>No se movieron</h3><div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}`,
+            { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
+        } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+        return;
+      }
       if (!(await confirmDlg(`¿Asignar ${n} ${kind === 'customers' ? 'cliente(s) (sus pedidos abiertos)' : 'pedido(s)'} a ${name} para el ${$('#bkDate', bar).value}? Se agregan a su ruta y se reordenan las paradas.`))) return;
       btn.disabled = true;
       try {
