@@ -870,17 +870,20 @@ async function viewOrders(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const st = p.get('status') || '';
   const date = p.get('date') ?? today();
+  const dateTo = date ? p.get('date_to') || '' : '';
   const q = p.get('q') || '';
   const acc = p.get('account_id') || '';
   const off = p.get('office_id') || '';
   const city = p.get('city') || '';
   const cityList = GET(`/api/dashboard/breakdown?office_id=${off}`).then((r) => r.city_list).catch(() => []);
-  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
+  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=500&status=${st}&date=${date}&date_to=${dateTo}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn" id="asgX">${icon('upload')} Asignar por Excel</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
       <input name="q" placeholder="Número de serie o número de pedido (o cliente, teléfono)" value="${esc(q)}" class="grow" style="max-width:340px" autofocus />
-      <input type="date" name="date" value="${esc(date)}" style="max-width:170px" />
+      <label class="row" style="gap:4px"><small class="muted">Desde</small><input type="date" name="date" value="${esc(date)}" style="max-width:160px" /></label>
+      <label class="row" style="gap:4px"><small class="muted">Hasta</small><input type="date" name="date_to" value="${esc(dateTo || date)}" style="max-width:160px" /></label>
+      <span class="row" style="gap:4px">${[['hoy', 'Hoy'], ['7', '7 días'], ['sem', 'Esta semana'], ['mes', 'Este mes']].map(([k, l]) => `<button type="button" class="btn sm ghost" data-rng="${k}">${l}</button>`).join('')}</span>
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
       ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
@@ -894,6 +897,15 @@ async function viewOrders(v) {
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
   $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}&office_id=${off}&city=${encodeURIComponent(city)}`; };
+  // rangos rápidos de fechas
+  $$('[data-rng]', v).forEach((b) => (b.onclick = () => {
+    const f = $('#filt'); const d0 = new Date(); const iso = (d) => d.toLocaleDateString('en-CA');
+    let a = new Date(d0), z = new Date(d0);
+    if (b.dataset.rng === '7') a.setDate(d0.getDate() - 6);
+    if (b.dataset.rng === 'sem') { a.setDate(d0.getDate() - ((d0.getDay() + 6) % 7)); z = new Date(a); z.setDate(a.getDate() + 6); }
+    if (b.dataset.rng === 'mes') { a = new Date(d0.getFullYear(), d0.getMonth(), 1); z = new Date(d0.getFullYear(), d0.getMonth() + 1, 0); }
+    f.date.value = iso(a); f.date_to.value = iso(z); f.requestSubmit();
+  }));
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.id)));
   $('#newOrder').onclick = () => orderForm(() => render());
   bulkAssign(v, 'orders');

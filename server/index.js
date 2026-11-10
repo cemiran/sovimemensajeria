@@ -2172,7 +2172,12 @@ app.get(
       where.push(`o.status IN (${list.map(() => '?').join(',')})`);
       args.push(...list);
     }
-    if (date) {
+    const dateTo = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date_to || '') ? req.query.date_to : '';
+    if (date && dateTo && dateTo !== date) {
+      // rango de fechas (en cualquier orden)
+      where.push('o.scheduled_date BETWEEN ? AND ?');
+      args.push(...[date, dateTo].sort());
+    } else if (date) {
       where.push('o.scheduled_date = ?');
       args.push(date);
     }
