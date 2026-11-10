@@ -816,7 +816,8 @@ async function viewDashboard(v) {
     <div class="card kpi"><div class="label">Fallidos hoy</div><div class="value" style="color:var(--bad)">${nFail}</div><div class="sub">${routes.length} rutas · ${fmtN(routes.reduce((a, r) => a + (r.distance_km || 0), 0), 1)} km plan</div></div>
   </div>
   <div class="grid g-main" style="margin-top:14px">
-    <div class="card"><div class="row between"><h2>Rutas del día</h2><small class="muted">🚚 posición de repartidores</small></div><div id="dmap" class="map"></div></div>
+    <div class="card"><div class="row between"><h2>${fOff || fCity ? `Clientes con pedido · ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : 'Rutas del día'}</h2><small class="muted" id="dmapInfo">🚚 posición de repartidores</small></div><div id="dmap" class="map${fOff || fCity ? ' tall' : ''}"></div>
+      ${fOff || fCity ? `<div class="legend" style="margin-top:8px">${['pendiente', 'asignado', 'cargado', 'fallido'].map((k) => `<span><i style="background:${PIN_COLORS[k]}"></i>${STATUS[k]}</span>`).join('')}<span>🚚 Repartidor</span></div>` : ''}</div>
     <div class="stack">
       <div class="card"><h2>Avance por repartidor</h2>${drivers.length ? drivers.map((x) => {
         const t = x.pending + x.delivered;
@@ -837,12 +838,30 @@ async function viewDashboard(v) {
   $('#newOrder').onclick = () => orderForm(() => render());
   const map = makeMap($('#dmap'));
   const all = [depotLatLng()];
-  for (const [i, r] of routes.entries()) {
+  for (const [i, r] of (fOff || fCity ? [] : routes).entries()) {
     const det = await GET('/api/routes/' + r.id);
     all.push(...drawRoute(map, det.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { fit: false, depot: i === 0, onEdit: () => render() }));
   }
   if (!routes.length) L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
   for (const x of drivers) if (x.last_lat) { L.marker([x.last_lat, x.last_lng], { icon: truckIcon() }).addTo(map).bindPopup(`<b>${esc(x.name)}</b><br>${fmtDT(x.last_seen)}`); all.push([x.last_lat, x.last_lng]); }
+  // Con filtro de oficina o ciudad: clientes con pedido abierto de esa selección
+  if (fOff || fCity) {
+    const op = await GET(`/api/orders?limit=500&date=&status=pendiente,asignado,cargado,fallido${F}`);
+    const seen = new Map();
+    for (const o of op.rows) if (o.lat != null) { const k = o.customer_id; if (!seen.has(k)) seen.set(k, []); seen.get(k).push(o); }
+    const pts = [];
+    for (const list of seen.values()) {
+      const o = list[0];
+      const st = list.some((x) => x.status === 'cargado') ? 'cargado' : list.some((x) => x.status === 'asignado') ? 'asignado' : list.some((x) => x.status === 'fallido') ? 'fallido' : 'pendiente';
+      L.circleMarker([o.lat, o.lng], { radius: 7, color: '#fff', weight: 1.5, fillColor: PIN_COLORS[st], fillOpacity: 0.9 }).addTo(map)
+        .bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}${o.customer_city ? ', ' + esc(o.customer_city) : ''}<br>${list.map((x) => `${esc(x.tracking_code)} · ${STATUS[x.status]}${x.driver_name ? ' · ' + esc(x.driver_name) : ''}`).join('<br>')}`);
+      pts.push([o.lat, o.lng]);
+    }
+    const sinUbic = new Set(op.rows.filter((o) => o.lat == null).map((o) => o.customer_id)).size;
+    $('#dmapInfo').textContent = `${seen.size} clientes en el mapa${sinUbic ? ` · ${sinUbic} sin ubicar` : ''}${op.total > op.rows.length ? ` · mostrando ${op.rows.length} de ${op.total} pedidos` : ''}`;
+    if (pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 15 });
+    return;
+  }
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
 }
 
