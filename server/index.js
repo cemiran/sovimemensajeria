@@ -404,8 +404,9 @@ app.get(
     const where = [];
     const args = [];
     if (q) {
-      where.push('(name LIKE ? OR sku LIKE ? OR barcode LIKE ?)');
-      args.push(`%${q}%`, `%${q}%`, `%${q}%`);
+      const qs = normSerial(q);
+      where.push('(id IN (SELECT product_id FROM serials WHERE serial LIKE ?) OR name LIKE ? OR sku LIKE ? OR barcode LIKE ?)');
+      args.push(`%${qs}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     if (low === '1') where.push('stock <= min_stock');
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
@@ -1609,21 +1610,30 @@ app.get(
     const { limit, offset } = paging(req);
     const args = [];
     let w = '';
+    let matchCol = 'NULL match_txt';
+    const margs = [];
     if (q) {
-      w = 'WHERE name LIKE ? OR phone LIKE ? OR phone_alt LIKE ? OR external_id LIKE ? OR address LIKE ? OR email LIKE ?';
-      args.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+      const qs = `%${normSerial(q)}%`;
+      w = `WHERE c.id IN (SELECT o.customer_id FROM serials s JOIN orders o ON o.id = s.order_id WHERE s.serial LIKE ?)
+             OR c.id IN (SELECT customer_id FROM orders WHERE tracking_code LIKE ?)
+             OR c.name LIKE ? OR c.phone LIKE ? OR c.phone_alt LIKE ? OR c.external_id LIKE ? OR c.address LIKE ? OR c.email LIKE ?`;
+      args.push(qs, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+      // qué coincidió (S/N o pedido), para mostrarlo en la lista
+      matchCol = `COALESCE((SELECT 'S/N ' || GROUP_CONCAT(s.serial, ', ') FROM serials s JOIN orders o ON o.id = s.order_id WHERE o.customer_id = c.id AND s.serial LIKE ?),
+                          (SELECT 'Pedido ' || GROUP_CONCAT(tracking_code, ', ') FROM orders WHERE customer_id = c.id AND tracking_code LIKE ?)) match_txt`;
+      margs.push(qs, `%${q}%`);
     }
-    const total = db.prepare(`SELECT COUNT(*) c FROM customers ${w}`).get(...args).c;
+    const total = db.prepare(`SELECT COUNT(*) c FROM customers c ${w}`).get(...args).c;
     const rows = db
       .prepare(
-        `SELECT c.*, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count,
+        `SELECT c.*, ${matchCol}, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count,
            (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado')) open_orders,
            (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado','cargado','fallido')) active_orders,
            (SELECT o.status FROM orders o WHERE o.customer_id = c.id ORDER BY o.scheduled_date DESC, o.id DESC LIMIT 1) last_status,
            (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) driver_name
          FROM customers c ${w} ORDER BY c.name LIMIT ? OFFSET ?`
       )
-      .all(...args, limit, offset);
+      .all(...margs, ...args, limit, offset);
     res.json({ total, rows });
   })
 );
@@ -1948,12 +1958,14 @@ app.get(
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
-      where.push('(o.tracking_code LIKE ? OR c.name LIKE ? OR c.address LIKE ?)');
-      args.push(`%${q}%`, `%${q}%`, `%${q}%`);
+      where.push('(EXISTS (SELECT 1 FROM serials s WHERE s.order_id = o.id AND s.serial LIKE ?) OR o.tracking_code LIKE ? OR c.name LIKE ? OR c.address LIKE ? OR c.phone LIKE ? OR c.external_id LIKE ?)');
+      args.push(`%${normSerial(q)}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const total = db.prepare(`SELECT COUNT(*) c FROM orders o JOIN customers c ON c.id = o.customer_id ${w}`).get(...args).c;
     const rows = db.prepare(`${ORDER_SELECT} ${w} ORDER BY o.scheduled_date DESC, o.route_id, o.stop_seq, o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const snq = db.prepare("SELECT GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id = ?");
+    for (const r of rows) r.sn_list = snq.get(r.id).l;
     res.json({ total, rows });
   })
 );
@@ -1961,8 +1973,10 @@ app.get(
   '/api/orders/tracking/:code',
   auth(),
   wrap((req, res) => {
-    const r = db.prepare('SELECT id FROM orders WHERE tracking_code = ?').get(req.params.code.trim());
-    if (!r) throw new HttpError(404, 'Guía no encontrada');
+    let r = db.prepare('SELECT id FROM orders WHERE tracking_code = ?').get(req.params.code.trim());
+    // ¿es el número de serie del equipo? -> su pedido más reciente
+    if (!r) r = db.prepare('SELECT o.id FROM serials s JOIN orders o ON o.id = s.order_id WHERE s.serial = ? ORDER BY o.id DESC LIMIT 1').get(normSerial(req.params.code));
+    if (!r) throw new HttpError(404, 'No hay pedido con ese número de serie o número de pedido');
     const o = loadOrder(r.id);
     if (!canSee(req.user, o)) throw new HttpError(403, 'Este paquete no está asignado a ti');
     res.json(o);

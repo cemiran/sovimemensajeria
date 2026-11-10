@@ -722,7 +722,7 @@ const NAV_GROUPS = [
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
-const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Escanear', 'scan'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
+const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
@@ -818,10 +818,10 @@ async function viewOrders(v) {
   const q = p.get('q') || '';
   const acc = p.get('account_id') || '';
   const [data, accs] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}`), GET('/api/accounts').catch(() => ({ rows: [] }))]);
-  v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Buscar por guía</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
+  v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
-      <input name="q" placeholder="Guía, cliente o dirección" value="${esc(q)}" class="grow" style="max-width:280px" />
+      <input name="q" placeholder="Número de serie o número de pedido (o cliente, teléfono)" value="${esc(q)}" class="grow" style="max-width:340px" autofocus />
       <input type="date" name="date" value="${esc(date)}" style="max-width:170px" />
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
@@ -829,7 +829,7 @@ async function viewOrders(v) {
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
     <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
+    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
@@ -837,7 +837,7 @@ async function viewOrders(v) {
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.id)));
   $('#newOrder').onclick = () => orderForm(() => render());
   bulkAssign(v, 'orders');
-  $('#scanFind').onclick = () => openScanner({ title: 'Buscar pedido por guía', onCode: async (c) => { const o = await GET('/api/orders/tracking/' + encodeURIComponent(c)); orderDetail(o.id); } });
+  $('#scanFind').onclick = () => openScanner({ title: 'Buscar pedido por S/N o guía', onCode: async (c) => { const o = await GET('/api/orders/tracking/' + encodeURIComponent(c)); orderDetail(o.id); } });
 }
 
 async function orderDetail(id) {
@@ -1107,9 +1107,9 @@ async function viewCustomers(v) {
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
-    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Buscar cliente…" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
+    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
@@ -2983,7 +2983,7 @@ async function viewInventory(v) {
       ${withDrv.map((d) => `<tr class="click" data-cust="${d.id}"><td><b>${esc(d.name)}</b>${d.vehicle ? `<br><small class="muted">${esc(d.vehicle)}</small>` : ''}</td><td><small>${d.items.map((it) => `${esc(it.name)}: <b>${it.qty}</b>`).join(' · ')}</small></td><td class="r num"><b>${d.total}</b></td><td class="r"><button class="btn sm">Ver / devolver</button></td></tr>`).join('')}
     </tbody></table></div>` : '<p class="muted" style="margin:0">Ningún repartidor trae inventario. Usa <b>Asignar a repartidor</b> para entregarle equipos antes de salir.</p>'}</div>
   <div class="grid g-main" style="margin-top:14px">
-    <div class="card"><form class="row" id="iq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Nombre, SKU o código de barras" class="grow" /><label class="row"><input type="checkbox" name="low" value="1" ${low ? 'checked' : ''} /> Solo stock bajo</label><button class="btn">Buscar</button></form>
+    <div class="card"><form class="row" id="iq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie (o nombre, SKU, código de barras)" class="grow" /><label class="row"><input type="checkbox" name="low" value="1" ${low ? 'checked' : ''} /> Solo stock bajo</label><button class="btn">Buscar</button></form>
       <div class="table-wrap"><table><thead><tr><th>Producto</th><th>SKU / Código</th><th>Ubicación</th><th class="r">Stock</th><th class="r">Mín.</th></tr></thead><tbody>
       ${r.rows.map((x) => `<tr class="click" data-p='${esc(JSON.stringify(x))}'><td><b>${esc(x.name)}</b>${x.serialized ? ` <span class="chip" title="Control por número de serie">${icon('tag')} S/N · ${x.serials_available}</span>` : ''}</td><td><small>${esc(x.sku)}<br>${esc(x.barcode || '')}</small></td><td>${esc(x.location || '—')}</td><td class="r num" style="font-weight:700;color:${x.stock <= x.min_stock ? 'var(--bad)' : 'inherit'}">${x.stock}</td><td class="r num">${x.min_stock}</td></tr>`).join('')}
       </tbody></table></div></div>
@@ -4259,8 +4259,23 @@ async function viewLoad(v) {
 }
 
 async function viewScan(v) {
-  v.innerHTML = topbar('Escanear') + `<div class="stack"><button class="btn primary lg block" id="sc1">${icon('scan')} Buscar paquete por guía</button><p class="muted">Escanea la etiqueta del paquete para ver su información y registrar la entrega.</p></div>`;
-  $('#sc1').onclick = () => openScanner({ title: 'Escanear guía', onCode: async (c) => { const o = await GET('/api/orders/tracking/' + encodeURIComponent(c)); if (['asignado', 'cargado'].includes(o.status)) location.hash = '#/deliver/' + o.id + '?scanned=1'; else orderDetail(o.id); } });
+  v.innerHTML = topbar('Buscar', '', 'Busca tus pedidos por número de serie del equipo o, si lo tienes, por número de pedido.') + `<div class="stack">
+    <div class="card"><form class="row" id="fsF"><input name="q" class="grow" placeholder="Número de serie o número de pedido" autocomplete="off" autocapitalize="characters" spellcheck="false" style="text-transform:uppercase" /><button class="btn primary">${icon('search')} Buscar</button></form>
+      <div id="fsRes" style="margin-top:8px"></div></div>
+    <button class="btn lg block" id="sc1">${icon('scan')} Escanear S/N o guía</button></div>`;
+  const open = (o) => (['asignado', 'cargado'].includes(o.status) ? (location.hash = '#/deliver/' + o.id + '?scanned=1') : orderDetail(o.id));
+  const search = async (q) => {
+    q = q.trim();
+    if (q.length < 3) return ($('#fsRes').innerHTML = '<p class="muted">Escribe al menos 3 letras o números del S/N o del pedido.</p>');
+    const r = await GET('/api/orders?limit=30&date=&q=' + encodeURIComponent(q));
+    $('#fsRes').innerHTML = r.rows.map((o) => `<button class="live-row" data-o="${o.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(o.customer_name)}</b><br><small class="mono">${o.sn_list ? 'S/N ' + esc(o.sn_list) + ' · ' : ''}${esc(o.tracking_code)}</small><br><small class="muted">${esc(o.address || '')} · ${esc(o.scheduled_date || '')}</small></span>${badge(o.status)}</button>`).join('')
+      || '<p class="muted">No tienes pedidos con ese número de serie o número de pedido. Para ver un equipo de tu inventario usa <a href="#/stock">Inventario</a>.</p>';
+    $$('[data-o]', v).forEach((b) => (b.onclick = () => open(r.rows.find((o) => o.id === Number(b.dataset.o)))));
+  };
+  let t;
+  $('#fsF').onsubmit = (e) => { e.preventDefault(); search(e.target.q.value); };
+  $('#fsF').q.oninput = (e) => { clearTimeout(t); t = setTimeout(() => search(e.target.value), 400); };
+  $('#sc1').onclick = () => openScanner({ title: 'Escanear S/N o guía', onCode: async (c) => open(await GET('/api/orders/tracking/' + encodeURIComponent(c))) });
 }
 
 async function viewDeliver(v, id, mode) {
@@ -4349,13 +4364,13 @@ async function viewHistory(v) {
 // Repartidor: buscar (o registrar) al cliente final y entregarle productos de lo que trae
 function viewNewCustomer(v) {
   v.innerHTML = topbar('Cliente', '', 'Busca al cliente, elige lo que le vas a entregar de tu inventario y registra la entrega.') + `
-    <div class="card"><form class="row" id="dcq"><input name="q" class="grow" placeholder="Nombre, teléfono o dirección" autocomplete="off" /><button class="btn primary">${icon('search')} Buscar</button></form>
+    <div class="card"><form class="row" id="dcq"><input name="q" class="grow" placeholder="Número de serie o número de pedido (o nombre, teléfono)" autocomplete="off" style="text-transform:uppercase" /><button class="btn primary">${icon('search')} Buscar</button></form>
       <div id="dcRes" style="margin-top:8px"></div></div>
     <div id="dcPick"></div>`;
   const search = async (q) => {
     if (q.trim().length < 2) return ($('#dcRes').innerHTML = '<p class="muted">Escribe al menos 2 letras o números.</p>');
     const r = await GET('/api/customers?limit=30&q=' + encodeURIComponent(q.trim()));
-    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}${c.external_id ? ' · Telnor ' + esc(c.external_id) : ''}</small></span>${c.active_orders ? `<span class="chip">${c.active_orders} pedido${c.active_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el nombre o el teléfono; si es un cliente nuevo, pide al despacho que lo registre.</p>';
+    $('#dcRes').innerHTML = r.rows.map((c) => `<button class="live-row" data-c="${c.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}<br><small class="muted">${esc(c.address || '')}${c.phone ? ' · ' + esc(c.phone) : ''}${c.external_id ? ' · Telnor ' + esc(c.external_id) : ''}</small></span>${c.active_orders ? `<span class="chip">${c.active_orders} pedido${c.active_orders === 1 ? '' : 's'}</span>` : ''}</button>`).join('') || '<p class="muted">No se encontró. Revisa el número de serie, el pedido o el nombre; si es un cliente nuevo, pide al despacho que lo registre.</p>';
     $$('[data-c]', v).forEach((b) => (b.onclick = () => pickForCustomer(Number(b.dataset.c))));
   };
   let t;
