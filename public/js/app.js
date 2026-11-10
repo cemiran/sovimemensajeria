@@ -854,7 +854,9 @@ async function viewOrders(v) {
   const q = p.get('q') || '';
   const acc = p.get('account_id') || '';
   const off = p.get('office_id') || '';
-  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
+  const city = p.get('city') || '';
+  const cityList = GET(`/api/dashboard/breakdown?office_id=${off}`).then((r) => r.city_list).catch(() => []);
+  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn" id="asgX">${icon('upload')} Asignar por Excel</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
@@ -863,15 +865,16 @@ async function viewOrders(v) {
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
       ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
+      <select name="city" style="max-width:190px"><option value="">Todas las ciudades</option>${(await cityList).map((c) => `<option ${c.toLowerCase() === city.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
-    <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin pedidos</td></tr>'}
+    <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Ciudad</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
+    ${data.rows.map((o) => `<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><b>${esc(o.customer_city || '—')}</b>${o.customer_colonia ? `<br><small class="muted">${esc(o.customer_colonia)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
-  $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}`; };
+  $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}&office_id=${off}&city=${encodeURIComponent(city)}`; };
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.id)));
   $('#newOrder').onclick = () => orderForm(() => render());
   bulkAssign(v, 'orders');

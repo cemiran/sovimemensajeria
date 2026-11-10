@@ -2125,7 +2125,7 @@ app.get(
 
 // ---------- Pedidos ----------
 const ORDER_SELECT = `
-  SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.external_id telnor_phone, c.address, c.reference address_reference,
+  SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.external_id telnor_phone, c.address, c.reference address_reference, c.city customer_city, c.colonia customer_colonia,
          c.lat, c.lng, c.window_start, c.window_end, u.name driver_name, (SELECT name FROM accounts WHERE id = o.account_id) account_name
   FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id`;
 
