@@ -95,11 +95,13 @@ function auth(...roles) {
     if (!token) return res.status(401).json({ error: 'No autenticado' });
     try {
       const p = jwt.verify(token, JWT_SECRET);
-      const u = db.prepare('SELECT id, name, email, role, active, token_version FROM users WHERE id = ?').get(p.sub);
+      const u = db.prepare('SELECT id, name, email, role, active, token_version, office_id FROM users WHERE id = ?').get(p.sub);
       if (!u || !u.active) return res.status(401).json({ error: 'Usuario inactivo' });
       if ((p.tv || 0) !== u.token_version) return res.status(401).json({ error: 'Tu sesión se cerró, vuelve a entrar' });
       if (roles.length && !roles.includes(u.role)) return res.status(403).json({ error: 'Sin permiso' });
       delete u.token_version;
+      u.office = u.role === 'admin' ? null : Number(u.office_id || db.prepare('SELECT id FROM warehouses WHERE is_default = 1').get()?.id || 0) || null;
+      u.supervises = db.prepare('SELECT id FROM warehouses WHERE supervisor_id = ? AND active = 1').all(u.id).map((r) => r.id);
       req.user = u;
       next();
     } catch {
@@ -192,6 +194,7 @@ app.get(
       where.push('u.active = ?');
       args.push(Number(active));
     }
+    if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
     if (q) {
       where.push('(u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)');
       args.push(`%${q}%`, `%${q}%`, `%${q}%`);
@@ -732,6 +735,10 @@ app.get(
     const args = [];
     if (req.query.status) { where.push('s.status = ?'); args.push(req.query.status); }
     if (req.query.product_id) { where.push('s.product_id = ?'); args.push(Number(req.query.product_id)); }
+    if (req.user.office) {
+      const off = Number(req.user.office);
+      where.push(`(s.warehouse_id = ${off} OR (o.id IS NOT NULL AND ${OFFICE_OF('c')} = ${off}) OR s.holder_id IN (SELECT u2.id FROM users u2 WHERE ${OFFICE_OF('u2')} = ${off}))`);
+    }
     if (req.query.q) { where.push('(s.serial LIKE ? OR o.tracking_code LIKE ? OR c.name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const from = `FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id ${w}`;
@@ -1147,6 +1154,7 @@ app.post('/api/warehouses/:id/transfer', auth(...STAFF), wrap((req, res) => {
   const from = fromId ? db.prepare('SELECT * FROM warehouses WHERE id=?').get(fromId) : null;
   if (fromId && !from) throw new HttpError(404, 'Almacén de origen no encontrado');
   if (fromId === w.id) throw new HttpError(400, 'El almacén de origen y el de destino son el mismo');
+  if (req.user.office && fromId !== req.user.office) throw new HttpError(403, 'Solo puedes enviar equipos desde tu oficina');
   let n = 0; const errors = [];
   tx(() => {
     for (const sn of list) {
@@ -1167,7 +1175,8 @@ app.post('/api/warehouses/:id/transfer', auth(...STAFF), wrap((req, res) => {
 app.get('/api/warehouse-transfers', auth(...STAFF), wrap((req, res) => {
   res.json(db.prepare(`SELECT e.created_at, e.detail, u.name user_name, COUNT(*) n, GROUP_CONCAT(s.serial, ', ') serials
     FROM serial_events e JOIN serials s ON s.id = e.serial_id LEFT JOIN users u ON u.id = e.user_id
-    WHERE e.event = 'traspaso' GROUP BY e.created_at, e.user_id, e.detail ORDER BY e.created_at DESC LIMIT 40`).all());
+    WHERE e.event = 'traspaso' ${req.user.office ? 'AND e.detail LIKE ?' : ''} GROUP BY e.created_at, e.user_id, e.detail ORDER BY e.created_at DESC LIMIT 40`)
+    .all(...(req.user.office ? [`%${db.prepare('SELECT name FROM warehouses WHERE id = ?').get(req.user.office)?.name || '#'}%`] : [])));
 }));
 // Existencias: dónde está cada unidad (almacenes, repartidores, abierto) y lo apartado en pedidos
 app.get('/api/inventory/breakdown', auth(...STAFF), wrap((req, res) => {
@@ -1194,6 +1203,7 @@ app.get('/api/inventory/breakdown', auth(...STAFF), wrap((req, res) => {
 }));
 // Equipos con S/N dentro de un almacén (para revisar o traspasar)
 app.get('/api/warehouses/:id/serials', auth(...STAFF), wrap((req, res) => {
+  if (req.user.office && req.user.office !== Number(req.params.id)) throw new HttpError(403, 'Solo puedes ver el inventario de tu oficina');
   res.json(db.prepare(`SELECT s.serial, s.status, p.name product_name, o.tracking_code FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN orders o ON o.id = s.order_id
     WHERE s.warehouse_id = ? AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') ORDER BY p.name, s.serial`).all(req.params.id));
 }));
@@ -1250,7 +1260,11 @@ function warehouseQty(productId) {
     + (db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(productId)?.qty || 0);
   return Math.max(0, (p?.stock || 0) + open - held);
 }
-app.get('/api/custody', auth(...STAFF), wrap((req, res) => res.json({ drivers: [openPool(), ...custodyOf(null)] })));
+app.get('/api/custody', auth(...STAFF), wrap((req, res) => {
+  let drivers = custodyOf(null);
+  if (req.user.office) { const ids = new Set(db.prepare(`SELECT u.id FROM users u WHERE 1 ${inOffice(req, 'u')}`).all().map((r) => r.id)); drivers = drivers.filter((d) => ids.has(d.id)); }
+  res.json({ drivers: [openPool(), ...drivers] });
+}));
 // Lo que hay en el almacén para asignar: equipos con S/N que nadie trae y productos sin S/N con su cantidad disponible
 app.get('/api/custody/available', auth(...STAFF), wrap((req, res) => {
   const prods = db.prepare('SELECT id, name, sku, unit, serialized, location FROM products ORDER BY name').all();
@@ -1635,7 +1649,8 @@ app.get(
                           (SELECT 'Pedido ' || GROUP_CONCAT(tracking_code, ', ') FROM orders WHERE customer_id = c.id AND tracking_code LIKE ?)) match_txt`;
       margs.push(qs, `%${q}%`);
     }
-    if (req.query.office_id) { w = (w ? `WHERE (${w.slice(6)}) AND ` : 'WHERE ') + `${OFFICE_OF('c')} = ?`; args.push(Number(req.query.office_id)); }
+    const offC = req.user.office || req.query.office_id;
+    if (offC) { w = (w ? `WHERE (${w.slice(6)}) AND ` : 'WHERE ') + `${OFFICE_OF('c')} = ?`; args.push(Number(offC)); }
     const total = db.prepare(`SELECT COUNT(*) c FROM customers c ${w}`).get(...args).c;
     const rows = db
       .prepare(
@@ -1673,13 +1688,17 @@ app.get('/api/offices', auth(...STAFF), wrap((req, res) => {
       (SELECT COUNT(*) FROM customers c WHERE ${OFFICE_OF('c')} = w.id) customers,
       (SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${OFFICE_OF('c')} = w.id AND o.status IN ('pendiente','asignado','cargado','fallido')) open_orders,
       (SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${OFFICE_OF('c')} = w.id AND o.status = 'entregado' AND strftime('%Y-%m', o.delivered_at, 'localtime') = ?) delivered_month,
-      (SELECT COUNT(*) FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = w.id) staff
-    FROM warehouses w ORDER BY w.active DESC, w.is_default DESC, w.city, w.name`).all(month);
+      (SELECT COUNT(*) FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = w.id) staff,
+      (SELECT name FROM users WHERE id = w.supervisor_id AND active = 1) supervisor_name
+    FROM warehouses w ${req.user.office ? `WHERE w.id = ${Number(req.user.office)}` : ''} ORDER BY w.active DESC, w.is_default DESC, w.city, w.name`).all(month);
   res.json(rows);
 }));
 app.get('/api/offices/:id', auth(...STAFF), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
   if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  if (req.user.office && req.user.office !== w.id) throw new HttpError(403, 'Solo puedes ver tu oficina');
+  w.supervisor_name = w.supervisor_id ? db.prepare('SELECT name FROM users WHERE id = ? AND active = 1').get(w.supervisor_id)?.name || null : null;
+  w.can_manage = canManageOffice(req, w.id);
   const inventory = db.prepare(`SELECT p.id, p.name, p.sku, COUNT(*) n, SUM(s.order_id IS NOT NULL) reserved FROM serials s JOIN products p ON p.id = s.product_id
     WHERE s.warehouse_id = ? AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') GROUP BY p.id ORDER BY p.name`).all(w.id);
   const plain = w.is_default ? db.prepare('SELECT id, name, sku FROM products WHERE serialized = 0 ORDER BY name').all().map((p) => ({ ...p, n: warehouseQty(p.id) })).filter((p) => p.n > 0) : [];
@@ -1688,10 +1707,29 @@ app.get('/api/offices/:id', auth(...STAFF), wrap((req, res) => {
     FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = ? ORDER BY u.role, u.name`).all(w.id);
   res.json({ ...w, inventory, plain, staff });
 }));
+// Supervisor operativo de la oficina (lo nombra el administrador; queda asignado a esa oficina)
+app.put('/api/offices/:id/supervisor', auth('admin'), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
+  if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  const uid = req.body?.user_id ? Number(req.body.user_id) : null;
+  let u = null;
+  if (uid) {
+    u = db.prepare('SELECT id, name, role, active FROM users WHERE id = ?').get(uid);
+    if (!u || !u.active) throw new HttpError(404, 'Usuario no encontrado');
+    if (u.role === 'repartidor') throw new HttpError(400, 'El supervisor debe ser despachador o administrador (cámbiale el rol en Usuarios)');
+  }
+  tx(() => {
+    db.prepare('UPDATE warehouses SET supervisor_id = ? WHERE id = ?').run(uid, w.id);
+    if (u && u.role !== 'admin') db.prepare('UPDATE users SET office_id = ? WHERE id = ?').run(w.id, u.id);
+  });
+  audit(req, 'oficina.supervisor', `${w.name}: ${u ? u.name : 'sin supervisor'}`);
+  res.json({ ok: true });
+}));
 // Pasar clientes o personal a una oficina
 app.post('/api/offices/:id/customers', auth(...STAFF), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ? AND active = 1').get(req.params.id);
   if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  if (req.user.office) throw new HttpError(403, 'Solo el administrador pasa clientes entre oficinas');
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) throw new HttpError(400, 'Elige los clientes');
   const up = db.prepare('UPDATE customers SET office_id = ? WHERE id = ?');
@@ -1700,9 +1738,10 @@ app.post('/api/offices/:id/customers', auth(...STAFF), wrap((req, res) => {
   audit(req, 'oficina.clientes', `${n} clientes → ${w.name}`);
   res.json({ moved: n });
 }));
-app.post('/api/offices/:id/staff', auth('admin'), wrap((req, res) => {
+app.post('/api/offices/:id/staff', auth(...STAFF), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ? AND active = 1').get(req.params.id);
   if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  if (req.user.role !== 'admin') throw new HttpError(403, 'Solo el administrador asigna personal a una oficina');
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
   if (!ids.length) throw new HttpError(400, 'Elige al personal');
   const up = db.prepare('UPDATE users SET office_id = ? WHERE id = ?');
@@ -1717,6 +1756,7 @@ app.post(
   wrap((req, res) => {
     const b = req.body;
     if (!b.name || !b.address) throw new HttpError(400, 'Nombre y dirección son obligatorios');
+    if (req.user.office) b.office_id = req.user.office; // el personal de una oficina registra clientes de su oficina
     const vals = customerFields.map((f) => custVal(b, f));
     const r = db.prepare(`INSERT INTO customers (${customerFields.join(',')}) VALUES (${customerFields.map(() => '?').join(',')})`).run(...vals);
     res.status(201).json({ id: Number(r.lastInsertRowid) });
@@ -1728,7 +1768,9 @@ app.put(
   wrap((req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!c) throw new HttpError(404, 'No encontrado');
+    if (req.user.office && customerOffice(c.id) !== req.user.office) throw new HttpError(403, 'Este cliente es de otra oficina');
     const b = { ...c, ...req.body };
+    if (req.user.office && !canManageOffice(req, b.office_id)) b.office_id = c.office_id;
     const vals = customerFields.map((f) => custVal(b, f));
     db.prepare(`UPDATE customers SET ${customerFields.map((f) => f + '=?').join(',')} WHERE id=?`).run(...vals, c.id);
     const moved = b.lat != null && b.lat !== '' && (Number(b.lat) !== c.lat || Number(b.lng) !== c.lng);
@@ -1967,6 +2009,7 @@ app.get(
   wrap((req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!c) throw new HttpError(404, 'No encontrado');
+    if (req.user.office && customerOffice(c.id) !== req.user.office) throw new HttpError(403, 'Este cliente es de otra oficina');
     c.orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.scheduled_date, o.delivered_at, o.appointment_time, o.driver_id, o.route_id, u.name driver_name
       FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.customer_id = ? ORDER BY o.id DESC LIMIT 50`).all(c.id);
     res.json(c);
@@ -1992,8 +2035,15 @@ function loadOrder(id) {
   return o;
 }
 function canSee(user, order) {
-  return STAFF.includes(user.role) || order.driver_id === user.id;
+  if (STAFF.includes(user.role)) return !user.office || customerOffice(order.customer_id) === user.office;
+  return order.driver_id === user.id;
 }
+function customerOffice(customerId) {
+  return db.prepare(`SELECT ${OFFICE_OF('c')} o FROM customers c WHERE c.id = ?`).get(customerId)?.o ?? null;
+}
+// Fragmentos SQL para limitar a la oficina del usuario (el número viene de la base, no del cliente)
+const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '');
+const canManageOffice = (req, officeId) => req.user.role === 'admin' || req.user.supervises.includes(Number(officeId));
 
 app.get(
   '/api/orders',
@@ -2024,7 +2074,8 @@ app.get(
       args.push(route_id);
     }
     if (unrouted === '1') where.push('o.route_id IS NULL');
-    if (req.query.office_id) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(req.query.office_id)); }
+    const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
+    if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
@@ -2459,7 +2510,7 @@ app.get(
     if (req.user.role === 'repartidor') {
       where.push('r.driver_id = ?');
       args.push(req.user.id);
-    }
+    } else if (req.user.office) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice(req, 'u2')})`);
     const rows = db
       .prepare(
         `SELECT r.*, u.name driver_name,
@@ -2582,14 +2633,17 @@ app.post(
   wrap((req, res) => {
     const s = getSettings();
     const date = req.body.date || today();
-    const depot = depotOf(s, req.body);
+    // el personal de una oficina planifica solo su oficina, saliendo de ella
+    const depot = depotOf(s, req.user.office && !req.body.warehouse_id ? { ...req.body, warehouse_id: req.user.office } : req.body);
     let driverIds = (req.body.driver_ids || []).map(Number);
-    if (!driverIds.length) driverIds = db.prepare("SELECT id FROM users WHERE role='repartidor' AND active=1").all().map((r) => r.id);
+    const offDrivers = db.prepare(`SELECT u.id FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')}`).all().map((r) => r.id);
+    if (!driverIds.length) driverIds = offDrivers;
+    else if (req.user.office) driverIds = driverIds.filter((id) => offDrivers.includes(id));
     const drivers = driverIds.map((id) => db.prepare('SELECT id, name, capacity FROM users WHERE id=?').get(id)).filter(Boolean);
     const pend = db
       .prepare(
         `SELECT o.id, o.priority, c.lat, c.lng, c.window_start, c.window_end FROM orders o JOIN customers c ON c.id=o.customer_id
-         WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?`
+         WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ? ${inOffice(req, 'c')}`
       )
       .all(date);
     if (!pend.length) throw new HttpError(400, 'No hay pedidos pendientes por rutear');
@@ -2706,7 +2760,7 @@ app.get(
         `SELECT u.id, u.name, u.vehicle, u.last_lat, u.last_lng, u.last_seen,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status IN ('asignado','cargado')) pending,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status='entregado') delivered
-         FROM users u WHERE u.role='repartidor' AND u.active=1 ORDER BY u.name`
+         FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')} ORDER BY u.name`
       )
       .all(today(), today());
     res.json(rows);
@@ -2746,19 +2800,20 @@ app.get(
     const from = req.query.from || new Date(Date.now() - 13 * 864e5).toLocaleDateString('en-CA');
     // Entregas y fallidos cuentan por la FECHA REAL en que pasaron (hora local); lo abierto, por su fecha programada.
     const DONE = "date(o.delivered_at,'localtime')";
-    const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))`;
+    const OFF = req.user.office ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(req, 'c2')})` : '';
+    const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
     const R = [from, to, from, to];
     const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
         SUM(o.status IN ('pendiente','asignado','cargado')) open, SUM(o.status='cancelado') cancelled FROM orders o WHERE ${IN}`).get(...R);
     const routes = db.prepare(`SELECT COUNT(*) routes, ROUND(SUM(distance_km),1) km, ROUND(SUM(original_distance_km),1) original_km,
-        ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ?`).get(from, to);
+        ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ? ${req.user.office ? `AND driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice(req, 'u2')})` : ''}`).get(from, to);
     const byDriver = db.prepare(`SELECT u.id, u.name, COUNT(o.id) assigned, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
         (SELECT ROUND(SUM(r.distance_km),1) FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ?) km,
         (SELECT ROUND(SUM((julianday(COALESCE(r.finished_at, datetime('now'))) - julianday(r.started_at))*24),2)
            FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
         (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e WHERE e.driver_id=u.id AND date(e.created_at,'localtime') BETWEEN ? AND ?) avg_gps_dev_m
        FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND ${IN}
-       WHERE u.role='repartidor' GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
+       WHERE u.role='repartidor' ${inOffice(req, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
       .map((d) => ({
         ...d,
         success_rate: d.delivered + d.failed ? +((d.delivered / (d.delivered + d.failed)) * 100).toFixed(1) : null,
@@ -2768,12 +2823,12 @@ app.get(
     const daily = db.prepare(`SELECT CASE WHEN o.status IN ('entregado','fallido') THEN ${DONE} ELSE o.scheduled_date END day,
         SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed, COUNT(*) total
        FROM orders o WHERE ${IN} AND o.status <> 'cancelado' GROUP BY day ORDER BY day`).all(...R);
-    const reasons = db.prepare(`SELECT reason, COUNT(*) n FROM evidences e WHERE e.result='fallido' AND date(e.created_at,'localtime') BETWEEN ? AND ?
+    const reasons = db.prepare(`SELECT reason, COUNT(*) n FROM evidences e WHERE e.result='fallido' AND date(e.created_at,'localtime') BETWEEN ? AND ? ${req.user.office ? `AND e.order_id IN (SELECT o.id FROM orders o WHERE 1 ${OFF})` : ''}
        GROUP BY reason ORDER BY n DESC`).all(from, to);
     const zones = db.prepare(`SELECT COALESCE(NULLIF(c.colonia,''), c.zip, 's/colonia') zone, COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
        FROM orders o JOIN customers c ON c.id=o.customer_id WHERE ${IN} GROUP BY zone ORDER BY total DESC LIMIT 12`).all(...R);
     const onTime = db.prepare(`SELECT SUM(CASE WHEN c.window_end IS NULL OR time(o.delivered_at,'localtime') <= c.window_end THEN 1 ELSE 0 END) on_time, COUNT(*) n
-       FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='entregado' AND ${DONE} BETWEEN ? AND ?`).get(from, to);
+       FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.status='entregado' AND ${DONE} BETWEEN ? AND ?${OFF}`).get(from, to);
     const lowStock = db.prepare('SELECT id, name, sku, stock, min_stock FROM products WHERE stock <= min_stock ORDER BY stock LIMIT 20').all();
     res.json({ from, to, totals, routes, byDriver, daily, reasons, zones, onTime, lowStock });
   })

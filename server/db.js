@@ -479,6 +479,7 @@ if (!db.prepare('SELECT 1 FROM warehouses LIMIT 1').get()) {
 addCols('warehouses', [['city', 'TEXT']]);
 addCols('customers', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
 addCols('users', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
+addCols('warehouses', [['supervisor_id', 'INTEGER REFERENCES users(id)']]);
 if (!db.prepare("SELECT 1 FROM settings WHERE key='offices_migrated'").get()) {
   // el principal toma la ciudad más común de los clientes; los demás, su propio nombre
   const top = db.prepare("SELECT city FROM customers WHERE TRIM(COALESCE(city,'')) <> '' GROUP BY lower(TRIM(city)) ORDER BY COUNT(*) DESC LIMIT 1").get();

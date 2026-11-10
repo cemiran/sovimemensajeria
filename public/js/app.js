@@ -826,7 +826,7 @@ async function viewOrders(v) {
       <input type="date" name="date" value="${esc(date)}" style="max-width:170px" />
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
-      ${offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
+      ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
@@ -1116,7 +1116,7 @@ async function viewCustomers(v) {
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
-    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
+    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
       ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
@@ -1960,12 +1960,14 @@ function warehouseForm(w) {
 // Traspaso entre almacenes: origen → destino, elegir equipos (lista, búsqueda, pegar o escanear) y referencia
 async function transferDialog(whs, fromId) {
   const act = whs.filter((w) => w.active);
+  const mine = store.user.role === 'admin' ? null : (await GET('/api/offices').catch(() => []))[0]?.id;
+  if (mine) fromId = mine;
   if (act.length < 2) return toast('Da de alta otro almacén para poder hacer traspasos', 'bad');
   const opt = (sel) => act.map((w) => `<option value="${w.id}" ${w.id === sel ? 'selected' : ''}>${esc(w.name)}${w.is_default ? ' (principal)' : ''}</option>`).join('');
   const from0 = fromId || (act.find((w) => w.is_default) || act[0]).id;
   const to0 = (act.find((w) => w.id !== from0) || {}).id;
   const m = modal('Traspaso entre almacenes', `<div class="stack">
-    <div class="grid g2"><label class="f">Sale de<select id="xFrom">${opt(from0)}</select></label><label class="f">Entra a<select id="xTo">${opt(to0)}</select></label></div>
+    <div class="grid g2"><label class="f">Sale de<select id="xFrom" ${mine ? 'disabled' : ''}>${opt(from0)}</select></label><label class="f">Entra a<select id="xTo">${opt(to0)}</select></label></div>
     <label class="f">Referencia<input id="xRef" maxlength="80" placeholder="Ej. Traspaso del ${today()}, vale, quién lo lleva…" /></label>
     <div class="row"><input id="xQ" class="grow" placeholder="Buscar S/N o producto" autocomplete="off" /><button class="btn sm primary" id="xAll">${icon('check')} Seleccionar todo</button><button class="btn sm" id="xNone">Quitar selección</button><button class="btn sm" id="xScan">${icon('scan')} Escanear</button></div>
     <div class="table-wrap" style="max-height:300px" id="xList"><p class="muted">Cargando…</p></div>
@@ -2031,6 +2033,7 @@ async function viewOffices(v) {
   <div class="grid g3">${offs.map((o) => `<a class="card kpi-btn" href="#/offices/${o.id}" style="text-align:left;padding:14px;text-decoration:none;color:inherit;${o.active ? '' : 'opacity:.55'}">
       <div class="row between"><b style="font-size:17px">${esc(o.name)}</b>${o.is_default ? '<span class="chip ok">Principal</span>' : ''}${o.active ? '' : '<span class="chip off">Inactiva</span>'}</div>
       <small class="muted">${icon('live')} ${esc(o.city || 'Sin ciudad')}${o.manager ? ' · ' + esc(o.manager) : ''}</small>
+      <div style="margin-top:6px">${o.supervisor_name ? `<span class="chip ok">${icon('shield')} Supervisor: ${esc(o.supervisor_name)}</span>` : '<span class="chip warn">Sin supervisor operativo</span>'}</div>
       <div class="grid g2" style="margin-top:10px;gap:8px">
         <div><small class="muted">Equipos</small><div class="num" style="font-size:20px;font-weight:700">${fmtN(o.units)}</div></div>
         <div><small class="muted">Clientes</small><div class="num" style="font-size:20px;font-weight:700">${fmtN(o.customers)}</div></div>
@@ -2050,10 +2053,12 @@ async function viewOffice(v, id) {
   const tabs = [['inv', 'Inventario', 'inv'], ['cli', 'Clientes', 'person'], ['ped', 'Pedidos', 'box'], ['per', 'Personal', 'users']];
   v.innerHTML = topbar(esc(o.name), `<a class="btn" href="#/offices">‹ Oficinas</a>${others.length ? `<button class="btn" id="ofX">${icon('truck')} Traspaso</button>` : ''}${admin ? `<button class="btn" id="ofEd">${icon('cog')} Editar</button>` : ''}`,
     `${o.city ? 'Atiende ' + esc(o.city) : 'Sin ciudad asignada'}${o.address ? ' · ' + esc(o.address) : ''}${o.manager ? ' · Encargado: ' + esc(o.manager) : ''}${o.phone ? ' · ' + esc(o.phone) : ''}`) + `
+  <div class="card row between" style="margin-bottom:12px;padding:10px 14px"><span>${icon('shield')} <b>Supervisor operativo:</b> ${o.supervisor_name ? esc(o.supervisor_name) : '<span style="color:var(--warn)">sin asignar</span>'}</span>${admin ? `<button class="btn sm" id="ofSup">${o.supervisor_name ? 'Cambiar' : 'Asignar supervisor'}</button>` : ''}</div>
   <div class="row" style="gap:6px;margin-bottom:12px;flex-wrap:wrap">${tabs.map(([k, l, i]) => `<a class="btn ${k === tab ? 'primary' : ''}" href="#/offices/${id}?tab=${k}">${icon(i)} ${l}</a>`).join('')}</div>
   <div id="ofBody"><div class="card">Cargando…</div></div>`;
   $('#ofEd')?.addEventListener('click', () => warehouseForm(whs.find((w) => w.id === id)));
   $('#ofX')?.addEventListener('click', () => transferDialog(whs, id));
+  $('#ofSup')?.addEventListener('click', () => officeSupervisor(o));
   const body = $('#ofBody');
 
   if (tab === 'inv') {
@@ -2076,7 +2081,7 @@ async function viewOffice(v, id) {
     const r = await GET(`/api/customers?limit=500&office_id=${id}&q=${encodeURIComponent(q)}`);
     body.innerHTML = `<div class="card">
       <form class="row" id="ofCq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" class="grow" placeholder="Número de serie o número de pedido (o nombre, teléfono)" /><button class="btn">Buscar</button>
-        <button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button><button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
+        ${admin ? `<button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button>` : ''}<button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
       <small class="muted">${r.total} clientes finales${q ? ' coinciden' : ' en esta oficina'}</small>
       <div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Teléfonos</th><th>Dirección</th><th class="r">Pedidos activos</th></tr></thead><tbody>
       ${r.rows.map((c) => `<tr class="click" data-c="${c.id}"><td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}</td>
@@ -2085,7 +2090,7 @@ async function viewOffice(v, id) {
     $('#ofCq').onsubmit = (e) => { e.preventDefault(); location.hash = `#/offices/${id}?tab=cli&q=${encodeURIComponent(e.target.q.value)}`; };
     $$('[data-c]', body).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.c), () => render())));
     $('#ofNewC').onclick = () => customerForm({ office_id: id, city: o.city || '' }, () => render());
-    $('#ofAddC').onclick = () => officeMoveCustomers(o);
+    $('#ofAddC')?.addEventListener('click', () => officeMoveCustomers(o));
   }
 
   if (tab === 'ped') {
@@ -2100,12 +2105,26 @@ async function viewOffice(v, id) {
   if (tab === 'per') {
     body.innerHTML = `<div class="card"><div class="row between"><h2>Personal de la oficina</h2>${admin ? `<button class="btn primary" id="ofAddP">${icon('plus')} Asignar personal</button>` : ''}</div>
       <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Puesto</th><th>Teléfono</th><th>Vehículo</th><th class="r">Trae (unidades)</th></tr></thead><tbody>
-      ${o.staff.map((u) => `<tr><td><b>${esc(u.name)}</b>${u.office_id ? '' : ' <small class="muted">(sin oficina: principal)</small>'}</td><td>${esc(ROLE[u.role] || u.role)}</td><td>${esc(u.phone || '')}</td><td>${esc(u.vehicle || '')}</td><td class="r num">${u.holding || ''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin personal asignado.</td></tr>'}
+      ${o.staff.map((u) => `<tr><td><b>${esc(u.name)}</b>${u.id === o.supervisor_id ? ' <span class="chip ok">Supervisor operativo</span>' : ''}${u.office_id ? '' : ' <small class="muted">(sin oficina: principal)</small>'}</td><td>${esc(ROLE[u.role] || u.role)}</td><td>${esc(u.phone || '')}</td><td>${esc(u.vehicle || '')}</td><td class="r num">${u.holding || ''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin personal asignado.</td></tr>'}
       </tbody></table></div></div>`;
     $('#ofAddP')?.addEventListener('click', () => officeAssignStaff(o));
   }
 }
 
+async function officeSupervisor(o) {
+  const ur = await GET('/api/users?limit=500');
+  const users = (Array.isArray(ur) ? ur : ur.rows || []).filter((u) => u.active && u.role !== 'repartidor');
+  const m = modal(`Supervisor operativo · ${o.name}`, `<div class="stack">
+    <p class="muted" style="margin:0">El supervisor opera la oficina: ve y maneja solo su inventario, sus clientes, pedidos, rutas y repartidores. Debe ser despachador (o administrador). Al nombrarlo queda asignado a esta oficina.</p>
+    <label class="f">Supervisor<select id="supU"><option value="">— Sin supervisor —</option>${users.map((u) => `<option value="${u.id}" ${u.id === o.supervisor_id ? 'selected' : ''}>${esc(u.name)} · ${esc(ROLE[u.role] || u.role)}</option>`).join('')}</select></label>
+    ${users.length ? '' : '<small class="muted">No hay despachadores activos: créalo primero en Usuarios con el rol Despachador.</small>'}</div>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="supGo">Guardar</button>' });
+  $('#supGo', m.el).onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    try { await PUT(`/api/offices/${o.id}/supervisor`, { user_id: $('#supU', m.el).value || null }); toast('Supervisor guardado', 'ok'); m.close(); render(); }
+    catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
+}
 function officeMoveCustomers(o) {
   const m = modal(`Pasar clientes a ${o.name}`, `<div class="stack">
     <div class="row"><input id="omQ" class="grow" placeholder="Buscar por S/N, pedido, nombre, teléfono o ciudad" autocomplete="off" /><button class="btn sm" id="omAll">Seleccionar todo</button></div>
