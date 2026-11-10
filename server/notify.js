@@ -49,7 +49,7 @@ function render(tpl, vars) {
 function orderVars(orderId, extra = {}) {
   const o = db
     .prepare(
-      `SELECT o.*, c.name cname, c.phone cphone, c.email cemail, c.notify_sms, c.notify_email, c.notify_whatsapp, u.name dname
+      `SELECT o.*, c.name cname, c.phone cphone, c.external_id ctelnor, c.email cemail, c.notify_sms, c.notify_email, c.notify_whatsapp, u.name dname
        FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=o.driver_id WHERE o.id=?`
     )
     .get(orderId);
@@ -102,6 +102,9 @@ function queueEvent(event, orderId, extra = {}, { force = false, channels = null
     for (const ch of channels || CHANNELS) {
       if (!channels && !Number(mx[ch])) continue;
       if (!Number(o['notify_' + ch])) continue;
+      // SMS y WhatsApp: solo al TELÉFONO MÓVIL del cliente (nunca al adicional ni a la línea Telnor, que es fija)
+      const last10 = (x) => String(x || '').replace(/\D/g, '').slice(-10);
+      if (ch !== 'email' && last10(o.cphone) && last10(o.cphone) === last10(o.ctelnor)) continue;
       const to = ch === 'email' ? (validEmail(o.cemail) ? o.cemail : null) : phoneE164(o.cphone, s.phone_country);
       if (!to) continue;
       ins.run(o.id, o.customer_id, event, ch, to, ch === 'email' ? render(EMAIL_SUBJECT[event], vars) : null, body);

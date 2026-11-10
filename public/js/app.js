@@ -1106,7 +1106,7 @@ function customerForm(c, done) {
         <label class="f">Correo<input name="email" type="email" value="${esc(c.email)}" /></label>
       </div>
       <div class="grid g2">
-        <label class="f"><span>Teléfono móvil <small class="muted">(WhatsApp y SMS)</small></span><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /></label>
+        <label class="f"><span>Teléfono móvil <small class="muted">(WhatsApp y SMS se envían solo a este número)</small></span><input name="phone" type="tel" inputmode="tel" value="${esc(c.phone)}" placeholder="10 dígitos" /><small id="mobWarn" style="color:var(--warn)" hidden>Es el mismo número que la línea Telnor (fija): no se enviarán SMS ni WhatsApp. Captura el celular del cliente.</small></label>
         <label class="f">Teléfono adicional<input name="phone_alt" type="tel" inputmode="tel" value="${esc(c.phone_alt)}" placeholder="Casa, trabajo o familiar" /></label>
       </div>
       <label class="f"><span>Teléfono Telnor <small class="muted">(número de la línea / servicio)</small></span><input name="external_id" type="tel" inputmode="tel" value="${esc(c.external_id)}" placeholder="10 dígitos de la línea Telnor" /></label>
@@ -1131,6 +1131,8 @@ function customerForm(c, done) {
       </div><small class="muted">Recibe avisos cuando su pedido se registra, va en camino, está por llegar y al entregarse (con su comprobante).</small></fieldset>
     </form>`, { wide: true, footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="saveC">Guardar</button>' });
   const f = $('#cf', m.el);
+  const mobChk = () => { const d = (x) => String(x || '').replace(/\D/g, '').slice(-10); $('#mobWarn', m.el).hidden = !(d(f.phone.value) && d(f.phone.value) === d(f.external_id.value)); };
+  f.phone.addEventListener('input', mobChk); f.external_id.addEventListener('input', mobChk); mobChk();
   const map = makeMap($('#cmap', m.el), c.lat ? [c.lat, c.lng] : null, c.lat ? 16 : 12);
   let mk = null;
   const setPt = (lat, lng, pan) => {
