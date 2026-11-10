@@ -1947,13 +1947,78 @@ function warehouseForm(w) {
     catch (e) { toast(e.message, 'bad'); }
   };
 }
+// Traspaso entre almacenes: origen → destino, elegir equipos (lista, búsqueda, pegar o escanear) y referencia
+async function transferDialog(whs, fromId) {
+  const act = whs.filter((w) => w.active);
+  if (act.length < 2) return toast('Da de alta otro almacén para poder hacer traspasos', 'bad');
+  const opt = (sel) => act.map((w) => `<option value="${w.id}" ${w.id === sel ? 'selected' : ''}>${esc(w.name)}${w.is_default ? ' (principal)' : ''}</option>`).join('');
+  const from0 = fromId || (act.find((w) => w.is_default) || act[0]).id;
+  const to0 = (act.find((w) => w.id !== from0) || {}).id;
+  const m = modal('Traspaso entre almacenes', `<div class="stack">
+    <div class="grid g2"><label class="f">Sale de<select id="xFrom">${opt(from0)}</select></label><label class="f">Entra a<select id="xTo">${opt(to0)}</select></label></div>
+    <label class="f">Referencia<input id="xRef" maxlength="80" placeholder="Ej. Traspaso del ${today()}, vale, quién lo lleva…" /></label>
+    <div class="row"><input id="xQ" class="grow" placeholder="Buscar S/N o producto" autocomplete="off" /><button class="btn sm primary" id="xAll">${icon('check')} Seleccionar todo</button><button class="btn sm" id="xNone">Quitar selección</button><button class="btn sm" id="xScan">${icon('scan')} Escanear</button></div>
+    <div class="table-wrap" style="max-height:300px" id="xList"><p class="muted">Cargando…</p></div>
+    <label class="f">…o pega los números de serie (uno por línea)<textarea id="xPaste" rows="3" placeholder="HWTCDE658DM1003&#10;HWTCDE659AM1196"></textarea></label>
+    <details><summary class="muted">Traspasos recientes</summary><div id="xHist" class="table-wrap" style="max-height:220px"></div></details>
+  </div>`, { wide: true, footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="xGo">Traspasar</button>', onClose: () => render() });
+  const $m = (s) => $(s, m.el);
+  const picked = new Set();
+  let rows = [];
+  const count = () => {
+    const extra = $m('#xPaste').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean).length;
+    const n = picked.size + extra;
+    $m('#xGo').textContent = n ? `Traspasar ${n} equipo${n === 1 ? '' : 's'}` : 'Traspasar';
+  };
+  const draw = () => {
+    const q = $m('#xQ').value.trim().toLowerCase();
+    const vis = rows.filter((s) => !q || (s.serial + ' ' + s.product_name).toLowerCase().includes(q));
+    $m('#xList').innerHTML = rows.length ? `<table><thead><tr><th style="width:30px"></th><th>S/N</th><th>Producto</th><th>Pedido</th></tr></thead><tbody>${vis.map((s) => `<tr><td><input type="checkbox" data-x="${esc(s.serial)}" ${picked.has(s.serial) ? 'checked' : ''} /></td><td class="mono">${esc(s.serial)}</td><td><small>${esc(s.product_name)}</small></td><td><small class="muted">${s.tracking_code ? esc(s.tracking_code) : 'Libre'}</small></td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nada coincide con la búsqueda</td></tr>'}</tbody></table><small class="muted" id="xSum">${rows.length} equipos en este almacén · ${picked.size} seleccionados</small>`
+      : '<p class="muted">Este almacén no tiene equipos con S/N.</p>';
+    $$('[data-x]', m.el).forEach((c) => (c.onchange = () => { c.checked ? picked.add(c.dataset.x) : picked.delete(c.dataset.x); const sm = $m('#xSum'); if (sm) sm.textContent = `${rows.length} equipos en este almacén · ${picked.size} seleccionados`; count(); }));
+    count();
+  };
+  const load = async () => { picked.clear(); $m('#xList').innerHTML = '<p class="muted">Cargando…</p>'; rows = await GET(`/api/warehouses/${$m('#xFrom').value}/serials`); draw(); };
+  const hist = async () => {
+    const h = await GET('/api/warehouse-transfers').catch(() => []);
+    $m('#xHist').innerHTML = h.length ? `<table><tbody>${h.map((x) => `<tr><td><small>${fmtDT(x.created_at)}</small><br><small class="muted">${esc(x.user_name || '')}</small></td><td><b>${esc(x.detail)}</b><br><small class="mono muted">${esc(x.serials.length > 120 ? x.serials.slice(0, 120) + '…' : x.serials)}</small></td><td class="r num"><b>${x.n}</b></td></tr>`).join('')}</tbody></table>` : '<p class="muted">Aún no hay traspasos.</p>';
+  };
+  $m('#xFrom').onchange = () => { if ($m('#xFrom').value === $m('#xTo').value) $m('#xTo').value = String((act.find((w) => String(w.id) !== $m('#xFrom').value) || {}).id); load(); };
+  $m('#xTo').onchange = () => { if ($m('#xFrom').value === $m('#xTo').value) toast('Elige un almacén de destino distinto al de origen', 'bad'); };
+  $m('#xQ').oninput = draw;
+  $m('#xPaste').oninput = count;
+  $m('#xAll').onclick = () => { const q = $m('#xQ').value.trim().toLowerCase(); rows.filter((s) => !q || (s.serial + ' ' + s.product_name).toLowerCase().includes(q)).forEach((s) => picked.add(s.serial)); draw(); };
+  $m('#xNone').onclick = () => { picked.clear(); draw(); };
+  $m('#xScan').onclick = () => openScanner({ title: 'Escanear equipos a traspasar', continuous: true, onCode: async (c) => {
+    const sn = c.trim().replace(/^S\/?N[:\s]*/i, '').toUpperCase();
+    const hit = rows.find((s) => s.serial.toUpperCase() === sn);
+    if (!hit) throw new Error(`${sn} no está en ${$m('#xFrom').selectedOptions[0].text}`);
+    picked.add(hit.serial); draw(); return hit.product_name;
+  } });
+  $m('#xGo').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const from = $m('#xFrom'), to = $m('#xTo');
+    if (from.value === to.value) return toast('El almacén de origen y el de destino son el mismo', 'bad');
+    const serials = [...picked, ...$m('#xPaste').value.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean)];
+    if (!serials.length) return toast('Marca, escanea o pega los equipos a traspasar', 'bad');
+    if (!(await confirmDlg(`¿Traspasar ${serials.length} equipo(s) de ${from.selectedOptions[0].text} a ${to.selectedOptions[0].text}?`))) return;
+    btn.disabled = true;
+    try {
+      const r = await POST(`/api/warehouses/${to.value}/transfer`, { serials, from_id: Number(from.value), reference: $m('#xRef').value });
+      toast(`${r.moved} equipo(s) traspasados a ${to.selectedOptions[0].text}`, r.moved ? 'ok' : 'bad');
+      if (r.errors.length) modal('Equipos que no se traspasaron', `<div class="table-wrap"><table><tbody>${r.errors.map((x) => `<tr><td class="mono">${esc(x.serial)}</td><td>${esc(x.error)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>' });
+      $m('#xPaste').value = ''; btn.disabled = false; await load(); hist();
+    } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
+  load(); hist();
+}
 async function warehouseDetail(id, whs) {
   const w = whs.find((x) => x.id === id);
   const list = await GET(`/api/warehouses/${id}/serials`);
   const others = whs.filter((x) => x.id !== id && x.active);
   const m = modal(w.name, `<div class="stack">
     <div class="row between"><div>${w.is_default ? '<span class="chip ok">Principal</span> ' : ''}<small class="muted">${esc(w.address || '')}${w.manager ? ' · ' + esc(w.manager) : ''}${w.phone ? ' · ' + esc(w.phone) : ''}</small></div>
-      ${store.user.role === 'admin' ? `<button class="btn sm" id="whEdit">${icon('cog')} Editar</button>` : ''}</div>
+      <div class="row">${others.length ? `<button class="btn sm" id="whXf">${icon('truck')} Traspaso</button>` : ''}${store.user.role === 'admin' ? `<button class="btn sm" id="whEdit">${icon('cog')} Editar</button>` : ''}</div></div>
     <div class="row between"><b>${list.length} equipos con S/N en este almacén</b>${list.length ? `<label class="row"><input type="checkbox" id="whAll" /> Todos</label>` : ''}</div>
     <input id="whQ" placeholder="Buscar S/N o producto" />
     <div class="table-wrap" style="max-height:340px"><table><tbody>${list.map((s) => `<tr data-row="${esc(s.serial + ' ' + s.product_name).toLowerCase()}"><td style="width:30px"><input type="checkbox" data-ws="${esc(s.serial)}" /></td><td class="mono">${esc(s.serial)}</td><td><small>${esc(s.product_name)}</small></td><td><small class="muted">${s.tracking_code ? 'Pedido ' + esc(s.tracking_code) : 'Libre'}</small></td></tr>`).join('') || '<tr><td class="muted">Sin equipos</td></tr>'}</tbody></table></div>
@@ -1964,6 +2029,7 @@ async function warehouseDetail(id, whs) {
   $('#whAll', m.el)?.addEventListener('change', (e) => { $$('tr[data-row]', m.el).filter((r) => !r.hidden).forEach((r) => (r.querySelector('input').checked = e.target.checked)); cnt(); });
   $('#whQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase(); $$('tr[data-row]', m.el).forEach((r) => (r.hidden = !r.dataset.row.includes(q))); };
   $('#whEdit', m.el)?.addEventListener('click', () => { m.close(); warehouseForm(w); });
+  $('#whXf', m.el)?.addEventListener('click', () => { m.close(); transferDialog(whs, id); });
   $('#whMove', m.el)?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const serials = $$('[data-ws]:checked', m.el).map((c) => c.dataset.ws);
@@ -2971,11 +3037,11 @@ async function viewInventory(v) {
   const totalUnits = bd.products.reduce((a, x) => a + x.in_warehouses, 0);
   const outUnits = bd.products.reduce((a, x) => a + x.drivers + x.open, 0);
   const withDrv = cust.drivers.filter((d) => d.total);
-  v.innerHTML = topbar('Inventario', `<button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
+  v.innerHTML = topbar('Inventario', `<button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="whXfer">${icon('building')} Traspaso entre almacenes</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
     <button class="card kpi kpi-btn" id="kpiWh" title="Ver dónde está cada unidad"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div><div class="sub">${fmtN(outUnits)} fuera · ver detalle ›</div></button>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>
-  <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('building')} Almacenes</h2><div class="row"><button class="btn sm" id="whStock">${icon('inv')} Existencias por almacén</button>${store.user.role === 'admin' ? `<button class="btn sm primary" id="whNew">${icon('plus')} Almacén</button>` : ''}</div></div>
+  <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('building')} Almacenes</h2><div class="row"><button class="btn sm" id="whStock">${icon('inv')} Existencias por almacén</button><button class="btn sm" id="whXfer2">${icon('truck')} Traspaso</button>${store.user.role === 'admin' ? `<button class="btn sm primary" id="whNew">${icon('plus')} Almacén</button>` : ''}</div></div>
     <div class="grid g3" style="margin-top:8px">${whs.map((w) => `<button class="card kpi-btn" data-wh="${w.id}" style="text-align:left;padding:12px;${w.active ? '' : 'opacity:.55'}"><b>${esc(w.name)}</b>${w.is_default ? ' <span class="chip ok">Principal</span>' : ''}${w.active ? '' : ' <span class="chip off">Inactivo</span>'}
       <br><small class="muted">${esc(w.address || (w.lat ? 'Ubicado en el mapa' : 'Sin ubicación'))}</small><div style="font-size:22px;font-weight:700;margin-top:4px">${fmtN(w.units)} <small class="muted" style="font-size:12px">equipos con S/N</small></div></button>`).join('')}</div></div>
   <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('truck')} Con repartidores</h2><small class="muted">${fmtN(withDrv.reduce((a, d) => a + d.total, 0))} unidades fuera del almacén</small></div>
@@ -2994,6 +3060,7 @@ async function viewInventory(v) {
   $('#impInv').onclick = importInventory;
   $('#kpiWh').onclick = $('#whStock').onclick = () => stockBreakdown(bd);
   $('#whNew')?.addEventListener('click', () => warehouseForm(null));
+  $('#whXfer').onclick = $('#whXfer2').onclick = () => transferDialog(whs);
   $$('[data-wh]', v).forEach((b) => (b.onclick = () => warehouseDetail(Number(b.dataset.wh), whs)));
   $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
   $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => String(d.id) === tr.dataset.cust))));

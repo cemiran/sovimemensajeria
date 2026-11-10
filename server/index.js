@@ -1140,8 +1140,13 @@ app.put('/api/warehouses/:id', auth('admin'), wrap((req, res) => {
 app.post('/api/warehouses/:id/transfer', auth(...STAFF), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id=? AND active=1').get(req.params.id);
   if (!w) throw new HttpError(404, 'Almacén no encontrado');
-  const list = (Array.isArray(req.body?.serials) ? req.body.serials : []).map(normSerial).filter(Boolean);
+  const list = [...new Set((Array.isArray(req.body?.serials) ? req.body.serials : []).map(normSerial).filter(Boolean))];
   if (!list.length) throw new HttpError(400, 'Elige los equipos a mover');
+  const ref = String(req.body?.reference || '').trim().slice(0, 80);
+  const fromId = req.body?.from_id ? Number(req.body.from_id) : null;
+  const from = fromId ? db.prepare('SELECT * FROM warehouses WHERE id=?').get(fromId) : null;
+  if (fromId && !from) throw new HttpError(404, 'Almacén de origen no encontrado');
+  if (fromId === w.id) throw new HttpError(400, 'El almacén de origen y el de destino son el mismo');
   let n = 0; const errors = [];
   tx(() => {
     for (const sn of list) {
@@ -1149,13 +1154,20 @@ app.post('/api/warehouses/:id/transfer', auth(...STAFF), wrap((req, res) => {
       if (!s) { errors.push({ serial: sn, error: 'No registrado' }); continue; }
       if (s.holder_id || s.open_pool || !['disponible', 'asignado'].includes(s.status)) { errors.push({ serial: sn, error: 'No está en un almacén' }); continue; }
       if (s.warehouse_id === w.id) { errors.push({ serial: sn, error: `Ya está en ${w.name}` }); continue; }
+      if (from && s.warehouse_id !== from.id) { errors.push({ serial: sn, error: `No está en ${from.name} (está en ${s.wname || 'sin almacén'})` }); continue; }
       db.prepare("UPDATE serials SET warehouse_id=?, updated_at=datetime('now') WHERE id=?").run(w.id, s.id);
-      serialEvent(s.id, 'traspaso', s.order_id, req.user.id, `${s.wname || 'Sin almacén'} → ${w.name}`);
+      serialEvent(s.id, 'traspaso', s.order_id, req.user.id, `${s.wname || 'Sin almacén'} → ${w.name}${ref ? ' · ' + ref : ''}`);
       n++;
     }
   });
-  if (n) audit(req, 'almacen.traspaso', `${n} equipos → ${w.name}`);
+  if (n) audit(req, 'almacen.traspaso', `${n} equipos ${from ? from.name + ' ' : ''}→ ${w.name}${ref ? ' · ' + ref : ''}`);
   res.json({ moved: n, errors });
+}));
+// Historial de traspasos entre almacenes (agrupado por operación)
+app.get('/api/warehouse-transfers', auth(...STAFF), wrap((req, res) => {
+  res.json(db.prepare(`SELECT e.created_at, e.detail, u.name user_name, COUNT(*) n, GROUP_CONCAT(s.serial, ', ') serials
+    FROM serial_events e JOIN serials s ON s.id = e.serial_id LEFT JOIN users u ON u.id = e.user_id
+    WHERE e.event = 'traspaso' GROUP BY e.created_at, e.user_id, e.detail ORDER BY e.created_at DESC LIMIT 40`).all());
 }));
 // Existencias: dónde está cada unidad (almacenes, repartidores, abierto) y lo apartado en pedidos
 app.get('/api/inventory/breakdown', auth(...STAFF), wrap((req, res) => {
