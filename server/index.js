@@ -2138,6 +2138,36 @@ async function geocodePending() {
     console.error('geocode', e.message);
   } finally {
     geo.running = false;
+    if (getSettings().geo_refine === '1') setImmediate(refineApprox);
+  }
+}
+// Mejora ubicaciones aproximadas (centro de la colonia o de la calle): si encuentra el domicilio exacto lo actualiza;
+// si no, deja la que ya tiene. Se reanuda solo tras un reinicio (guarda el último cliente revisado).
+const refine = { running: false, done: 0, improved: 0 };
+async function refineApprox() {
+  if (refine.running || geo.running) return;
+  refine.running = true;
+  const setK = (k, v) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v));
+  try {
+    for (;;) {
+      if (getSettings().geo_refine !== '1') break;
+      const last = Number(getSettings().geo_refine_last || 0);
+      const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle') AND id > ? ORDER BY id LIMIT 1").get(last);
+      if (!c) { setK('geo_refine', '0'); break; }
+      const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
+      // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
+      if (hit && (hit.quality === 'exacta' || (hit.quality === 'calle' && c.geo_quality === 'colonia'))) {
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle')").run(hit.lat, hit.lng, hit.quality, c.id);
+        refine.improved++;
+      }
+      refine.done++;
+      setK('geo_refine_last', c.id);
+    }
+  } catch (e) {
+    console.error('refine', e.message);
+  } finally {
+    refine.running = false;
   }
 }
 app.get(
@@ -2145,7 +2175,7 @@ app.get(
   auth(...STAFF),
   wrap((req, res) => {
     const st = Object.fromEntries(db.prepare("SELECT COALESCE(geo_quality, CASE WHEN lat IS NULL THEN 'pendiente' ELSE 'manual' END) q, COUNT(*) n FROM customers GROUP BY q").all().map((r) => [r.q, r.n]));
-    res.json({ running: geo.running, stats: st, session: geo });
+    res.json({ running: geo.running, stats: st, session: geo, refine: { ...refine, active: getSettings().geo_refine === '1' } });
   })
 );
 app.post(
@@ -2153,6 +2183,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     if (req.body?.retry_failed) db.prepare("UPDATE customers SET geo_quality=NULL WHERE geo_quality='no_encontrada' AND lat IS NULL").run();
+    if (req.body?.refine) { db.prepare("INSERT INTO settings (key, value) VALUES ('geo_refine','1') ON CONFLICT(key) DO UPDATE SET value='1'").run(); db.prepare("INSERT INTO settings (key, value) VALUES ('geo_refine_last','0') ON CONFLICT(key) DO UPDATE SET value='0'").run(); setImmediate(refineApprox); }
     setImmediate(geocodePending);
     res.json({ ok: true });
   })
