@@ -3303,15 +3303,75 @@ function importInventory() {
   return close0;
 }
 
+// Inventario en listado: una fila por equipo, con filtros y descarga a Excel
+const LOC_TYPES = { almacen: ['Almacén', 'ok'], repartidor: ['Con repartidor', 'warn'], abierto: ['Abierto', 'warn'], entregado: ['Entregado', ''], baja: ['Baja', 'off'] };
+async function viewInventoryList(v) {
+  const { rows } = await GET('/api/inventory/list');
+  const st = { q: '', prod: '', loc: '', place: '', status: '' };
+  const prods = [...new Map(rows.map((r) => [r.product_id, r.product])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const places = [...new Set(rows.filter((r) => r.loc_type !== 'entregado').map((r) => r.location))].sort();
+  v.innerHTML = topbar('Inventario', `<a class="btn" href="#/inventory">${icon('inv')} Vista resumen</a><button class="btn primary" id="ilXls">${icon('upload')} Descargar Excel</button>`, 'Listado de todo el inventario: un renglón por equipo con número de serie.') + `
+  <div class="card">
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <input id="ilQ" class="grow" placeholder="Número de serie, producto, pedido o cliente" style="min-width:220px" autocomplete="off" />
+      <select id="ilP" style="max-width:220px"><option value="">Todos los productos</option>${prods.map(([id, n]) => `<option value="${id}">${esc(n)}</option>`).join('')}</select>
+      <select id="ilL" style="max-width:180px"><option value="">Todas las ubicaciones</option>${Object.entries(LOC_TYPES).map(([k, [l]]) => `<option value="${k}" ${k === 'entregado' ? '' : ''}>${l}</option>`).join('')}</select>
+      <select id="ilW" style="max-width:220px"><option value="">Cualquier lugar</option>${places.map((x) => `<option>${esc(x)}</option>`).join('')}</select>
+      <label class="row"><input type="checkbox" id="ilDone" /> Incluir entregados</label>
+    </div>
+    <div class="row" id="ilSum" style="gap:8px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <div class="table-wrap" style="max-height:70vh"><table><thead><tr><th>#</th><th>Número de serie</th><th>Producto</th><th>Ubicación</th><th>Estado</th><th>Pedido / cliente</th><th class="r">Cant.</th><th>Actualizado</th></tr></thead><tbody id="ilBody"></tbody></table></div>
+    <small class="muted" id="ilMore"></small>
+  </div>`;
+  const filt = () => {
+    const q = st.q.toLowerCase();
+    return rows.filter((r) => (!st.prod || String(r.product_id) === st.prod) && (!st.loc || r.loc_type === st.loc) && (!st.place || r.location === st.place)
+      && (st.done || st.loc === 'entregado' || r.loc_type !== 'entregado')
+      && (!q || `${r.serial} ${r.product} ${r.sku || ''} ${r.order || ''} ${r.customer || ''} ${r.location}`.toLowerCase().includes(q)));
+  };
+  const draw = () => {
+    const list = filt();
+    const by = {}; list.forEach((r) => (by[r.loc_type] = (by[r.loc_type] || 0) + r.qty));
+    $('#ilSum').innerHTML = `<span class="chip"><b>${fmtN(list.reduce((a, r) => a + r.qty, 0))}</b>&nbsp;unidades</span>` + Object.entries(by).map(([k, n]) => `<span class="chip ${LOC_TYPES[k]?.[1] || ''}">${LOC_TYPES[k]?.[0] || k}: <b>${fmtN(n)}</b></span>`).join('');
+    const MAX = 1500;
+    $('#ilBody').innerHTML = list.slice(0, MAX).map((r, i) => `<tr><td class="num muted">${i + 1}</td><td class="mono">${esc(r.serial || '—')}</td><td>${esc(r.product)}${r.sku ? `<br><small class="muted">${esc(r.sku)}</small>` : ''}</td>
+      <td><span class="chip ${LOC_TYPES[r.loc_type]?.[1] || ''}">${LOC_TYPES[r.loc_type]?.[0] || ''}</span><br><small>${esc(r.location)}</small></td>
+      <td>${r.serial ? snChip(r.status) : '<small class="muted">sin S/N</small>'}</td><td>${r.order ? `<b>${esc(r.order)}</b><br><small class="muted">${esc(r.customer || '')}</small>` : '<small class="muted">Libre</small>'}</td>
+      <td class="r num">${r.qty}</td><td><small class="muted">${r.updated_at ? fmtDT(r.updated_at) : ''}</small></td></tr>`).join('') || '<tr><td colspan="8" class="muted">Nada coincide con los filtros.</td></tr>';
+    $('#ilMore').textContent = list.length > MAX ? `Se muestran los primeros ${MAX} de ${list.length}; usa los filtros o descarga el Excel para verlos todos.` : `${list.length} renglones`;
+  };
+  let t;
+  $('#ilQ').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { st.q = e.target.value.trim(); draw(); }, 200); };
+  $('#ilP').onchange = (e) => { st.prod = e.target.value; draw(); };
+  $('#ilL').onchange = (e) => { st.loc = e.target.value; draw(); };
+  $('#ilW').onchange = (e) => { st.place = e.target.value; draw(); };
+  $('#ilDone').onchange = (e) => { st.done = e.target.checked; draw(); };
+  $('#ilXls').onclick = async () => {
+    try {
+      const X = await loadXLSX();
+      const list = filt();
+      const aoa = [['Número de serie', 'Producto', 'SKU', 'Ubicación', 'Lugar', 'Estado', 'Pedido', 'Cliente', 'Cantidad', 'Actualizado'],
+        ...list.map((r) => [r.serial, r.product, r.sku || '', LOC_TYPES[r.loc_type]?.[0] || r.loc_type, r.location, r.serial ? SN_STATUS[r.status]?.[0] || r.status : 'Sin S/N', r.order || '', r.customer || '', r.qty, r.updated_at ? fmtDT(r.updated_at) : ''])];
+      const ws = X.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [18, 30, 14, 16, 28, 18, 16, 30, 9, 16].map((w) => ({ wch: w }));
+      const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Inventario');
+      X.writeFile(wb, `inventario-${today()}.xlsx`);
+      toast(`${list.length} renglones descargados`, 'ok');
+    } catch (e) { toast(e.message || 'No se pudo generar el Excel', 'bad'); }
+  };
+  draw();
+}
+
 async function viewInventory(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
+  if (p.get('view') === 'list') return viewInventoryList(v);
   const q = p.get('q') || '';
   const low = p.get('low') === '1';
   const [r, movs, cust, bd, whs] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody'), GET('/api/inventory/breakdown'), GET('/api/warehouses')]);
   const totalUnits = bd.products.reduce((a, x) => a + x.in_warehouses, 0);
   const outUnits = bd.products.reduce((a, x) => a + x.drivers + x.open, 0);
   const withDrv = cust.drivers.filter((d) => d.total);
-  v.innerHTML = topbar('Inventario', `<button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="whXfer">${icon('building')} Traspaso entre almacenes</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
+  v.innerHTML = topbar('Inventario', `<a class="btn primary" href="#/inventory?view=list">${icon('inv')} Ver en listado</a><button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="whXfer">${icon('building')} Traspaso entre almacenes</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
     <button class="card kpi kpi-btn" id="kpiWh" title="Ver dónde está cada unidad"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div><div class="sub">${fmtN(outUnits)} fuera · ver detalle ›</div></button>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>

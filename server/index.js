@@ -1178,6 +1178,36 @@ app.get('/api/warehouse-transfers', auth(...STAFF), wrap((req, res) => {
     WHERE e.event = 'traspaso' ${req.user.office ? 'AND e.detail LIKE ?' : ''} GROUP BY e.created_at, e.user_id, e.detail ORDER BY e.created_at DESC LIMIT 40`)
     .all(...(req.user.office ? [`%${db.prepare('SELECT name FROM warehouses WHERE id = ?').get(req.user.office)?.name || '#'}%`] : [])));
 }));
+// Inventario en listado: una fila por equipo con S/N (y por ubicación para productos sin S/N)
+app.get('/api/inventory/list', auth(...STAFF), wrap((req, res) => {
+  const off = req.user.office ? Number(req.user.office) : null;
+  const scope = off ? `AND (s.warehouse_id = ${off} OR (o.id IS NOT NULL AND ${OFFICE_OF('c')} = ${off}) OR s.holder_id IN (SELECT u2.id FROM users u2 WHERE ${OFFICE_OF('u2')} = ${off}))` : '';
+  const sn = db.prepare(`SELECT s.serial, s.status, s.open_pool, s.updated_at, s.holder_id, s.warehouse_id, p.id product_id, p.name product, p.sku,
+      w.name warehouse, w.city, u.name holder, o.tracking_code, o.status order_status, c.name customer
+    FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN warehouses w ON w.id = s.warehouse_id LEFT JOIN users u ON u.id = s.holder_id
+    LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id
+    WHERE 1 ${scope} ORDER BY p.name, s.serial LIMIT 20000`).all();
+  const rows = sn.map((s) => {
+    const loc = s.status === 'entregado' ? ['entregado', s.customer || 'Cliente'] : s.status === 'baja' ? ['baja', 'Baja']
+      : s.holder_id ? ['repartidor', s.holder] : s.open_pool ? ['abierto', 'Abierto (cualquier repartidor)'] : ['almacen', s.warehouse || 'Sin almacén'];
+    return { serial: s.serial, product_id: s.product_id, product: s.product, sku: s.sku, status: s.status, loc_type: loc[0], location: loc[1],
+      warehouse_id: s.warehouse_id, warehouse: s.warehouse, city: s.city, order: s.tracking_code, customer: s.customer, qty: 1, updated_at: s.updated_at };
+  });
+  // productos sin S/N: cantidad por ubicación
+  const def = db.prepare('SELECT id, name FROM warehouses WHERE is_default = 1').get();
+  if (!off || off === def?.id) {
+    for (const p of db.prepare('SELECT id, name, sku FROM products WHERE serialized = 0 ORDER BY name').all()) {
+      const base = { serial: '', product_id: p.id, product: p.name, sku: p.sku, status: 'disponible' };
+      const wq = warehouseQty(p.id);
+      if (wq > 0) rows.push({ ...base, loc_type: 'almacen', location: def?.name || 'Almacén', warehouse_id: def?.id, warehouse: def?.name, qty: wq });
+      for (const d of db.prepare(`SELECT u.name, d.qty FROM driver_stock d JOIN users u ON u.id = d.user_id WHERE d.product_id = ? AND d.qty > 0 ${inOffice(req, 'u')}`).all(p.id))
+        rows.push({ ...base, loc_type: 'repartidor', location: d.name, qty: d.qty });
+      const op = db.prepare('SELECT qty FROM open_stock WHERE product_id = ? AND qty > 0').get(p.id);
+      if (op) rows.push({ ...base, loc_type: 'abierto', location: 'Abierto (cualquier repartidor)', qty: op.qty });
+    }
+  }
+  res.json({ rows });
+}));
 // Existencias: dónde está cada unidad (almacenes, repartidores, abierto) y lo apartado en pedidos
 app.get('/api/inventory/breakdown', auth(...STAFF), wrap((req, res) => {
   const whs = db.prepare('SELECT id, name, is_default, active FROM warehouses ORDER BY is_default DESC, name').all();
