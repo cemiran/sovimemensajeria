@@ -1709,10 +1709,15 @@ const custVal = (b, f) => {
   return b[f] === '' || b[f] === undefined ? null : f === 'lat' || f === 'lng' ? Number(b[f]) : b[f];
 };
 // Oficina que atiende una ciudad (si no hay, queda en la principal)
+// La oficina puede atender varias ciudades: "Mexicali, San Luis Río Colorado" (sin importar acentos ni mayúsculas)
+const normCity = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.]/g, ' ').replace(/\s+/g, ' ').trim()
+  .replace(/\br c$/, 'rio colorado');
+const officeCities = (w) => String(w.city || '').split(/[,;/]/).map(normCity).filter(Boolean);
 function officeForCity(city) {
-  const c = String(city || '').trim().toLowerCase();
+  const c = normCity(city);
   if (!c) return null;
-  return db.prepare('SELECT id FROM warehouses WHERE active = 1 AND lower(TRIM(city)) = ? ORDER BY is_default DESC LIMIT 1').get(c)?.id ?? null;
+  const ws = db.prepare('SELECT id, city FROM warehouses WHERE active = 1 ORDER BY is_default DESC, id').all();
+  return ws.find((w) => officeCities(w).includes(c))?.id ?? null;
 }
 const OFFICE_OF = (alias) => `COALESCE(${alias}.office_id, (SELECT id FROM warehouses WHERE is_default = 1))`;
 
@@ -1785,6 +1790,25 @@ app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
     return o;
   });
   res.json({ rows: out, drivers });
+}));
+// Tablero: avance por oficina y por ciudad (hoy y acumulado)
+app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
+  const off = req.user.office || Number(req.query.office_id) || null;
+  const city = String(req.query.city || '').trim();
+  const d = today();
+  const W = `WHERE 1 ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
+  const A = city ? [city] : [];
+  const cols = `COUNT(DISTINCT c.id) clientes,
+      SUM(o.status = 'pendiente') pendientes, SUM(o.status IN ('asignado','cargado')) en_ruta,
+      SUM(o.status = 'entregado') entregados, SUM(o.status = 'fallido') fallidos,
+      SUM(o.status = 'entregado' AND date(o.delivered_at,'localtime') = '${d}') entregados_hoy,
+      SUM(o.status = 'fallido' AND date(o.delivered_at,'localtime') = '${d}') fallidos_hoy`;
+  const from = `FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.status <> 'cancelado'`;
+  const offices = db.prepare(`SELECT w.id, w.name, w.city cities, ${cols} ${from} JOIN warehouses w ON w.id = ${OFFICE_OF('c')} ${W} GROUP BY w.id ORDER BY w.is_default DESC, w.name`).all(...A);
+  const cities = db.prepare(`SELECT COALESCE(NULLIF(TRIM(c.city),''),'Sin ciudad') city, ${cols} ${from} ${W} GROUP BY lower(TRIM(COALESCE(c.city,''))) ORDER BY clientes DESC`).all(...A);
+  // ciudades disponibles para filtrar (dentro de la oficina)
+  const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
+  res.json({ offices, cities, city_list: list });
 }));
 // Supervisor operativo de la oficina (lo nombra el administrador; queda asignado a esa oficina)
 app.put('/api/offices/:id/supervisor', auth('admin'), wrap((req, res) => {
@@ -2159,6 +2183,7 @@ app.get(
     if (unrouted === '1') where.push('o.route_id IS NULL');
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
+    if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
@@ -2600,7 +2625,7 @@ app.get(
     if (req.user.role === 'repartidor') {
       where.push('r.driver_id = ?');
       args.push(req.user.id);
-    } else if (req.user.office) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice(req, 'u2')})`);
+    } else if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
     const rows = db
       .prepare(
         `SELECT r.*, u.name driver_name,
@@ -2850,7 +2875,7 @@ app.get(
         `SELECT u.id, u.name, u.vehicle, u.last_lat, u.last_lng, u.last_seen,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status IN ('asignado','cargado')) pending,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status='entregado') delivered
-         FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice(req, 'u')} ORDER BY u.name`
+         FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) || null } }, 'u')} ORDER BY u.name`
       )
       .all(today(), today());
     res.json(rows);
@@ -2890,20 +2915,24 @@ app.get(
     const from = req.query.from || new Date(Date.now() - 13 * 864e5).toLocaleDateString('en-CA');
     // Entregas y fallidos cuentan por la FECHA REAL en que pasaron (hora local); lo abierto, por su fecha programada.
     const DONE = "date(o.delivered_at,'localtime')";
-    const OFF = req.user.office ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(req, 'c2')})` : '';
+    const offA = req.user.office || Number(req.query.office_id) || null;
+    const sreq = { user: { office: offA } };
+    const cityA = String(req.query.city || '').trim();
+    const cityW = cityA ? ` AND lower(TRIM(c2.city)) = '${cityA.toLowerCase().replace(/'/g, "''")}'` : '';
+    const OFF = offA || cityA ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '';
     const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
     const R = [from, to, from, to];
     const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
         SUM(o.status IN ('pendiente','asignado','cargado')) open, SUM(o.status='cancelado') cancelled FROM orders o WHERE ${IN}`).get(...R);
     const routes = db.prepare(`SELECT COUNT(*) routes, ROUND(SUM(distance_km),1) km, ROUND(SUM(original_distance_km),1) original_km,
-        ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ? ${req.user.office ? `AND driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice(req, 'u2')})` : ''}`).get(from, to);
+        ROUND(AVG(est_minutes)) avg_minutes FROM routes WHERE date BETWEEN ? AND ? ${offA ? `AND driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice(sreq, 'u2')})` : ''}`).get(from, to);
     const byDriver = db.prepare(`SELECT u.id, u.name, COUNT(o.id) assigned, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
         (SELECT ROUND(SUM(r.distance_km),1) FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ?) km,
         (SELECT ROUND(SUM((julianday(COALESCE(r.finished_at, datetime('now'))) - julianday(r.started_at))*24),2)
            FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
         (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e WHERE e.driver_id=u.id AND date(e.created_at,'localtime') BETWEEN ? AND ?) avg_gps_dev_m
        FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND ${IN}
-       WHERE (u.role='repartidor' OR u.can_deliver=1) ${inOffice(req, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
+       WHERE (u.role='repartidor' OR u.can_deliver=1) ${inOffice(sreq, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
       .map((d) => ({
         ...d,
         success_rate: d.delivered + d.failed ? +((d.delivered / (d.delivered + d.failed)) * 100).toFixed(1) : null,
@@ -2913,7 +2942,7 @@ app.get(
     const daily = db.prepare(`SELECT CASE WHEN o.status IN ('entregado','fallido') THEN ${DONE} ELSE o.scheduled_date END day,
         SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed, COUNT(*) total
        FROM orders o WHERE ${IN} AND o.status <> 'cancelado' GROUP BY day ORDER BY day`).all(...R);
-    const reasons = db.prepare(`SELECT reason, COUNT(*) n FROM evidences e WHERE e.result='fallido' AND date(e.created_at,'localtime') BETWEEN ? AND ? ${req.user.office ? `AND e.order_id IN (SELECT o.id FROM orders o WHERE 1 ${OFF})` : ''}
+    const reasons = db.prepare(`SELECT reason, COUNT(*) n FROM evidences e WHERE e.result='fallido' AND date(e.created_at,'localtime') BETWEEN ? AND ? ${OFF ? `AND e.order_id IN (SELECT o.id FROM orders o WHERE 1 ${OFF})` : ''}
        GROUP BY reason ORDER BY n DESC`).all(from, to);
     const zones = db.prepare(`SELECT COALESCE(NULLIF(c.colonia,''), c.zip, 's/colonia') zone, COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
        FROM orders o JOIN customers c ON c.id=o.customer_id WHERE ${IN} GROUP BY zone ORDER BY total DESC LIMIT 12`).all(...R);

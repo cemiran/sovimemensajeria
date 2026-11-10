@@ -778,9 +778,23 @@ const skeleton = () => `<div class="skel-wrap"><div class="skel h"></div><div cl
 // ================= STAFF: Tablero =================
 async function viewDashboard(v) {
   const d = today();
-  const [orders, routes, drivers, an] = await Promise.all([
-    GET(`/api/orders?date=${d}&limit=500`), GET(`/api/routes?date=${d}`), GET('/api/tracking/drivers'), GET(`/api/analytics?from=${d}&to=${d}`),
+  const prm = new URLSearchParams(location.hash.split('?')[1] || '');
+  const admin = store.user.role === 'admin';
+  const fOff = admin ? prm.get('office_id') || '' : '';
+  const fCity = prm.get('city') || '';
+  const F = `&office_id=${fOff}&city=${encodeURIComponent(fCity)}`;
+  const [orders, routes, drivers, an, bd, offs] = await Promise.all([
+    GET(`/api/orders?date=${d}&limit=500${F}`), GET(`/api/routes?date=${d}&office_id=${fOff}`), GET(`/api/tracking/drivers?office_id=${fOff}`), GET(`/api/analytics?from=${d}&to=${d}${F}`),
+    GET(`/api/dashboard/breakdown?${F.slice(1)}`).catch(() => null), admin ? GET('/api/offices').catch(() => []) : Promise.resolve([]),
   ]);
+  const pct = (a, b) => (b ? fmtN((a / b) * 100, 0) + '%' : '—');
+  const bdRow = (x, attr) => {
+    const tot = (x.pendientes || 0) + (x.en_ruta || 0) + (x.entregados || 0) + (x.fallidos || 0);
+    return `<tr class="click" ${attr}><td><b>${esc(x.name || x.city)}</b>${x.cities ? `<br><small class="muted">${esc(x.cities)}</small>` : ''}</td><td class="r num">${fmtN(x.clientes)}</td><td class="r num">${fmtN(x.pendientes)}</td><td class="r num">${fmtN(x.en_ruta)}</td>
+      <td class="r num" style="color:var(--ok)"><b>${fmtN(x.entregados)}</b>${x.entregados_hoy ? `<br><small>+${x.entregados_hoy} hoy</small>` : ''}</td><td class="r num" style="color:var(--bad)">${fmtN(x.fallidos)}${x.fallidos_hoy ? `<br><small>+${x.fallidos_hoy} hoy</small>` : ''}</td>
+      <td style="min-width:110px"><div class="progress"><i style="width:${tot ? (x.entregados / tot) * 100 : 0}%;background:var(--ok)"></i></div><small class="muted">${pct(x.entregados, tot)} entregado</small></td></tr>`;
+  };
+  const bdHead = (first) => `<thead><tr><th>${first}</th><th class="r">Clientes</th><th class="r">Pendientes</th><th class="r">En ruta</th><th class="r">Entregados</th><th class="r">Fallidos</th><th>Avance</th></tr></thead>`;
   const c = (s) => orders.rows.filter((o) => s.includes(o.status)).length;
   const T = an.totals || {};
   const nDel = T.delivered || 0, nFail = T.failed || 0;
@@ -789,6 +803,12 @@ async function viewDashboard(v) {
   v.innerHTML = topbar(`${hr < 12 ? 'Buenos días' : hr < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${esc(firstName(store.user.name))}`,
     `<a class="btn" href="#/routes">${icon('route')} Planificar rutas</a><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`,
     `Resumen del ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}`) + `
+  <form class="row card" id="dashF" style="gap:8px;flex-wrap:wrap;padding:10px 14px;margin-bottom:12px">
+    ${admin && offs.length > 1 ? `<label class="row" style="gap:6px">${icon('building')}<select name="office_id"><option value="">Todas las oficinas</option>${offs.map((o) => `<option value="${o.id}" ${String(o.id) === fOff ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>` : ''}
+    <label class="row" style="gap:6px">${icon('live')}<select name="city"><option value="">Todas las ciudades</option>${(bd?.city_list || []).map((c) => `<option ${c.toLowerCase() === fCity.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+    ${fOff || fCity ? '<a class="btn sm ghost" href="#/dashboard">Quitar filtros</a>' : ''}
+    <small class="muted grow" style="text-align:right">${fOff || fCity ? `Viendo: ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : 'Viendo todo'}</small>
+  </form>
   <div class="grid g4">
     <div class="card kpi"><div class="label">Pedidos hoy</div><div class="value">${T.total || 0}</div><div class="sub">${c(['pendiente'])} sin ruta · programados o atendidos hoy</div></div>
     <div class="card kpi"><div class="label">En ruta</div><div class="value">${c(['asignado', 'cargado'])}</div><div class="sub">${c(['cargado'])} ya en vehículo</div></div>
@@ -807,6 +827,13 @@ async function viewDashboard(v) {
       <div class="card"><h2>Stock bajo</h2>${an.lowStock.length ? `<table><tbody>${an.lowStock.map((p) => `<tr><td>${esc(p.name)}<br><small class="muted">${esc(p.sku)}</small></td><td class="r num" style="color:var(--bad);font-weight:700">${p.stock}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Todo en orden ✅</p>'}</div>
     </div>
   </div>`;
+  if (bd) v.querySelector('.grid.g4').insertAdjacentHTML('afterend', `<div class="grid g2" style="margin-top:14px">
+    ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina')}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
+    <div class="card"><div class="row between"><h2>${icon('live')} Por ciudad</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Ciudad')}<tbody>${bd.cities.map((x) => bdRow(x, `data-city="${esc(x.city)}"`)).join('') || '<tr><td colspan="7" class="muted">Sin datos</td></tr>'}</tbody></table></div></div></div>`);
+  const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}`; };
+  $('#dashF').onchange = (e) => { const f = new FormData($('#dashF')); go(f.get('office_id') ?? '', e.target.name === 'office_id' ? '' : f.get('city') || ''); };
+  $$('[data-off]', v).forEach((tr) => (tr.onclick = () => admin && go(tr.dataset.off, '')));
+  $$('[data-city]', v).forEach((tr) => (tr.onclick = () => tr.dataset.city !== 'Sin ciudad' && go(null, tr.dataset.city)));
   $('#newOrder').onclick = () => orderForm(() => render());
   const map = makeMap($('#dmap'));
   const all = [depotLatLng()];
@@ -1947,8 +1974,8 @@ function stockBreakdown(bd) {
 function warehouseForm(w) {
   w = w || {};
   const m = modal(w.id ? `Editar ${w.name}` : 'Nueva oficina / almacén', `<form id="whF" class="stack">
-    <div class="grid g3"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Oficina Mexicali" /></label><label class="f">Ciudad que atiende<input name="city" value="${esc(w.city)}" placeholder="Mexicali" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
-    <small class="muted">Los clientes nuevos de esa ciudad quedan automáticamente en esta oficina.</small>
+    <div class="grid g3"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Oficina Mexicali" /></label><label class="f">Ciudades que atiende<input name="city" value="${esc(w.city)}" placeholder="Mexicali, San Luis Río Colorado" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
+    <small class="muted">Separa las ciudades con comas. Los clientes nuevos de esas ciudades quedan automáticamente en esta oficina.</small>
     <div class="grid g2"><label class="f">Domicilio de la oficina<div class="row"><input name="address" class="grow" value="${esc(w.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="whGeo">${icon('live')} Ubicar</button></div></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(w.phone)}" /></label></div>
     <small class="muted">Escribe el domicilio y toca <b>Ubicar</b>, o toca el mapa para fijar el punto exacto. Es la referencia de los mapas de esta oficina y el punto de salida de las rutas de sus repartidores.</small>
     <div id="whMap" class="map sm"></div><small class="muted num" id="whCoords">${w.lat ? `${w.lat.toFixed(5)}, ${w.lng.toFixed(5)}` : 'Sin ubicación'}</small>
