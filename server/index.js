@@ -1107,13 +1107,13 @@ function whBody(b) {
   const name = String(b.name || '').trim().slice(0, 80);
   if (!name) throw new HttpError(400, 'Escribe el nombre del almacén');
   const num = (x) => (x === '' || x == null || !Number.isFinite(Number(x)) ? null : Number(x));
-  return { name, address: String(b.address || '').trim().slice(0, 250) || null, lat: num(b.lat), lng: num(b.lng),
+  return { name, city: String(b.city || '').trim().slice(0, 80) || null, address: String(b.address || '').trim().slice(0, 250) || null, lat: num(b.lat), lng: num(b.lng),
     phone: String(b.phone || '').trim().slice(0, 30) || null, manager: String(b.manager || '').trim().slice(0, 80) || null };
 }
 app.post('/api/warehouses', auth('admin'), wrap((req, res) => {
   const b = whBody(req.body || {});
   try {
-    const id = Number(db.prepare('INSERT INTO warehouses (name, address, lat, lng, phone, manager) VALUES (?,?,?,?,?,?)').run(b.name, b.address, b.lat, b.lng, b.phone, b.manager).lastInsertRowid);
+    const id = Number(db.prepare('INSERT INTO warehouses (name, city, address, lat, lng, phone, manager) VALUES (?,?,?,?,?,?,?)').run(b.name, b.city, b.address, b.lat, b.lng, b.phone, b.manager).lastInsertRowid);
     audit(req, 'almacen.alta', b.name);
     res.status(201).json({ id });
   } catch (e) { if (String(e.message).includes('UNIQUE')) throw new HttpError(409, 'Ya existe un almacén con ese nombre'); throw e; }
@@ -1125,7 +1125,7 @@ app.put('/api/warehouses/:id', auth('admin'), wrap((req, res) => {
   const active = req.body.active === undefined ? w.active : req.body.active ? 1 : 0;
   if (!active && w.is_default) throw new HttpError(409, 'No puedes desactivar el almacén principal; primero marca otro como principal');
   tx(() => {
-    db.prepare('UPDATE warehouses SET name=?, address=?, lat=?, lng=?, phone=?, manager=?, active=? WHERE id=?').run(b.name, b.address, b.lat, b.lng, b.phone, b.manager, active, w.id);
+    db.prepare('UPDATE warehouses SET name=?, city=?, address=?, lat=?, lng=?, phone=?, manager=?, active=? WHERE id=?').run(b.name, b.city, b.address, b.lat, b.lng, b.phone, b.manager, active, w.id);
     if (req.body.is_default) {
       db.prepare('UPDATE warehouses SET is_default = (id = ?)').run(w.id);
       // el principal es el punto de salida por omisión de las rutas
@@ -1635,6 +1635,7 @@ app.get(
                           (SELECT 'Pedido ' || GROUP_CONCAT(tracking_code, ', ') FROM orders WHERE customer_id = c.id AND tracking_code LIKE ?)) match_txt`;
       margs.push(qs, `%${q}%`);
     }
+    if (req.query.office_id) { w = (w ? `WHERE (${w.slice(6)}) AND ` : 'WHERE ') + `${OFFICE_OF('c')} = ?`; args.push(Number(req.query.office_id)); }
     const total = db.prepare(`SELECT COUNT(*) c FROM customers c ${w}`).get(...args).c;
     const rows = db
       .prepare(
@@ -1643,17 +1644,73 @@ app.get(
            (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado','cargado','fallido')) active_orders,
            (SELECT o.status FROM orders o WHERE o.customer_id = c.id ORDER BY o.scheduled_date DESC, o.id DESC LIMIT 1) last_status,
            (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) driver_name
+, (SELECT name FROM warehouses WHERE id = ${OFFICE_OF('c')}) office_name
          FROM customers c ${w} ORDER BY c.name LIMIT ? OFFSET ?`
       )
       .all(...margs, ...args, limit, offset);
     res.json({ total, rows });
   })
 );
-const customerFields = ['name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
+const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
 const custVal = (b, f) => {
   if (f.startsWith('notify_')) return b[f] === undefined ? 1 : [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
+  if (f === 'office_id') return b[f] === '' || b[f] == null ? officeForCity(b.city) : Number(b[f]);
   return b[f] === '' || b[f] === undefined ? null : f === 'lat' || f === 'lng' ? Number(b[f]) : b[f];
 };
+// Oficina que atiende una ciudad (si no hay, queda en la principal)
+function officeForCity(city) {
+  const c = String(city || '').trim().toLowerCase();
+  if (!c) return null;
+  return db.prepare('SELECT id FROM warehouses WHERE active = 1 AND lower(TRIM(city)) = ? ORDER BY is_default DESC LIMIT 1').get(c)?.id ?? null;
+}
+const OFFICE_OF = (alias) => `COALESCE(${alias}.office_id, (SELECT id FROM warehouses WHERE is_default = 1))`;
+
+// ---------- Oficinas foráneas por ciudad ----------
+app.get('/api/offices', auth(...STAFF), wrap((req, res) => {
+  const now = new Date(); const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const rows = db.prepare(`SELECT w.*,
+      (SELECT COUNT(*) FROM serials s WHERE s.warehouse_id = w.id AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado')) units,
+      (SELECT COUNT(*) FROM customers c WHERE ${OFFICE_OF('c')} = w.id) customers,
+      (SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${OFFICE_OF('c')} = w.id AND o.status IN ('pendiente','asignado','cargado','fallido')) open_orders,
+      (SELECT COUNT(*) FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${OFFICE_OF('c')} = w.id AND o.status = 'entregado' AND strftime('%Y-%m', o.delivered_at, 'localtime') = ?) delivered_month,
+      (SELECT COUNT(*) FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = w.id) staff
+    FROM warehouses w ORDER BY w.active DESC, w.is_default DESC, w.city, w.name`).all(month);
+  res.json(rows);
+}));
+app.get('/api/offices/:id', auth(...STAFF), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
+  if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  const inventory = db.prepare(`SELECT p.id, p.name, p.sku, COUNT(*) n, SUM(s.order_id IS NOT NULL) reserved FROM serials s JOIN products p ON p.id = s.product_id
+    WHERE s.warehouse_id = ? AND s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') GROUP BY p.id ORDER BY p.name`).all(w.id);
+  const plain = w.is_default ? db.prepare('SELECT id, name, sku FROM products WHERE serialized = 0 ORDER BY name').all().map((p) => ({ ...p, n: warehouseQty(p.id) })).filter((p) => p.n > 0) : [];
+  const staff = db.prepare(`SELECT u.id, u.name, u.role, u.phone, u.vehicle, u.office_id,
+      (SELECT COUNT(*) FROM serials s WHERE s.holder_id = u.id AND s.status IN ('disponible','asignado')) + (SELECT COALESCE(SUM(qty),0) FROM driver_stock d WHERE d.user_id = u.id) holding
+    FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = ? ORDER BY u.role, u.name`).all(w.id);
+  res.json({ ...w, inventory, plain, staff });
+}));
+// Pasar clientes o personal a una oficina
+app.post('/api/offices/:id/customers', auth(...STAFF), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id = ? AND active = 1').get(req.params.id);
+  if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  if (!ids.length) throw new HttpError(400, 'Elige los clientes');
+  const up = db.prepare('UPDATE customers SET office_id = ? WHERE id = ?');
+  let n = 0;
+  tx(() => { for (const id of ids) n += Number(up.run(w.id, id).changes); });
+  audit(req, 'oficina.clientes', `${n} clientes → ${w.name}`);
+  res.json({ moved: n });
+}));
+app.post('/api/offices/:id/staff', auth('admin'), wrap((req, res) => {
+  const w = db.prepare('SELECT * FROM warehouses WHERE id = ? AND active = 1').get(req.params.id);
+  if (!w) throw new HttpError(404, 'Oficina no encontrada');
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter(Boolean);
+  if (!ids.length) throw new HttpError(400, 'Elige al personal');
+  const up = db.prepare('UPDATE users SET office_id = ? WHERE id = ?');
+  let n = 0;
+  tx(() => { for (const id of ids) n += Number(up.run(w.id, id).changes); });
+  audit(req, 'oficina.personal', `${n} personas → ${w.name}`);
+  res.json({ moved: n });
+}));
 app.post(
   '/api/customers',
   auth(...STAFF), // los clientes los registra el despacho; el repartidor solo busca y entrega
@@ -1967,6 +2024,7 @@ app.get(
       args.push(route_id);
     }
     if (unrouted === '1') where.push('o.route_id IS NULL');
+    if (req.query.office_id) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(req.query.office_id)); }
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {

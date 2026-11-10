@@ -475,5 +475,18 @@ if (!db.prepare('SELECT 1 FROM warehouses LIMIT 1').get()) {
     .run(g('depot_name') || 'Almacén central', Number(g('depot_lat')) || null, Number(g('depot_lng')) || null).lastInsertRowid);
   db.prepare('UPDATE serials SET warehouse_id=? WHERE warehouse_id IS NULL').run(id);
 }
+// Oficinas foráneas por ciudad: cada almacén es la oficina de una ciudad, con sus clientes finales y su personal
+addCols('warehouses', [['city', 'TEXT']]);
+addCols('customers', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
+addCols('users', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
+if (!db.prepare("SELECT 1 FROM settings WHERE key='offices_migrated'").get()) {
+  // el principal toma la ciudad más común de los clientes; los demás, su propio nombre
+  const top = db.prepare("SELECT city FROM customers WHERE TRIM(COALESCE(city,'')) <> '' GROUP BY lower(TRIM(city)) ORDER BY COUNT(*) DESC LIMIT 1").get();
+  db.prepare("UPDATE warehouses SET city = ? WHERE is_default = 1 AND (city IS NULL OR city = '')").run(top ? top.city.trim() : null);
+  db.prepare("UPDATE warehouses SET city = name WHERE is_default = 0 AND (city IS NULL OR city = '')").run();
+  db.prepare(`UPDATE customers SET office_id = (SELECT w.id FROM warehouses w WHERE w.active = 1 AND lower(TRIM(w.city)) = lower(TRIM(customers.city)) ORDER BY w.is_default DESC LIMIT 1)
+    WHERE office_id IS NULL`).run();
+  db.prepare("INSERT INTO settings (key, value) VALUES ('offices_migrated', '1')").run();
+}
 
 module.exports = { db, tx, getSettings, DATA_DIR, UPLOAD_DIR };

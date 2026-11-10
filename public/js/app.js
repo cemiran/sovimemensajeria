@@ -717,7 +717,7 @@ function viewForcePassword() {
 // ================= Shell =================
 const NAV_GROUPS = [
   ['Operación', [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['live', 'Mapa en vivo', 'live'], ['receipts', 'Recepciones', 'sign'], ['messages', 'Mensajes', 'chat']]],
-  ['Catálogos', [['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
+  ['Catálogos', [['offices', 'Oficinas', 'building'], ['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
@@ -817,7 +817,8 @@ async function viewOrders(v) {
   const date = p.get('date') ?? today();
   const q = p.get('q') || '';
   const acc = p.get('account_id') || '';
-  const [data, accs] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}`), GET('/api/accounts').catch(() => ({ rows: [] }))]);
+  const off = p.get('office_id') || '';
+  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
@@ -825,6 +826,7 @@ async function viewOrders(v) {
       <input type="date" name="date" value="${esc(date)}" style="max-width:170px" />
       <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
+      ${offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
     </form>
@@ -993,6 +995,10 @@ async function orderForm(done) {
 // ================= Clientes =================
 function customerForm(c, done) {
   c = c || {};
+  GET('/api/warehouses').then((ws) => {
+    const sel = document.querySelector('#cfOff');
+    if (sel) sel.insertAdjacentHTML('beforeend', ws.filter((w) => w.active || w.id === c.office_id).map((w) => `<option value="${w.id}" ${w.id === c.office_id ? 'selected' : ''}>${esc(w.name)}${w.city ? ' · ' + esc(w.city) : ''}</option>`).join(''));
+  }).catch(() => {});
   const m = modal(c.id ? 'Editar cliente' : 'Registrar cliente final', `
     <form id="cf" class="stack">
       <div class="grid g2">
@@ -1007,6 +1013,7 @@ function customerForm(c, done) {
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
       <div class="grid g3">
         <label class="f">Ciudad<input name="city" value="${esc(c.city || SETTINGS.default_city || 'Tijuana')}" /></label>
+        <label class="f">Oficina que lo atiende<select name="office_id" id="cfOff"><option value="">Según la ciudad</option></select></label>
         <label class="f">C.P.<input name="zip" value="${esc(c.zip)}" /></label>
         <label class="f">Referencias<input name="reference" value="${esc(c.reference)}" placeholder="Portón azul…" /></label>
       </div>
@@ -1098,8 +1105,10 @@ function customerForm(c, done) {
 
 async function viewCustomers(v) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
-  const r = await GET('/api/customers?limit=300&q=' + encodeURIComponent(q));
+  const offF = new URLSearchParams(location.hash.split('?')[1] || '').get('office_id') || '';
+  const r = await GET(`/api/customers?limit=300&q=${encodeURIComponent(q)}&office_id=${offF}`);
   const staffC = store.user.role !== 'repartidor';
+  const offList = staffC ? await GET('/api/warehouses').catch(() => []) : [];
   const geoSt = staffC ? await GET('/api/customers/geocode').catch(() => null) : null;
   const pend = geoSt ? (geoSt.stats.pendiente || 0) : 0;
   const notFound = geoSt ? (geoSt.stats.no_encontrada || 0) : 0;
@@ -1107,13 +1116,13 @@ async function viewCustomers(v) {
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
-    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" /><button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
+    <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
       ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
-  $('#cq').onsubmit = (e) => { e.preventDefault(); location.hash = '#/customers?q=' + encodeURIComponent(e.target.q.value); };
+  $('#cq').onsubmit = (e) => { e.preventDefault(); location.hash = `#/customers?q=${encodeURIComponent(e.target.q.value)}&office_id=${e.target.office_id?.value || ''}`; };
   $('#newC').onclick = () => customerForm(null, () => render());
   $('#impC')?.addEventListener('click', importCustomers);
   if (staffC) bulkAssign(v, 'customers');
@@ -1925,8 +1934,9 @@ function stockBreakdown(bd) {
 }
 function warehouseForm(w) {
   w = w || {};
-  const m = modal(w.id ? `Editar ${w.name}` : 'Nuevo almacén', `<form id="whF" class="stack">
-    <div class="grid g2"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Almacén Otay" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
+  const m = modal(w.id ? `Editar ${w.name}` : 'Nueva oficina / almacén', `<form id="whF" class="stack">
+    <div class="grid g3"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Oficina Mexicali" /></label><label class="f">Ciudad que atiende<input name="city" value="${esc(w.city)}" placeholder="Mexicali" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
+    <small class="muted">Los clientes nuevos de esa ciudad quedan automáticamente en esta oficina.</small>
     <div class="grid g2"><label class="f">Dirección<input name="address" value="${esc(w.address)}" /></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(w.phone)}" /></label></div>
     <small class="muted">Toca el mapa para fijar la ubicación: las rutas que salgan de este almacén se calculan desde ahí.</small>
     <div id="whMap" class="map sm"></div><small class="muted num" id="whCoords">${w.lat ? `${w.lat.toFixed(5)}, ${w.lng.toFixed(5)}` : 'Sin ubicación'}</small>
@@ -2012,6 +2022,133 @@ async function transferDialog(whs, fromId) {
   };
   load(); hist();
 }
+// ================= Oficinas foráneas por ciudad =================
+async function viewOffices(v) {
+  const offs = await GET('/api/offices');
+  const admin = store.user.role === 'admin';
+  v.innerHTML = topbar('Oficinas', `${offs.filter((o) => o.active).length > 1 ? `<button class="btn" id="ofXfer">${icon('truck')} Traspaso entre oficinas</button>` : ''}${admin ? `<button class="btn primary" id="ofNew">${icon('plus')} Nueva oficina</button>` : ''}`,
+    'Cada oficina atiende una ciudad: tiene su inventario, sus clientes finales y su personal.') + `
+  <div class="grid g3">${offs.map((o) => `<a class="card kpi-btn" href="#/offices/${o.id}" style="text-align:left;padding:14px;text-decoration:none;color:inherit;${o.active ? '' : 'opacity:.55'}">
+      <div class="row between"><b style="font-size:17px">${esc(o.name)}</b>${o.is_default ? '<span class="chip ok">Principal</span>' : ''}${o.active ? '' : '<span class="chip off">Inactiva</span>'}</div>
+      <small class="muted">${icon('live')} ${esc(o.city || 'Sin ciudad')}${o.manager ? ' · ' + esc(o.manager) : ''}</small>
+      <div class="grid g2" style="margin-top:10px;gap:8px">
+        <div><small class="muted">Equipos</small><div class="num" style="font-size:20px;font-weight:700">${fmtN(o.units)}</div></div>
+        <div><small class="muted">Clientes</small><div class="num" style="font-size:20px;font-weight:700">${fmtN(o.customers)}</div></div>
+        <div><small class="muted">Pedidos abiertos</small><div class="num" style="font-size:20px;font-weight:700;color:${o.open_orders ? 'var(--warn)' : 'inherit'}">${fmtN(o.open_orders)}</div></div>
+        <div><small class="muted">Entregados este mes</small><div class="num" style="font-size:20px;font-weight:700;color:var(--ok)">${fmtN(o.delivered_month)}</div></div>
+      </div>
+      <small class="muted">${icon('users')} ${o.staff} persona${o.staff === 1 ? '' : 's'} · ver oficina ›</small></a>`).join('')}</div>`;
+  $('#ofNew')?.addEventListener('click', () => warehouseForm(null));
+  $('#ofXfer')?.addEventListener('click', async () => transferDialog(await GET('/api/warehouses')));
+}
+
+async function viewOffice(v, id) {
+  const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'inv';
+  const [o, whs] = await Promise.all([GET('/api/offices/' + id), GET('/api/warehouses')]);
+  const admin = store.user.role === 'admin';
+  const others = whs.filter((w) => w.active && w.id !== id);
+  const tabs = [['inv', 'Inventario', 'inv'], ['cli', 'Clientes', 'person'], ['ped', 'Pedidos', 'box'], ['per', 'Personal', 'users']];
+  v.innerHTML = topbar(esc(o.name), `<a class="btn" href="#/offices">‹ Oficinas</a>${others.length ? `<button class="btn" id="ofX">${icon('truck')} Traspaso</button>` : ''}${admin ? `<button class="btn" id="ofEd">${icon('cog')} Editar</button>` : ''}`,
+    `${o.city ? 'Atiende ' + esc(o.city) : 'Sin ciudad asignada'}${o.address ? ' · ' + esc(o.address) : ''}${o.manager ? ' · Encargado: ' + esc(o.manager) : ''}${o.phone ? ' · ' + esc(o.phone) : ''}`) + `
+  <div class="row" style="gap:6px;margin-bottom:12px;flex-wrap:wrap">${tabs.map(([k, l, i]) => `<a class="btn ${k === tab ? 'primary' : ''}" href="#/offices/${id}?tab=${k}">${icon(i)} ${l}</a>`).join('')}</div>
+  <div id="ofBody"><div class="card">Cargando…</div></div>`;
+  $('#ofEd')?.addEventListener('click', () => warehouseForm(whs.find((w) => w.id === id)));
+  $('#ofX')?.addEventListener('click', () => transferDialog(whs, id));
+  const body = $('#ofBody');
+
+  if (tab === 'inv') {
+    const list = await GET(`/api/warehouses/${id}/serials`);
+    const tot = o.inventory.reduce((a, x) => a + x.n, 0);
+    body.innerHTML = `<div class="grid g-main">
+      <div class="card"><div class="row between"><h2>Existencias</h2><small class="muted">${fmtN(tot)} equipos con S/N</small></div>
+        <div class="table-wrap"><table><thead><tr><th>Producto</th><th class="r">En oficina</th><th class="r">Apartados en pedido</th><th class="r">Libres</th></tr></thead><tbody>
+        ${o.inventory.map((p) => `<tr><td><b>${esc(p.name)}</b><br><small class="muted">${esc(p.sku || '')}</small></td><td class="r num"><b>${p.n}</b></td><td class="r num">${p.reserved}</td><td class="r num" style="color:var(--ok)">${p.n - p.reserved}</td></tr>`).join('')
+          + o.plain.map((p) => `<tr><td><b>${esc(p.name)}</b><br><small class="muted">${esc(p.sku || '')} · sin S/N</small></td><td class="r num"><b>${p.n}</b></td><td class="r num">—</td><td class="r num">—</td></tr>`).join('')
+          || '<tr><td colspan="4" class="muted">Esta oficina no tiene inventario. Usa <b>Traspaso</b> para enviarle equipos desde otra oficina.</td></tr>'}</tbody></table></div></div>
+      <div class="card"><div class="row between"><h2>Números de serie</h2><small class="muted">${list.length}</small></div>
+        <input id="ofSnQ" placeholder="Buscar S/N, producto o pedido" style="margin-bottom:8px" />
+        <div class="table-wrap" style="max-height:520px"><table><tbody>${list.map((s) => `<tr data-r="${esc((s.serial + ' ' + s.product_name + ' ' + (s.tracking_code || '')).toLowerCase())}"><td class="mono">${esc(s.serial)}</td><td><small>${esc(s.product_name)}</small></td><td><small class="muted">${s.tracking_code ? 'Pedido ' + esc(s.tracking_code) : 'Libre'}</small></td></tr>`).join('') || '<tr><td class="muted">Sin equipos</td></tr>'}</tbody></table></div></div></div>`;
+    $('#ofSnQ').oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-r]', body).forEach((r) => (r.hidden = !!q && !r.dataset.r.includes(q))); };
+  }
+
+  if (tab === 'cli') {
+    const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
+    const r = await GET(`/api/customers?limit=500&office_id=${id}&q=${encodeURIComponent(q)}`);
+    body.innerHTML = `<div class="card">
+      <form class="row" id="ofCq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" class="grow" placeholder="Número de serie o número de pedido (o nombre, teléfono)" /><button class="btn">Buscar</button>
+        <button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button><button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
+      <small class="muted">${r.total} clientes finales${q ? ' coinciden' : ' en esta oficina'}</small>
+      <div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Teléfonos</th><th>Dirección</th><th class="r">Pedidos activos</th></tr></thead><tbody>
+      ${r.rows.map((c) => `<tr class="click" data-c="${c.id}"><td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}</td>
+        <td><small>${esc(c.phone || '')}${c.phone_alt ? '<br>' + esc(c.phone_alt) : ''}${c.external_id ? '<br>Telnor ' + esc(c.external_id) : ''}</small></td><td><small>${esc(c.address || '')}${c.city ? ', ' + esc(c.city) : ''}</small></td><td class="r num">${c.active_orders || ''}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Sin clientes.</td></tr>'}
+      </tbody></table></div></div>`;
+    $('#ofCq').onsubmit = (e) => { e.preventDefault(); location.hash = `#/offices/${id}?tab=cli&q=${encodeURIComponent(e.target.q.value)}`; };
+    $$('[data-c]', body).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.c), () => render())));
+    $('#ofNewC').onclick = () => customerForm({ office_id: id, city: o.city || '' }, () => render());
+    $('#ofAddC').onclick = () => officeMoveCustomers(o);
+  }
+
+  if (tab === 'ped') {
+    const r = await GET(`/api/orders?limit=300&date=&office_id=${id}&status=pendiente,asignado,cargado,fallido`);
+    body.innerHTML = `<div class="card"><div class="row between"><h2>Pedidos abiertos</h2><a class="btn sm" href="#/orders?date=&office_id=${id}">Ver todos en Pedidos ›</a></div>
+      <div class="table-wrap"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th>Repartidor</th><th>Estado</th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr class="click" data-o="${x.id}"><td><b>${esc(x.tracking_code)}</b>${x.sn_list ? `<br><small class="mono muted">S/N ${esc(x.sn_list)}</small>` : ''}</td><td>${esc(x.customer_name)}<br><small class="muted">${esc(x.address || '')}</small></td><td>${esc(x.scheduled_date || '')}${x.appointment_time ? ' ' + esc(x.appointment_time) : ''}</td><td>${esc(x.driver_name || '—')}</td><td>${badge(x.status)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No hay pedidos abiertos en esta oficina.</td></tr>'}
+      </tbody></table></div></div>`;
+    $$('[data-o]', body).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.o)));
+  }
+
+  if (tab === 'per') {
+    body.innerHTML = `<div class="card"><div class="row between"><h2>Personal de la oficina</h2>${admin ? `<button class="btn primary" id="ofAddP">${icon('plus')} Asignar personal</button>` : ''}</div>
+      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Puesto</th><th>Teléfono</th><th>Vehículo</th><th class="r">Trae (unidades)</th></tr></thead><tbody>
+      ${o.staff.map((u) => `<tr><td><b>${esc(u.name)}</b>${u.office_id ? '' : ' <small class="muted">(sin oficina: principal)</small>'}</td><td>${esc(ROLE[u.role] || u.role)}</td><td>${esc(u.phone || '')}</td><td>${esc(u.vehicle || '')}</td><td class="r num">${u.holding || ''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin personal asignado.</td></tr>'}
+      </tbody></table></div></div>`;
+    $('#ofAddP')?.addEventListener('click', () => officeAssignStaff(o));
+  }
+}
+
+function officeMoveCustomers(o) {
+  const m = modal(`Pasar clientes a ${o.name}`, `<div class="stack">
+    <div class="row"><input id="omQ" class="grow" placeholder="Buscar por S/N, pedido, nombre, teléfono o ciudad" autocomplete="off" /><button class="btn sm" id="omAll">Seleccionar todo</button></div>
+    <div id="omList" class="table-wrap" style="max-height:380px"><p class="muted">Escribe para buscar.</p></div></div>`,
+    { wide: true, footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="omGo">Pasar a esta oficina</button>' });
+  const picked = new Set();
+  let t;
+  const search = async () => {
+    const q = $('#omQ', m.el).value.trim();
+    if (q.length < 2) return;
+    const r = await GET('/api/customers?limit=200&q=' + encodeURIComponent(q));
+    const rows = r.rows.filter((c) => c.office_name !== o.name);
+    $('#omList', m.el).innerHTML = rows.length ? `<table><tbody>${rows.map((c) => `<tr><td style="width:30px"><input type="checkbox" data-mc="${c.id}" ${picked.has(c.id) ? 'checked' : ''} /></td><td><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.city ? ', ' + esc(c.city) : ''}</small></td><td><small class="muted">Hoy en: ${esc(c.office_name || '—')}</small></td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nada que pasar con esa búsqueda.</p>';
+    $$('[data-mc]', m.el).forEach((c) => (c.onchange = () => { c.checked ? picked.add(Number(c.dataset.mc)) : picked.delete(Number(c.dataset.mc)); $('#omGo', m.el).textContent = `Pasar ${picked.size} a esta oficina`; }));
+  };
+  $('#omQ', m.el).oninput = () => { clearTimeout(t); t = setTimeout(search, 350); };
+  $('#omAll', m.el).onclick = () => { $$('[data-mc]', m.el).forEach((c) => { c.checked = true; picked.add(Number(c.dataset.mc)); }); $('#omGo', m.el).textContent = `Pasar ${picked.size} a esta oficina`; };
+  $('#omGo', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    if (!picked.size) return toast('Marca los clientes', 'bad');
+    if (!(await confirmDlg(`¿Pasar ${picked.size} cliente(s) a ${o.name}?`))) return;
+    btn.disabled = true;
+    try { const r = await POST(`/api/offices/${o.id}/customers`, { ids: [...picked] }); toast(`${r.moved} clientes pasados a ${o.name}`, 'ok'); m.close(); render(); }
+    catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
+}
+
+async function officeAssignStaff(o) {
+  const ur = await GET('/api/users?limit=500'); const users = Array.isArray(ur) ? ur : ur.rows || [];
+  const cur = new Set(o.staff.filter((u) => u.office_id === o.id).map((u) => u.id));
+  const list = users.filter((u) => u.active && !cur.has(u.id));
+  const m = modal(`Asignar personal a ${o.name}`, list.length ? `<div class="table-wrap" style="max-height:400px"><table><tbody>${list.map((u) => `<tr><td style="width:30px"><input type="checkbox" data-su="${u.id}" /></td><td><b>${esc(u.name)}</b><br><small class="muted">${esc(ROLE[u.role] || u.role)}${u.vehicle ? ' · ' + esc(u.vehicle) : ''}</small></td></tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted">Todo el personal activo ya está en esta oficina.</p>', { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="suGo">Asignar</button>' });
+  $('#suGo', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    const ids = $$('[data-su]:checked', m.el).map((c) => Number(c.dataset.su));
+    if (!ids.length) return toast('Marca al personal', 'bad');
+    btn.disabled = true;
+    try { const r = await POST(`/api/offices/${o.id}/staff`, { ids }); toast(`${r.moved} persona(s) asignadas a ${o.name}`, 'ok'); m.close(); render(); }
+    catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
+}
+
 async function warehouseDetail(id, whs) {
   const w = whs.find((x) => x.id === id);
   const list = await GET(`/api/warehouses/${id}/serials`);
@@ -4563,7 +4700,7 @@ async function render() {
   const driver = store.user.role === 'repartidor';
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
-    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());
