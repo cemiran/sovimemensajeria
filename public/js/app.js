@@ -191,9 +191,10 @@ const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin"
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
 
-function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null } = {}) {
+function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null, depotLL = null } = {}) {
   const pts = [];
-  if (depot) { L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name)); pts.push(depotLatLng()); }
+  const dll = depotLL && depotLL[0] != null ? depotLL : depotLatLng();
+  if (depot) { L.marker(dll, { icon: depotIcon() }).addTo(map).bindPopup(depotLL ? 'Punto de salida' : esc(SETTINGS.depot_name)); pts.push(dll); }
   for (const s of stops) {
     if (s.lat == null) continue;
     const ll = [s.lat, s.lng];
@@ -1258,7 +1259,7 @@ async function routeDetail(id) {
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
-  drawRoute(map, r.stops, undefined, { onEdit: () => { m.el.remove(); routeDetail(r.id); } });
+  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null, onEdit: () => { m.el.remove(); routeDetail(r.id); } });
   if (r.last_lat) L.marker([r.last_lat, r.last_lng], { icon: truckIcon() }).addTo(map).bindPopup('Última posición ' + fmtDT(r.last_seen));
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
@@ -1948,8 +1949,8 @@ function warehouseForm(w) {
   const m = modal(w.id ? `Editar ${w.name}` : 'Nueva oficina / almacén', `<form id="whF" class="stack">
     <div class="grid g3"><label class="f">Nombre *<input name="name" required value="${esc(w.name)}" placeholder="Oficina Mexicali" /></label><label class="f">Ciudad que atiende<input name="city" value="${esc(w.city)}" placeholder="Mexicali" /></label><label class="f">Encargado<input name="manager" value="${esc(w.manager)}" /></label></div>
     <small class="muted">Los clientes nuevos de esa ciudad quedan automáticamente en esta oficina.</small>
-    <div class="grid g2"><label class="f">Dirección<input name="address" value="${esc(w.address)}" /></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(w.phone)}" /></label></div>
-    <small class="muted">Toca el mapa para fijar la ubicación: las rutas que salgan de este almacén se calculan desde ahí.</small>
+    <div class="grid g2"><label class="f">Domicilio de la oficina<div class="row"><input name="address" class="grow" value="${esc(w.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="whGeo">${icon('live')} Ubicar</button></div></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(w.phone)}" /></label></div>
+    <small class="muted">Escribe el domicilio y toca <b>Ubicar</b>, o toca el mapa para fijar el punto exacto. Es la referencia de los mapas de esta oficina y el punto de salida de las rutas de sus repartidores.</small>
     <div id="whMap" class="map sm"></div><small class="muted num" id="whCoords">${w.lat ? `${w.lat.toFixed(5)}, ${w.lng.toFixed(5)}` : 'Sin ubicación'}</small>
     <input type="hidden" name="lat" value="${w.lat ?? ''}" /><input type="hidden" name="lng" value="${w.lng ?? ''}" />
     ${w.id ? `<label class="row"><input type="checkbox" name="is_default" ${w.is_default ? 'checked disabled' : ''} /> Almacén principal (punto de salida por omisión)</label>
@@ -1958,7 +1959,17 @@ function warehouseForm(w) {
   const f = $('#whF', m.el);
   const map = makeMap($('#whMap', m.el), w.lat ? [w.lat, w.lng] : null, w.lat ? 15 : 12);
   let mk = w.lat ? L.marker([w.lat, w.lng]).addTo(map) : null;
-  map.on('click', (e) => { f.lat.value = e.latlng.lat.toFixed(6); f.lng.value = e.latlng.lng.toFixed(6); $('#whCoords', m.el).textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`; if (mk) mk.setLatLng(e.latlng); else mk = L.marker(e.latlng).addTo(map); });
+  const setWh = (ll, zoom) => { f.lat.value = ll.lat.toFixed(6); f.lng.value = ll.lng.toFixed(6); $('#whCoords', m.el).textContent = `${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}`; if (mk) mk.setLatLng(ll); else mk = L.marker(ll).addTo(map); if (zoom) map.setView(ll, 16); };
+  map.on('click', (e) => setWh(e.latlng));
+  $('#whGeo', m.el).onclick = async () => {
+    const q = [f.address.value, f.city.value, 'Baja California'].filter((x) => String(x).trim()).join(', ');
+    if (!f.address.value.trim()) return toast('Escribe el domicilio', 'bad');
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=mx&q=' + encodeURIComponent(q)).then((r) => r.json());
+      if (r[0]) { setWh({ lat: Number(r[0].lat), lng: Number(r[0].lon) }, true); toast('Ubicado: revisa el punto y ajústalo tocando el mapa si hace falta', 'ok'); }
+      else toast('No se encontró el domicilio: toca el mapa para marcarlo', 'bad');
+    } catch { toast('Geocodificador no disponible: toca el mapa para marcarlo', 'bad'); }
+  };
   setTimeout(() => map.invalidateSize(), 200);
   $('#whSave', m.el).onclick = async () => {
     if (!f.reportValidity()) return;
@@ -2045,6 +2056,7 @@ async function viewOffices(v) {
   <div class="grid g3">${offs.map((o) => `<a class="card kpi-btn" href="#/offices/${o.id}" style="text-align:left;padding:14px;text-decoration:none;color:inherit;${o.active ? '' : 'opacity:.55'}">
       <div class="row between"><b style="font-size:17px">${esc(o.name)}</b>${o.is_default ? '<span class="chip ok">Principal</span>' : ''}${o.active ? '' : '<span class="chip off">Inactiva</span>'}</div>
       <small class="muted">${icon('live')} ${esc(o.city || 'Sin ciudad')}${o.manager ? ' · ' + esc(o.manager) : ''}</small>
+      <br><small class="muted">${o.address ? esc(o.address) : ''}${o.lat ? '' : `${o.address ? ' · ' : ''}<span style="color:var(--warn)">sin ubicación en el mapa</span>`}</small>
       <div style="margin-top:6px">${o.supervisor_name ? `<span class="chip ok">${icon('shield')} Supervisor: ${esc(o.supervisor_name)}</span>` : '<span class="chip warn">Sin supervisor operativo</span>'}</div>
       <div class="grid g2" style="margin-top:10px;gap:8px">
         <div><small class="muted">Equipos</small><div class="num" style="font-size:20px;font-weight:700">${fmtN(o.units)}</div></div>
@@ -2062,7 +2074,7 @@ async function viewOffice(v, id) {
   const [o, whs] = await Promise.all([GET('/api/offices/' + id), GET('/api/warehouses')]);
   const admin = store.user.role === 'admin';
   const others = whs.filter((w) => w.active && w.id !== id);
-  const tabs = [['inv', 'Inventario', 'inv'], ['cli', 'Clientes', 'person'], ['ped', 'Pedidos', 'box'], ['per', 'Personal', 'users']];
+  const tabs = [['inv', 'Inventario', 'inv'], ['map', 'Mapa', 'live'], ['cli', 'Clientes', 'person'], ['ped', 'Pedidos', 'box'], ['per', 'Personal', 'users']];
   v.innerHTML = topbar(esc(o.name), `<a class="btn" href="#/offices">‹ Oficinas</a>${others.length ? `<button class="btn" id="ofX">${icon('truck')} Traspaso</button>` : ''}${admin ? `<button class="btn" id="ofEd">${icon('cog')} Editar</button>` : ''}`,
     `${o.city ? 'Atiende ' + esc(o.city) : 'Sin ciudad asignada'}${o.address ? ' · ' + esc(o.address) : ''}${o.manager ? ' · Encargado: ' + esc(o.manager) : ''}${o.phone ? ' · ' + esc(o.phone) : ''}`) + `
   <div class="card row between" style="margin-bottom:12px;padding:10px 14px"><span>${icon('shield')} <b>Supervisor operativo:</b> ${o.supervisor_name ? esc(o.supervisor_name) : '<span style="color:var(--warn)">sin asignar</span>'}</span>${admin ? `<button class="btn sm" id="ofSup">${o.supervisor_name ? 'Cambiar' : 'Asignar supervisor'}</button>` : ''}</div>
@@ -2086,6 +2098,24 @@ async function viewOffice(v, id) {
         <input id="ofSnQ" placeholder="Buscar S/N, producto o pedido" style="margin-bottom:8px" />
         <div class="table-wrap" style="max-height:520px"><table><tbody>${list.map((s) => `<tr data-r="${esc((s.serial + ' ' + s.product_name + ' ' + (s.tracking_code || '')).toLowerCase())}"><td class="mono">${esc(s.serial)}</td><td><small>${esc(s.product_name)}</small></td><td><small class="muted">${s.tracking_code ? 'Pedido ' + esc(s.tracking_code) : 'Libre'}</small></td></tr>`).join('') || '<tr><td class="muted">Sin equipos</td></tr>'}</tbody></table></div></div></div>`;
     $('#ofSnQ').oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-r]', body).forEach((r) => (r.hidden = !!q && !r.dataset.r.includes(q))); };
+  }
+
+  if (tab === 'map') {
+    const r = await GET(`/api/customers?limit=500&office_id=${id}`);
+    const pts = r.rows.filter((c) => c.lat != null);
+    const act = pts.filter((c) => c.active_orders).length;
+    body.innerHTML = `<div class="card">
+      ${o.lat ? '' : `<div class="offline-bar row between"><span>Esta oficina no tiene ubicación: el mapa usa la principal como referencia.</span>${admin ? '<button class="btn sm" id="ofLoc">Fijar domicilio</button>' : ''}</div>`}
+      <div class="row between" style="margin-bottom:8px"><b>${icon('building')} ${esc(o.name)}${o.address ? ' · ' + esc(o.address) : ''}</b><small class="muted">${pts.length} clientes en el mapa · ${act} con pedido activo${r.total - pts.length ? ` · ${r.total - pts.length} sin ubicar` : ''}</small></div>
+      <div id="ofMap" class="map tall"></div>
+      <div class="legend" style="margin-top:8px"><span><i style="background:#1f2a44"></i>Oficina</span><span><i style="background:#e5612a"></i>Con pedido activo</span><span><i style="background:#1d5a96"></i>Sin pedido activo</span></div></div>`;
+    $('#ofLoc')?.addEventListener('click', () => warehouseForm(whs.find((w) => w.id === id)));
+    const ref = o.lat ? [o.lat, o.lng] : depotLatLng();
+    const map = makeMap($('#ofMap'), ref, 13);
+    if (o.lat) L.marker(ref, { icon: depotIcon() }).addTo(map).bindPopup(`<b>${esc(o.name)}</b><br>${esc(o.address || '')}`).openPopup();
+    pts.forEach((c) => L.circleMarker([c.lat, c.lng], { radius: 6, color: c.active_orders ? '#e5612a' : '#1d5a96', fillOpacity: 0.7 }).addTo(map)
+      .bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address || '')}${c.active_orders ? `<br>${c.active_orders} pedido(s) activo(s)` : ''}`));
+    if (pts.length) map.fitBounds([ref, ...pts.map((c) => [c.lat, c.lng])], { padding: [24, 24], maxZoom: 15 });
   }
 
   if (tab === 'cli') {
@@ -4487,7 +4517,7 @@ async function viewMyRoute(v) {
   }).join('')}</div>`;
   paintGps();
   const map = makeMap($('#mymap'));
-  drawRoute(map, r.stops);
+  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null });
   let meMk = null;
   const showMe = (p) => { if (!$('#mymap')) return gpsListeners.delete(showMe); if (meMk) meMk.setLatLng([p.lat, p.lng]); else meMk = L.marker([p.lat, p.lng], { icon: meIcon(), zIndexOffset: 1000 }).addTo(map); };
   if (GPS.last) showMe(GPS.last);

@@ -1425,7 +1425,7 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
     const s = getSettings();
     const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(me, today());
     const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
-    persistRoute({ routeId: r?.id, name: `Ruta ${req.user.name || ''} ${today()}`.trim(), driverId: me, date: today(), depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}), orderIds: [...keep, oid], settings: s });
+    persistRoute({ routeId: r?.id, name: `Ruta ${req.user.name || ''} ${today()}`.trim(), driverId: me, date: today(), depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}, me), orderIds: [...keep, oid], settings: s });
     db.prepare("UPDATE orders SET status='cargado', loaded_at=datetime('now') WHERE id=?").run(oid);
     return { id: oid, tracking_code: code };
   });
@@ -2536,11 +2536,18 @@ app.get(
 
 
 // ---------- Rutas ----------
-function depotOf(s, body = {}) {
+// Ubicación de la oficina de un usuario (o de la principal si no tiene oficina)
+function officeDepot(userId) {
+  const u = userId ? db.prepare('SELECT office_id FROM users WHERE id=?').get(Number(userId)) : null;
+  return db.prepare('SELECT id, name, lat, lng FROM warehouses WHERE id = COALESCE(?, (SELECT id FROM warehouses WHERE is_default=1)) AND lat IS NOT NULL').get(u?.office_id ?? null) || null;
+}
+function depotOf(s, body = {}, userId = null) {
   if (body.warehouse_id) {
     const w = db.prepare('SELECT lat, lng FROM warehouses WHERE id=? AND lat IS NOT NULL').get(Number(body.warehouse_id));
     if (w) return { lat: w.lat, lng: w.lng };
   }
+  const od = userId && body.depot_lat == null ? officeDepot(userId) : null;
+  if (od) return { lat: od.lat, lng: od.lng };
   return { lat: Number(body.depot_lat ?? s.depot_lat), lng: Number(body.depot_lng ?? s.depot_lng) };
 }
 function stopsFor(orderIds) {
@@ -2629,7 +2636,7 @@ app.post(
     const drv = db.prepare("SELECT name FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(driver_id);
     if (!drv) throw new HttpError(400, 'Repartidor inválido');
     const d = date || today();
-    const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body), orderIds: order_ids.map(Number), settings: s, startTime: start_time });
+    const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body, driver_id), orderIds: order_ids.map(Number), settings: s, startTime: start_time });
     res.status(201).json(out);
   })
 );
@@ -2693,7 +2700,7 @@ app.post(
       const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(drv.id, date);
       const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
       const done = r ? db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(r.id).c : 0;
-      const out = persistRoute({ routeId: r?.id, name: `Ruta ${drv.name} ${date}`, driverId: drv.id, date, depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}), orderIds: [...keep, ...take.map((o) => o.id)], settings: s });
+      const out = persistRoute({ routeId: r?.id, name: `Ruta ${drv.name} ${date}`, driverId: drv.id, date, depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}, drv.id), orderIds: [...keep, ...take.map((o) => o.id)], settings: s });
       if (done) db.prepare('UPDATE orders SET stop_seq = stop_seq + ? WHERE route_id=? AND status IN (\'asignado\',\'cargado\') AND stop_seq < 999').run(done, out.route_id);
       // rutas de origen: se recalculan o se eliminan si quedaron vacías
       for (const rid of fromRoutes.filter((x) => x !== out.route_id)) {
@@ -2921,6 +2928,10 @@ app.get(
 const PUBLIC_INTEGRATION = new Set(['public_url', 'notif_enabled', 'phone_country']);
 app.get('/api/settings', auth(), (req, res) => {
   const s = getSettings();
+  if (req.user.office) {
+    const w = db.prepare('SELECT name, lat, lng FROM warehouses WHERE id=? AND lat IS NOT NULL').get(req.user.office);
+    if (w) Object.assign(s, { depot_name: w.name, depot_lat: String(w.lat), depot_lng: String(w.lng), office_ref: '1' });
+  }
   for (const k of notify.INTEGRATION_KEYS) if (!PUBLIC_INTEGRATION.has(k)) delete s[k];
   res.json(s);
 });
