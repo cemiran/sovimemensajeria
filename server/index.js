@@ -1669,7 +1669,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { q } = req.query;
-    const { limit, offset } = paging(req, 5000);
+    const { limit, offset } = paging(req, 200000);
     const args = [];
     let w = '';
     let matchCol = 'NULL match_txt';
@@ -2157,7 +2157,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { status, date, driver_id, q, route_id, unrouted, account_id } = req.query;
-    const { limit, offset } = paging(req, 5000);
+    const { limit, offset } = paging(req, 200000);
     const where = [];
     const args = [];
     if (req.user.role === 'repartidor') {

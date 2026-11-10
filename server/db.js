@@ -482,6 +482,11 @@ addCols('users', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
 addCols('warehouses', [['supervisor_id', 'INTEGER REFERENCES users(id)']]);
 // Supervisor / despachador que también reparte: aparece como repartidor y puede usar la app en modo repartidor
 addCols('users', [['can_deliver', 'INTEGER NOT NULL DEFAULT 0']]);
+// Índices para bases grandes (miles de clientes y pedidos)
+db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id, status);
+CREATE INDEX IF NOT EXISTS idx_customers_office ON customers(office_id);
+CREATE INDEX IF NOT EXISTS idx_customers_city ON customers(city);
+CREATE INDEX IF NOT EXISTS idx_customers_external ON customers(external_id);`);
 if (!db.prepare("SELECT 1 FROM settings WHERE key='offices_migrated'").get()) {
   // el principal toma la ciudad más común de los clientes; los demás, su propio nombre
   const top = db.prepare("SELECT city FROM customers WHERE TRIM(COALESCE(city,'')) <> '' GROUP BY lower(TRIM(city)) ORDER BY COUNT(*) DESC LIMIT 1").get();
