@@ -2035,7 +2035,8 @@ app.post(
 const geoCityCache = {};
 const geo = { running: false, done: 0, found: 0, approx: 0, failed: 0, last: null };
 async function nominatim(q, bias) {
-  const p = new URLSearchParams({ format: 'jsonv2', limit: '1', countrycodes: 'mx', q, addressdetails: '0' });
+  // q puede ser texto libre o búsqueda estructurada { street, city, state }
+  const p = new URLSearchParams({ format: 'jsonv2', limit: '1', countrycodes: 'mx', addressdetails: '0', ...(typeof q === 'string' ? { q } : q) });
   if (bias) { p.set('viewbox', bias); p.set('bounded', '1'); }
   const r = await fetch('https://nominatim.openstreetmap.org/search?' + p, {
     headers: { 'User-Agent': `SovimeMensajeria/1.0 (${notify.baseUrl(getSettings())})`, 'Accept-Language': 'es' },
@@ -2046,6 +2047,70 @@ async function nominatim(q, bias) {
   const j = await r.json();
   return j[0] ? { lat: Number(j[0].lat), lng: Number(j[0].lon) } : null;
 }
+// Limpia el domicilio para el buscador: "Blvd. Benito Juárez 984-Loc 8 B" -> "Boulevard Benito Juárez 984"
+const CITY_OSM = { rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito', 'san quintin': 'San Quintín', 'san luis rio colorado': 'San Luis Río Colorado', 'san luis r c': 'San Luis Río Colorado' };
+function osmCity(city) { const k = normCity(city); return CITY_OSM[k] || String(city || '').trim() || 'Tijuana'; }
+function cleanStreet(addr) {
+  let x = String(addr || '').split(',')[0];
+  x = x.replace(/(\d+)\s*[-–]\s*(loc|local|int|interior|depto|dpto|ofi|of|suite|piso|edif|bodega|lote|lt|mz|a|b|c|d)\b.*$/i, '$1');
+  x = x.replace(/\s+\b(loc|local|int|interior|depto|dpto|departamento|ofi|oficina|suite|piso|edif|edificio|bodega)\b\.?.*$/i, '');
+  x = x.replace(/\bblvd\b\.?/i, 'Boulevard').replace(/\bav\b\.?/i, 'Avenida').replace(/\bcalz\b\.?/i, 'Calzada').replace(/\bprol\b\.?/i, 'Prolongación')
+    .replace(/\bs\/n\b/i, '').replace(/#\s*/g, '').replace(/\s+/g, ' ').trim();
+  return x;
+}
+async function photon(q, center) {
+  const p = new URLSearchParams({ q, limit: '1', lang: 'es' });
+  if (center) { p.set('lat', center.lat); p.set('lon', center.lng); }
+  const r = await fetch('https://photon.komoot.io/api/?' + p, { headers: { 'User-Agent': `SovimeMensajeria/1.0 (${notify.baseUrl(getSettings())})` }, signal: AbortSignal.timeout(15000) });
+  if (!r.ok) return null;
+  const f = (await r.json()).features?.[0];
+  if (!f) return null;
+  return { lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0], type: f.properties?.type, city: f.properties?.city || f.properties?.county || '' };
+}
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+async function cityCenter(city) {
+  const k = osmCity(city);
+  if (!(k in geoCityCache)) { geoCityCache[k] = await nominatim(`${k}, Baja California, México`); await pause(1100); }
+  return geoCityCache[k];
+}
+// Ubica un domicilio probando varias búsquedas (de la más exacta a la más general). Devuelve { lat, lng, quality } o null.
+async function geocodeAddress({ address, colonia, city }) {
+  const cityName = osmCity(city);
+  const ctr = await cityCenter(city).catch(() => null);
+  const bias = ctr ? `${ctr.lng - 0.35},${ctr.lat + 0.3},${ctr.lng + 0.35},${ctr.lat - 0.3}` : null;
+  const inBox = (g) => !ctr || (Math.abs(g.lat - ctr.lat) < 0.3 && Math.abs(g.lng - ctr.lng) < 0.35);
+  const street = cleanStreet(address);
+  // colonia: la que venga aparte o la escrita en el domicilio ("…, Col. MADERO" / "…, Zona Centro, …")
+  const col = String(colonia || (String(address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '').replace(/^col(onia)?\.?\s*/i, '').trim();
+  const m = street.match(/^(.*?)\s+(\d+)\s*[A-Za-z]?$/);
+  const name = m ? m[1] : street.replace(/\s+\d+.*$/, '');
+  const tries = [];
+  if (m) tries.push([{ street: `${m[2]} ${m[1]}`, city: cityName, state: 'Baja California', country: 'México' }, 'exacta']);
+  if (street) tries.push([`${street}, ${col ? col + ', ' : ''}${cityName}, Baja California`, 'exacta']);
+  if (street && col) tries.push([`${street}, ${cityName}, Baja California`, 'exacta']);
+  if (street) tries.push(['photon', 'calle']);
+  if (name && name !== street) tries.push([`${name}, ${col ? col + ', ' : ''}${cityName}, Baja California`, 'calle']);
+  if (col) tries.push([`${col}, ${cityName}, Baja California`, 'colonia']);
+  for (const [q, quality] of tries) {
+    try {
+      let g;
+      if (q === 'photon') {
+        g = await photon(`${street}${col ? ', ' + col : ''}, ${cityName}`, ctr);
+        if (g && !['house', 'street'].includes(g.type)) g = null;
+      } else { g = await nominatim(q, bias); await pause(1100); }
+      if (g && inBox(g)) return { lat: g.lat, lng: g.lng, quality };
+    } catch (e) { if (e.message === 'rate') await pause(30000); }
+  }
+  return null;
+}
+app.get('/api/geocode', auth(...STAFF), wrap(async (req, res) => {
+  const { address = '', colonia = '', city = '' } = req.query;
+  const hit = String(address).trim() ? await geocodeAddress({ address, colonia, city }) : null;
+  if (hit) return res.json(hit);
+  // no se encontró: el centro de la ciudad, solo para acercar el mapa
+  const c = await cityCenter(city).catch(() => null);
+  res.json(c ? { lat: c.lat, lng: c.lng, quality: 'ciudad' } : { quality: null });
+}));
 async function geocodePending() {
   if (geo.running) return;
   geo.running = true;
@@ -2055,31 +2120,10 @@ async function geocodePending() {
     for (;;) {
       const c = db.prepare("SELECT * FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='') ORDER BY id LIMIT 1").get();
       if (!c) break;
-      const city = c.city || 'Tijuana';
-      // Caja de búsqueda alrededor de la ciudad del cliente (o del almacén) para no confundir calles homónimas de otras ciudades
-      let bias = null;
-      try {
-        if (!(city in geoCityCache)) { geoCityCache[city] = await nominatim(`${city}, México`); await new Promise((r) => setTimeout(r, 1100)); }
-        const cc = geoCityCache[city];
-        const ctr = cc || (Number.isFinite(dl) ? { lat: dl, lng: dg } : null);
-        if (ctr) bias = `${ctr.lng - 0.35},${ctr.lat + 0.3},${ctr.lng + 0.35},${ctr.lat - 0.3}`;
-      } catch {}
-      const street = String(c.address || '').split(',')[0];
-      const tries = [
-        [`${street}, ${c.colonia ? c.colonia + ', ' : ''}${city}, México`, 'exacta'],
-        [`${street.replace(/\s+\d+[A-Za-z-]*$/, '')}, ${c.colonia ? c.colonia + ', ' : ''}${city}, México`, 'calle'],
-        ...(c.colonia ? [[`${c.colonia}, ${city}, México`, 'colonia']] : []),
-      ];
-      let hit = null;
-      for (const [q, quality] of tries) {
-        try {
-          const g = await nominatim(q, bias);
-          await new Promise((r) => setTimeout(r, 1100));
-          if (g) { hit = { ...g, quality }; break; }
-        } catch (e) {
-          if (e.message === 'rate') { await new Promise((r) => setTimeout(r, 30000)); }
-        }
-      }
+      // colonia escrita en el domicilio ("…, Col. MADERO") si no viene aparte
+      const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
+      void dl; void dg;
       if (hit) db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(hit.lat, hit.lng, hit.quality, c.id);
       else db.prepare("UPDATE customers SET geo_quality='no_encontrada' WHERE id=?").run(c.id);
       geo.done++;

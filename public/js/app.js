@@ -246,6 +246,35 @@ function wireStopEdit(map, mk, s, onEdit) {
     });
   });
 }
+function editableCustomerPin(map, layer, c, onSaved) {
+  // c: { id (cliente), name, address, extra }
+  layer.bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address || '')}${c.extra || ''}<div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn sm" data-ced="1">${icon('person')} Editar cliente</button><button class="btn sm" data-cmv="1">${icon('live')} Mover ubicación</button></div>`);
+  layer.on('popupopen', (e) => {
+    const el = e.popup.getElement();
+    $('[data-ced]', el)?.addEventListener('click', async () => { map.closePopup(); customerForm(await GET('/api/customers/' + c.id), () => onSaved?.()); });
+    $('[data-cmv]', el)?.addEventListener('click', () => {
+      map.closePopup();
+      toast(`Toca el mapa en el domicilio correcto de ${c.name}`, '');
+      map.getContainer().style.cursor = 'crosshair';
+      map.once('click', async (ev) => {
+        map.getContainer().style.cursor = '';
+        if (!(await confirmDlg(`¿Guardar la nueva ubicación de ${c.name}? Se usará en todas sus entregas.`))) return;
+        try { await api('PUT', '/api/customers/' + c.id, { lat: ev.latlng.lat, lng: ev.latlng.lng }); layer.setLatLng(ev.latlng); toast('Ubicación guardada', 'ok'); }
+        catch (er) { toast(er.message, 'bad'); }
+      });
+    });
+  });
+}
+// Clientes sin ubicación: lista para abrirlos y marcarlos en el mapa
+async function unlocatedCustomers(officeId) {
+  const r = await GET(`/api/customers?limit=200000${officeId ? '&office_id=' + officeId : ''}`);
+  const list = r.rows.filter((c) => c.lat == null);
+  const m = modal(`Clientes sin ubicación (${list.length})`, `<div class="stack"><input id="unQ" placeholder="Buscar por nombre, dirección o ciudad" />
+    <div class="table-wrap" style="max-height:60vh"><table><tbody>${list.map((c) => `<tr class="click" data-u="${c.id}" data-t="${esc((c.name + ' ' + c.address + ' ' + (c.city || '')).toLowerCase())}"><td><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.city ? ', ' + esc(c.city) : ''}</small></td><td><small class="muted">${c.geo_quality === 'no_encontrada' ? 'no encontrado' : 'por ubicar'}</small></td><td class="r"><button class="btn sm">Ubicar</button></td></tr>`).join('') || '<tr><td class="muted">Todos los clientes tienen ubicación ✅</td></tr>'}</tbody></table></div>
+    <small class="muted">Abre el cliente, toca <b>Ubicar</b> o toca el mapa en su domicilio, y guarda.</small></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
+  $('#unQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-u]', m.el).forEach((tr) => (tr.hidden = !!q && !tr.dataset.t.includes(q))); };
+  $$('tr[data-u]', m.el).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.u), () => { tr.remove(); })));
+}
 function gmapsUrl(stops) {
   const pts = stops.filter((s) => s.lat != null);
   if (!pts.length) return '#';
@@ -853,8 +882,8 @@ async function viewDashboard(v) {
     for (const list of seen.values()) {
       const o = list[0];
       const st = list.some((x) => x.status === 'cargado') ? 'cargado' : list.some((x) => x.status === 'asignado') ? 'asignado' : list.some((x) => x.status === 'fallido') ? 'fallido' : 'pendiente';
-      L.circleMarker([o.lat, o.lng], { radius: 7, color: '#fff', weight: 1.5, fillColor: PIN_COLORS[st], fillOpacity: 0.9 }).addTo(map)
-        .bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}${o.customer_city ? ', ' + esc(o.customer_city) : ''}<br>${list.map((x) => `${esc(x.tracking_code)} · ${STATUS[x.status]}${x.driver_name ? ' · ' + esc(x.driver_name) : ''}`).join('<br>')}`);
+      editableCustomerPin(map, L.circleMarker([o.lat, o.lng], { radius: 7, color: '#fff', weight: 1.5, fillColor: PIN_COLORS[st], fillOpacity: 0.9 }).addTo(map),
+        { id: o.customer_id, name: o.customer_name, address: `${o.address || ''}${o.customer_city ? ', ' + o.customer_city : ''}`, extra: `<br>${list.map((x) => `${esc(x.tracking_code)} · ${STATUS[x.status]}${x.driver_name ? ' · ' + esc(x.driver_name) : ''}`).join('<br>')}` });
       pts.push([o.lat, o.lng]);
     }
     const sinUbic = new Set(op.rows.filter((o) => o.lat == null).map((o) => o.customer_id)).size;
@@ -1113,14 +1142,22 @@ function customerForm(c, done) {
   if (c.lat) setPt(c.lat, c.lng);
   map.on('click', (e) => setPt(e.latlng.lat, e.latlng.lng));
   $('#here', m.el).onclick = async () => { const p = await getPosition(); if (p) setPt(p.lat, p.lng, true); else toast('No se obtuvo GPS', 'bad'); };
-  $('#geo', m.el).onclick = async () => {
-    const q = [f.address.value, f.zip.value, f.city.value].filter(Boolean).join(', ');
-    if (!q) return;
+  const geoQ = () => `address=${encodeURIComponent(f.address.value)}&colonia=${encodeURIComponent(f.colonia?.value || '')}&city=${encodeURIComponent(f.city.value)}`;
+  $('#geo', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    if (!f.address.value.trim()) return toast('Escribe el domicilio', 'bad');
+    btn.disabled = true; btn.textContent = 'Buscando…';
     try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=mx&q=' + encodeURIComponent(q)).then((r) => r.json());
-      if (r[0]) setPt(Number(r[0].lat), Number(r[0].lon), true); else toast('Dirección no encontrada, marca en el mapa', 'bad');
-    } catch { toast('Geocodificador no disponible, marca en el mapa', 'bad'); }
+      const r = await GET('/api/geocode?' + geoQ());
+      if (r.quality === 'exacta') { setPt(r.lat, r.lng, true); toast('Ubicado. Revisa el pin y arrástralo si hace falta', 'ok'); }
+      else if (r.quality === 'calle' || r.quality === 'colonia') { setPt(r.lat, r.lng, true); toast(`Ubicación aproximada (${r.quality}): arrastra el pin al domicilio exacto`, ''); }
+      else if (r.quality === 'ciudad') { map.setView([r.lat, r.lng], 14); toast('No se encontró el número: toca el mapa en el domicilio correcto', 'bad'); }
+      else toast('No se encontró: toca el mapa en el domicilio correcto', 'bad');
+    } catch (er) { toast(er.message || 'No se pudo buscar; marca en el mapa', 'bad'); }
+    btn.disabled = false; btn.textContent = 'Ubicar';
   };
+  // sin ubicación: acerca el mapa a su ciudad para marcarlo fácil
+  if (!c.lat && c.city && !driverMode()) GET('/api/geocode?city=' + encodeURIComponent(c.city)).then((r) => { if (r.lat && !f.lat.value) map.setView([r.lat, r.lng], 13); }).catch(() => {});
   // Programar entrega del pedido abierto: día, hora acordada y repartidor
   let sched = null;
   if ($('#schedBody', m.el)) (async () => {
@@ -1185,7 +1222,7 @@ async function viewCustomers(v) {
   const notFound = geoSt ? (geoSt.stats.no_encontrada || 0) : 0;
   v.innerHTML = topbar('Clientes', `${staffC ? `<button class="btn" id="impC">${icon('upload')} Importar Excel</button><button class="btn" id="asgX">${icon('truck')} Asignar por Excel</button>` : ''}<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
-  ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
+  ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><span class="row" style="gap:6px"><button class="btn sm" id="geoList">Ver y ubicar</button><button class="btn sm" id="geoRetry">Reintentar</button></span></div>` : ''}
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
@@ -1198,12 +1235,14 @@ async function viewCustomers(v) {
   $('#impC')?.addEventListener('click', () => importCustomers());
   $('#asgX')?.addEventListener('click', () => excelAssign({ mode: 'driver' }));
   if (staffC) bulkAssign(v, 'customers');
+  $('#geoList')?.addEventListener('click', () => unlocatedCustomers(new URLSearchParams(location.hash.split('?')[1] || '').get('office_id')));
   $('#geoRetry')?.addEventListener('click', async () => { await POST('/api/customers/geocode', { retry_failed: true }); toast('Reintentando…', 'ok'); setTimeout(render, 1500); });
   if (pend) setTimeout(() => { if (location.hash.startsWith('#/customers') && !(v.bulkPicked?.().length)) render(); }, 15000);
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.id), () => render())));
   const map = makeMap($('#cmapall'));
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
-  const pts = r.rows.filter((c) => c.lat != null).map((c) => { L.circleMarker([c.lat, c.lng], { radius: 6, color: ['calle', 'colonia'].includes(c.geo_quality) ? '#e5612a' : '#1d5a96', fillOpacity: 0.6 }).addTo(map).bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address)}`); return [c.lat, c.lng]; });
+  const pts = r.rows.filter((c) => c.lat != null).map((c) => { const lyr = L.circleMarker([c.lat, c.lng], { radius: 6, color: ['calle', 'colonia'].includes(c.geo_quality) ? '#e5612a' : '#1d5a96', fillOpacity: 0.6 }).addTo(map);
+    editableCustomerPin(map, lyr, { id: c.id, name: c.name, address: c.address, extra: ['calle', 'colonia'].includes(c.geo_quality) ? `<br><small style="color:#e5612a">Ubicación aproximada (${c.geo_quality})</small>` : '' }); return [c.lat, c.lng]; });
   if (pts.length) map.fitBounds(pts, { padding: [20, 20] });
 }
 
@@ -2192,8 +2231,10 @@ async function viewOffice(v, id) {
     const ref = o.lat ? [o.lat, o.lng] : depotLatLng();
     const map = makeMap($('#ofMap'), ref, 13);
     if (o.lat) L.marker(ref, { icon: depotIcon() }).addTo(map).bindPopup(`<b>${esc(o.name)}</b><br>${esc(o.address || '')}`).openPopup();
-    pts.forEach((c) => L.circleMarker([c.lat, c.lng], { radius: 6, color: c.active_orders ? '#e5612a' : '#1d5a96', fillOpacity: 0.7 }).addTo(map)
-      .bindPopup(`<b>${esc(c.name)}</b><br>${esc(c.address || '')}${c.active_orders ? `<br>${c.active_orders} pedido(s) activo(s)` : ''}`));
+    pts.forEach((c) => editableCustomerPin(map, L.circleMarker([c.lat, c.lng], { radius: 6, color: c.active_orders ? '#e5612a' : '#1d5a96', fillOpacity: 0.7 }).addTo(map),
+      { id: c.id, name: c.name, address: c.address, extra: c.active_orders ? `<br>${c.active_orders} pedido(s) activo(s)` : '' }));
+    if (r.total - pts.length) $('#ofMap').insertAdjacentHTML('beforebegin', `<div class="row" style="justify-content:flex-end;margin-bottom:6px"><button class="btn sm" id="ofUnl">${icon('live')} Ubicar ${r.total - pts.length} sin ubicación</button></div>`);
+    $('#ofUnl')?.addEventListener('click', () => unlocatedCustomers(id));
     if (pts.length) map.fitBounds([ref, ...pts.map((c) => [c.lat, c.lng])], { padding: [24, 24], maxZoom: 15 });
   }
 
