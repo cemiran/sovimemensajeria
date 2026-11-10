@@ -1706,6 +1706,7 @@ const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt'
 const custVal = (b, f) => {
   if (f.startsWith('notify_')) return b[f] === undefined ? 1 : [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
   if (f === 'office_id') return b[f] === '' || b[f] == null ? officeForCity(b.city) : Number(b[f]);
+  if (f === 'city') return b.city === '' || b.city == null ? null : canonCity(b.city);
   return b[f] === '' || b[f] === undefined ? null : f === 'lat' || f === 'lng' ? Number(b[f]) : b[f];
 };
 // Oficina que atiende una ciudad (si no hay, queda en la principal)
@@ -1713,6 +1714,9 @@ const custVal = (b, f) => {
 const normCity = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[.]/g, ' ').replace(/\s+/g, ' ').trim()
   .replace(/\br c$/, 'rio colorado');
 const officeCities = (w) => String(w.city || '').split(/[,;/]/).map(normCity).filter(Boolean);
+// Nombre oficial de la ciudad: "Rosarito" se guarda como "Playas de Rosarito"
+const CITY_CANON = { rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito' };
+function canonCity(city) { const t = String(city || '').trim(); return CITY_CANON[normCity(t)] || t; }
 function officeForCity(city) {
   const c = normCity(city);
   if (!c) return null;
@@ -1910,7 +1914,7 @@ function normCustomerRow(r) {
     phone_alt: alt || null,
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
     address, colonia: colonia || null,
-    city: cleanTxt(r.city, 80) || null,
+    city: canonCity(cleanTxt(r.city, 80)) || null,
     zip: cleanTxt(r.zip, 10) || null,
     reference: cleanTxt(r.reference, 200) || null,
     notes: cleanTxt(r.notes, 1000) || null,
