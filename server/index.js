@@ -1707,6 +1707,49 @@ app.get('/api/offices/:id', auth(...STAFF), wrap((req, res) => {
     FROM users u WHERE u.active = 1 AND ${OFFICE_OF('u')} = ? ORDER BY u.role, u.name`).all(w.id);
   res.json({ ...w, inventory, plain, staff });
 }));
+// Asignación por Excel: cada fila trae una referencia del cliente/pedido y, opcional, el repartidor
+app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
+  const rows = (Array.isArray(req.body?.rows) ? req.body.rows : []).slice(0, 3000);
+  if (!rows.length) throw new HttpError(400, 'El archivo no tiene filas');
+  const offSql = inOffice(req, 'c');
+  const drivers = db.prepare(`SELECT u.id, u.name FROM users u WHERE u.role='repartidor' AND u.active=1 ${inOffice(req, 'u')}`).all();
+  const norm = (x) => String(x ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+  const findDriver = (name) => {
+    const n = norm(name);
+    if (!n) return null;
+    return drivers.find((d) => norm(d.name) === n) || drivers.filter((d) => norm(d.name).includes(n) || n.includes(norm(d.name)))[0] || null;
+  };
+  const OPEN = "('pendiente','asignado')";
+  const out = rows.map((r, i) => {
+    const line = Number(r.line) || i + 2;
+    const ref = String(r.ref ?? '').trim();
+    const o = { line, ref };
+    if (!ref) return { ...o, error: 'Sin referencia' };
+    const digits = ref.replace(/\D/g, '');
+    let cust = null, orders = [];
+    const byOrder = db.prepare(`SELECT o.id, o.customer_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.tracking_code = ? ${offSql}`).get(ref.toUpperCase());
+    const bySerial = !byOrder && db.prepare(`SELECT o.id, o.customer_id FROM serials s JOIN orders o ON o.id=s.order_id JOIN customers c ON c.id=o.customer_id WHERE s.serial = ? ${offSql} ORDER BY o.id DESC`).get(normSerial(ref));
+    const hit = byOrder || bySerial;
+    if (hit) { cust = hit.customer_id; orders = db.prepare(`SELECT id, tracking_code FROM orders WHERE id = ? AND status IN ${OPEN}`).all(hit.id); o.match = byOrder ? 'pedido' : 'S/N'; }
+    else {
+      let c = digits.length >= 7 ? db.prepare(`SELECT c.id FROM customers c WHERE (c.external_id = ? OR c.phone = ? OR c.phone_alt = ?) ${offSql}`).all(digits, digits, digits) : [];
+      if (c.length) o.match = 'teléfono';
+      else { c = db.prepare(`SELECT c.id FROM customers c WHERE lower(TRIM(c.name)) = lower(?) ${offSql}`).all(ref); if (c.length) o.match = 'nombre'; }
+      if (c.length > 1) return { ...o, error: `${c.length} clientes coinciden; usa el número de pedido o el S/N` };
+      if (c.length) { cust = c[0].id; orders = db.prepare(`SELECT id, tracking_code FROM orders WHERE customer_id = ? AND status IN ${OPEN}`).all(cust); }
+    }
+    if (!cust) return { ...o, error: 'No se encontró (pedido, S/N, teléfono o nombre)' };
+    const cc = db.prepare('SELECT name FROM customers WHERE id=?').get(cust);
+    Object.assign(o, { customer_id: cust, customer_name: cc?.name, order_ids: orders.map((x) => x.id), tracking: orders.map((x) => x.tracking_code).join(', ') });
+    if (r.driver != null && String(r.driver).trim()) {
+      const d = findDriver(r.driver);
+      if (!d) o.driver_error = `Repartidor "${String(r.driver).trim()}" no encontrado`;
+      else { o.driver_id = d.id; o.driver_name = d.name; }
+    }
+    return o;
+  });
+  res.json({ rows: out, drivers });
+}));
 // Supervisor operativo de la oficina (lo nombra el administrador; queda asignado a esa oficina)
 app.put('/api/offices/:id/supervisor', auth('admin'), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
@@ -1832,6 +1875,8 @@ app.post(
     const stype = ['general', 'medicamento', 'muestra', 'dispositivo', 'refrigerado'].includes(o.shipment_type) ? o.shipment_type : 'general';
     const notifyNow = !!o.notify;
     const updateExisting = req.body.update_existing !== false;
+    // oficina destino: la del usuario si es personal de oficina; si no, la que elija el administrador (o según la ciudad)
+    const impOffice = req.user.office || (req.body.office_id && db.prepare('SELECT id FROM warehouses WHERE id=? AND active=1').get(Number(req.body.office_id)) ? Number(req.body.office_id) : null);
     const skipDupOrders = o.skip_if_open !== false;
     const dry = !!req.body.dry_run;
     const results = [];
@@ -1875,6 +1920,8 @@ app.post(
                 c.lat, c.lng, c.lat != null ? 'archivo' : null).lastInsertRowid);
               out.action = 'nuevo';
             }
+            if (impOffice) db.prepare('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
+            else if (out.action === 'nuevo') db.prepare('UPDATE customers SET office_id=? WHERE id=?').run(officeForCity(c.city), cid);
             out.customer_id = cid;
             if (makeOrders) {
               const open = db.prepare("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);

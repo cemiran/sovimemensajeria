@@ -819,7 +819,7 @@ async function viewOrders(v) {
   const acc = p.get('account_id') || '';
   const off = p.get('office_id') || '';
   const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=300&status=${st}&date=${date}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
-  v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
+  v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn" id="asgX">${icon('upload')} Asignar por Excel</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
       <input name="q" placeholder="Número de serie o número de pedido (o cliente, teléfono)" value="${esc(q)}" class="grow" style="max-width:340px" autofocus />
@@ -839,6 +839,7 @@ async function viewOrders(v) {
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.id)));
   $('#newOrder').onclick = () => orderForm(() => render());
   bulkAssign(v, 'orders');
+  $('#asgX').onclick = () => excelAssign({ mode: 'driver' });
   $('#scanFind').onclick = () => openScanner({ title: 'Buscar pedido por S/N o guía', onCode: async (c) => { const o = await GET('/api/orders/tracking/' + encodeURIComponent(c)); orderDetail(o.id); } });
 }
 
@@ -1112,7 +1113,7 @@ async function viewCustomers(v) {
   const geoSt = staffC ? await GET('/api/customers/geocode').catch(() => null) : null;
   const pend = geoSt ? (geoSt.stats.pendiente || 0) : 0;
   const notFound = geoSt ? (geoSt.stats.no_encontrada || 0) : 0;
-  v.innerHTML = topbar('Clientes', `${staffC ? `<button class="btn" id="impC">${icon('upload')} Importar Excel</button>` : ''}<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
+  v.innerHTML = topbar('Clientes', `${staffC ? `<button class="btn" id="impC">${icon('upload')} Importar Excel</button><button class="btn" id="asgX">${icon('truck')} Asignar por Excel</button>` : ''}<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
   ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><button class="btn sm" id="geoRetry">Reintentar</button></div>` : ''}
   <div class="grid g-main">
@@ -1124,7 +1125,8 @@ async function viewCustomers(v) {
   </div>`;
   $('#cq').onsubmit = (e) => { e.preventDefault(); location.hash = `#/customers?q=${encodeURIComponent(e.target.q.value)}&office_id=${e.target.office_id?.value || ''}`; };
   $('#newC').onclick = () => customerForm(null, () => render());
-  $('#impC')?.addEventListener('click', importCustomers);
+  $('#impC')?.addEventListener('click', () => importCustomers());
+  $('#asgX')?.addEventListener('click', () => excelAssign({ mode: 'driver' }));
   if (staffC) bulkAssign(v, 'customers');
   $('#geoRetry')?.addEventListener('click', async () => { await POST('/api/customers/geocode', { retry_failed: true }); toast('Reintentando…', 'ok'); setTimeout(render, 1500); });
   if (pend) setTimeout(() => { if (location.hash.startsWith('#/customers') && !(v.bulkPicked?.().length)) render(); }, 15000);
@@ -1712,6 +1714,7 @@ function receiveSerials(products, preselect) {
   fillDriverSelect($('#rsDrv', m.el));
   fillWarehouseSelect($('#rsWh', m.el));
   $('#rsList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#rsCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
+  excelSerialsInto($('#rsList', m.el));
   $('#rsPaste', m.el).onclick = async () => {
     const list = $('#rsList', m.el).value.split(/[\r\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
     if (!list.length) return toast('Pega al menos una serie', 'bad');
@@ -1975,6 +1978,7 @@ async function transferDialog(whs, fromId) {
     <details><summary class="muted">Traspasos recientes</summary><div id="xHist" class="table-wrap" style="max-height:220px"></div></details>
   </div>`, { wide: true, footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="xGo">Traspasar</button>', onClose: () => render() });
   const $m = (s) => $(s, m.el);
+  excelSerialsInto($m('#xPaste'));
   const picked = new Set();
   let rows = [];
   const count = () => {
@@ -2081,7 +2085,7 @@ async function viewOffice(v, id) {
     const r = await GET(`/api/customers?limit=500&office_id=${id}&q=${encodeURIComponent(q)}`);
     body.innerHTML = `<div class="card">
       <form class="row" id="ofCq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" class="grow" placeholder="Número de serie o número de pedido (o nombre, teléfono)" /><button class="btn">Buscar</button>
-        ${admin ? `<button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button>` : ''}<button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
+        <button type="button" class="btn" id="ofImpC">${icon('upload')} Importar Excel</button><button type="button" class="btn" id="ofAsgX">${icon('truck')} Asignar por Excel</button>${admin ? `<button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button><button type="button" class="btn" id="ofMovX">${icon('upload')} Pasar por Excel</button>` : ''}<button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
       <small class="muted">${r.total} clientes finales${q ? ' coinciden' : ' en esta oficina'}</small>
       <div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Teléfonos</th><th>Dirección</th><th class="r">Pedidos activos</th></tr></thead><tbody>
       ${r.rows.map((c) => `<tr class="click" data-c="${c.id}"><td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}</td>
@@ -2091,6 +2095,9 @@ async function viewOffice(v, id) {
     $$('[data-c]', body).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.c), () => render())));
     $('#ofNewC').onclick = () => customerForm({ office_id: id, city: o.city || '' }, () => render());
     $('#ofAddC')?.addEventListener('click', () => officeMoveCustomers(o));
+    $('#ofMovX')?.addEventListener('click', () => excelAssign({ mode: 'office', office: o }));
+    $('#ofImpC').onclick = () => importCustomers({ office_id: id, office_name: o.name });
+    $('#ofAsgX').onclick = () => excelAssign({ mode: 'driver' });
   }
 
   if (tab === 'ped') {
@@ -2601,6 +2608,7 @@ function assignToDriver(drivers, products, preDriver) {
     return r;
   };
   $('#adList', m.el).oninput = (e) => { const n = e.target.value.split(/[\r\n,;\t]+/).filter((x) => x.trim()).length; $('#adCount', m.el).textContent = n ? `${n} series en la lista` : ''; };
+  excelSerialsInto($('#adList', m.el));
   $('#adPaste', m.el).onclick = async () => {
     const list = $('#adList', m.el).value.split(/[\r\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
     if (!list.length) return toast('Pega al menos una serie', 'bad');
@@ -2753,10 +2761,120 @@ function guessCustMap(headers) {
   return map;
 }
 
-function importCustomers() {
+// Lee un Excel/CSV y regresa la primera hoja con datos como filas (arreglo de arreglos de texto)
+async function readTableFile(file) {
+  if (/\.(csv|txt)$/i.test(file.name)) return parseCSVFull(await file.text());
+  const X = await loadXLSX();
+  const wb = X.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+  for (const nm of wb.SheetNames) {
+    const t = X.utils.sheet_to_json(wb.Sheets[nm], { header: 1, raw: true, defval: '', blankrows: false }).map((r) => r.map(cellStr));
+    if (t.some((r) => r.some((x) => String(x).trim()))) return t;
+  }
+  return [];
+}
+const pickFile = (accept = '.xlsx,.xls,.xlsm,.ods,.csv,.txt') => new Promise((ok) => { const i = document.createElement('input'); i.type = 'file'; i.accept = accept; i.onchange = () => ok(i.files[0] || null); i.click(); });
+// Botón "Subir Excel" junto a una lista de números de serie: toma la columna de S/N (o la primera) y la pega en el cuadro
+function excelSerialsInto(textarea) {
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'btn sm'; btn.innerHTML = `${icon('upload')} Subir Excel con S/N`;
+  btn.onclick = async () => {
+    const f = await pickFile(); if (!f) return;
+    try {
+      const t = (await readTableFile(f)).filter((r) => r.some((x) => String(x).trim()));
+      if (!t.length) return toast('El archivo está vacío', 'bad');
+      let col = t[0].findIndex((h) => /serie|s\/?n|serial/i.test(String(h)));
+      let rows = t.slice(1);
+      if (col < 0) { // sin encabezado: la columna con más valores tipo serie
+        const score = (c) => t.filter((r) => /^[A-Z0-9-]{8,}$/i.test(String(r[c] || '').trim())).length;
+        col = [...Array(Math.max(...t.map((r) => r.length))).keys()].sort((a, b) => score(b) - score(a))[0] || 0;
+        rows = t;
+      }
+      const list = [...new Set(rows.map((r) => String(r[col] || '').trim()).filter((x) => /^[A-Z0-9-]{6,}$/i.test(x)))];
+      if (!list.length) return toast('No encontré números de serie en el archivo', 'bad');
+      textarea.value = (textarea.value.trim() ? textarea.value.trim() + '\n' : '') + list.join('\n');
+      textarea.dispatchEvent(new Event('input'));
+      toast(`${list.length} números de serie tomados de ${f.name}`, 'ok');
+    } catch (e) { toast(e.message || 'No se pudo leer el archivo', 'bad'); }
+  };
+  textarea.closest('label').insertAdjacentElement('afterend', btn);
+}
+
+// Asignar (a repartidor) o pasar (a oficina) clientes desde un Excel
+async function excelAssign({ mode = 'driver', office = null } = {}) {
+  const dr = await GET('/api/users?role=repartidor&active=1&limit=500').catch(() => []);
+  const drivers = (Array.isArray(dr) ? dr : dr.rows || []).filter((u) => u.role === 'repartidor' && u.active);
+  const title = mode === 'office' ? `Pasar clientes por Excel a ${office.name}` : 'Asignar a repartidor por Excel';
+  const m = modal(title, '<div class="stack" id="eaB"></div>', { wide: true, onClose: () => render() });
+  const B = $('#eaB', m.el);
+  B.innerHTML = `<label class="drop" id="eaDrop">${icon('upload')}<b>Arrastra el Excel o toca para elegirlo</b>
+      <small class="muted">Una fila por cliente. Columna con <b>número de pedido, S/N, teléfono Telnor/móvil o nombre</b>${mode === 'driver' ? ' y, opcional, columna <b>Repartidor</b>' : ''}.</small>
+      <input type="file" id="eaF" accept=".xlsx,.xls,.xlsm,.ods,.csv,.txt" hidden /></label>`;
+  const drop = $('#eaDrop', B);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); };
+  $('#eaF', B).onchange = (e) => e.target.files[0] && load(e.target.files[0]);
+  let table = [], hr = 0;
+  async function load(f) {
+    try { table = (await readTableFile(f)).filter((r) => r.some((x) => String(x).trim())); } catch (e) { return toast(e.message || 'No se pudo leer el archivo', 'bad'); }
+    if (!table.length) return toast('El archivo está vacío', 'bad');
+    const H = table[hr].map((h) => String(h));
+    const find = (re) => H.findIndex((h) => re.test(h));
+    const refGuess = [/pedido|gu[ií]a|rastreo|tracking/i, /serie|s\/?n|serial/i, /telnor|l[ií]nea|servicio/i, /tel|cel|m[oó]vil/i, /cliente|nombre/i].map(find).find((i) => i >= 0) ?? 0;
+    const drvGuess = find(/repartidor|chofer|driver|mensajero/i);
+    const opts = (sel) => H.map((h, i) => `<option value="${i}" ${i === sel ? 'selected' : ''}>${esc(h || 'Columna ' + (i + 1))}</option>`).join('');
+    B.innerHTML = `<p style="margin:0"><b>${esc(f.name)}</b> · ${table.length - 1} filas</p>
+      <div class="grid g2"><label class="f">Columna para identificar al cliente<select id="eaRef">${opts(refGuess)}</select></label>
+      ${mode === 'driver' ? `<label class="f">Columna del repartidor<select id="eaDrv"><option value="-1">— No viene en el archivo —</option>${opts(drvGuess)}</select></label>` : ''}</div>
+      ${mode === 'driver' ? `<div class="grid g2"><label class="f">Repartidor para filas sin repartidor<select id="eaDef"><option value="">— Ninguno —</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></label>
+        <label class="f">Fecha de entrega<input type="date" id="eaDate" value="${today()}" /></label></div>` : ''}
+      <label class="row"><input type="checkbox" id="eaHdr" checked /> La primera fila son encabezados</label>
+      <div class="row"><button class="btn primary" id="eaChk">Revisar</button></div><div id="eaRes"></div>`;
+    $('#eaHdr', B).onchange = () => { hr = $('#eaHdr', B).checked ? 0 : -1; };
+    $('#eaChk', B).onclick = check;
+  }
+  async function check() {
+    const rc = Number($('#eaRef', B).value), dc = mode === 'driver' ? Number($('#eaDrv', B).value) : -1;
+    const first = $('#eaHdr', B).checked ? 1 : 0;
+    const rows = table.slice(first).map((r, i) => ({ line: i + 1 + first, ref: r[rc], driver: dc >= 0 ? r[dc] : '' }));
+    let res;
+    try { res = await POST('/api/assign/resolve', { rows }); } catch (e) { return toast(e.message, 'bad'); }
+    const defId = mode === 'driver' ? Number($('#eaDef', B).value) || null : null;
+    const defName = defId ? drivers.find((d) => d.id === defId)?.name : '';
+    const R = res.rows.map((r) => (mode === 'driver' && !r.driver_id && !r.driver_error && defId ? { ...r, driver_id: defId, driver_name: defName } : r));
+    const ok = R.filter((r) => !r.error && (mode === 'office' || (r.driver_id && r.order_ids.length)));
+    const why = (r) => r.error || r.driver_error || (mode === 'driver' && !r.driver_id ? 'Sin repartidor' : mode === 'driver' && !r.order_ids.length ? 'Sin pedidos abiertos' : '');
+    $('#eaRes', B).innerHTML = `<div class="row" style="gap:8px;margin:6px 0"><span class="chip ok">${ok.length} listos</span>${R.length - ok.length ? `<span class="chip off">${R.length - ok.length} con problema</span>` : ''}</div>
+      <div class="table-wrap" style="max-height:340px"><table><thead><tr><th>Fila</th><th>Referencia</th><th>Cliente</th>${mode === 'driver' ? '<th>Pedidos</th><th>Repartidor</th>' : ''}<th></th></tr></thead><tbody>
+      ${R.map((r) => `<tr><td class="num">${r.line}</td><td class="mono">${esc(r.ref)}${r.match ? `<br><small class="muted">por ${esc(r.match)}</small>` : ''}</td><td>${esc(r.customer_name || '')}</td>${mode === 'driver' ? `<td><small>${esc(r.tracking || '')}</small></td><td>${esc(r.driver_name || '')}</td>` : ''}<td>${why(r) ? `<small style="color:var(--bad)">${esc(why(r))}</small>` : '✅'}</td></tr>`).join('')}</tbody></table></div>
+      ${ok.length ? `<div class="row" style="margin-top:8px"><button class="btn primary" id="eaGo">${mode === 'driver' ? `Asignar ${ok.length} cliente(s)` : `Pasar ${ok.length} cliente(s) a ${esc(office.name)}`}</button></div>` : ''}`;
+    $('#eaGo', B)?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        if (mode === 'office') {
+          const r = await POST(`/api/offices/${office.id}/customers`, { ids: [...new Set(ok.map((x) => x.customer_id))] });
+          toast(`${r.moved} clientes pasados a ${office.name}`, 'ok');
+        } else {
+          const by = new Map();
+          for (const r of ok) { if (!by.has(r.driver_id)) by.set(r.driver_id, []); by.get(r.driver_id).push(...r.order_ids); }
+          const msgs = [];
+          for (const [did, ids] of by) {
+            try { const r = await POST('/api/routes/assign', { driver_id: did, order_ids: [...new Set(ids)], date: $('#eaDate', B).value }); msgs.push(`${drivers.find((d) => d.id === did)?.name || 'Repartidor'}: ${r.assigned ?? ids.length}`); }
+            catch (er) { msgs.push(`${drivers.find((d) => d.id === did)?.name || 'Repartidor'}: ${er.message}`); }
+          }
+          modal('Asignación por Excel', `<ul>${msgs.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`, { footer: '<button class="btn primary" data-close>Entendido</button>' });
+        }
+        m.close();
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    });
+  }
+}
+
+function importCustomers(opts) {
+  const office = opts && opts.office_id ? opts : null;
   let table = null;
   let sourceName = '';
-  const m = modal('Importar clientes', '<div class="stack" id="ciBody"></div>', { wide: true });
+  const m = modal(office ? `Importar clientes a ${office.office_name}` : 'Importar clientes', '<div class="stack" id="ciBody"></div>', { wide: true });
   const body = $('#ciBody', m.el);
   const filled = (r) => r && r.some((x) => String(x ?? '').trim() !== '');
   const step1 = () => {
@@ -2827,7 +2945,7 @@ function importCustomers() {
       const orders = $('#ciOrd', body).checked ? { create: true, account_id: $('#ciAcc', body).value || null, product_id: $('#ciProd', body).value || null, qty: $('#ciQty', body).value, scheduled_date: $('#ciDate', body).value, notes: $('#ciNote', body).value, notify: $('#ciNotify', body).checked } : { create: false };
       const btn = e.currentTarget;
       btn.disabled = true;
-      try { step3(rows, orders, await POST('/api/customers/import', { rows, orders, dry_run: true })); }
+      try { step3(rows, orders, await POST('/api/customers/import', { rows, orders, dry_run: true, office_id: office?.office_id })); }
       catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
     };
   };
@@ -2850,7 +2968,7 @@ function importCustomers() {
     $('#ciDo', body)?.addEventListener('click', async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true; btn.textContent = 'Importando…';
-      try { const res = await POST('/api/customers/import', { rows, orders, dry_run: false }); toast(`${res.summary.nuevos} clientes nuevos, ${res.summary.pedidos} pedidos`, 'ok'); step3(rows, orders, res, true); m.el.dataset.done = '1'; }
+      try { const res = await POST('/api/customers/import', { rows, orders, dry_run: false, office_id: office?.office_id }); toast(`${res.summary.nuevos} clientes nuevos, ${res.summary.pedidos} pedidos`, 'ok'); step3(rows, orders, res, true); m.el.dataset.done = '1'; }
       catch (er) { toast(er.message, 'bad'); btn.disabled = false; btn.textContent = 'Importar'; }
     });
     if (shortStock) toast('La existencia del producto no alcanza', 'bad');
