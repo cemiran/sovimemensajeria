@@ -205,7 +205,7 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
   return pts;
 }
 // ---- Editar cliente y ubicación desde un mapa de ruta ----
-const stopEditButtons = () => `<div class="row" style="margin-top:8px;gap:6px"><button class="btn sm" data-ed="1">${icon('person')} Editar cliente</button><button class="btn sm" data-mv="1">${icon('live')} Mover ubicación</button></div>`;
+const stopEditButtons = () => `<div class="row" style="margin-top:8px;gap:6px;flex-wrap:wrap"><button class="btn sm" data-ed="1">${icon('person')} Editar cliente</button><button class="btn sm" data-mv="1">${icon('live')} Mover ubicación</button><button class="btn sm" data-stp="1">${icon('check')} Estado</button></div>`;
 async function afterCustomerMoved(s, onEdit) {
   // la ruta se reordena con la nueva ubicación (solo si aún no sale o tiene paradas pendientes)
   if (s.route_id && ['asignado', 'cargado'].includes(s.status)) {
@@ -221,6 +221,7 @@ function wireStopEdit(map, mk, s, onEdit) {
       const c = await GET('/api/customers/' + s.customer_id);
       customerForm(c, () => afterCustomerMoved(s, onEdit));
     });
+    $('[data-stp]', el)?.addEventListener('click', () => { map.closePopup(); statusPicker(s, () => onEdit()); });
     $('[data-mv]', el)?.addEventListener('click', () => {
       map.closePopup();
       const from = mk.getLatLng();
@@ -888,6 +889,7 @@ async function orderDetail(id) {
     </div>`, {
     wide: true,
     footer: `${staff && ['fallido', 'pendiente', 'asignado'].includes(o.status) ? '<button class="btn" id="resch">Reprogramar</button>' : ''}
+             ${staff && o.status !== 'cancelado' && (o.status !== 'entregado' || store.user.role === 'admin') ? '<button class="btn" id="chgSt">Cambiar estado</button>' : ''}
              ${staff && !['entregado', 'cancelado'].includes(o.status) ? '<button class="btn bad" id="cancel">Cancelar pedido</button>' : ''}
              <button class="btn" id="print">Imprimir etiqueta</button><button class="btn primary" data-close>Cerrar</button>`,
   });
@@ -914,6 +916,7 @@ async function orderDetail(id) {
     $('#oAcc', m.el).innerHTML = `<div class="row"><select id="oAccSel"><option value="">— Sin mayorista —</option>${rows.filter((a) => a.active || a.id === o.account_id).map((a) => `<option value="${a.id}" ${a.id === o.account_id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><button class="btn sm primary" id="oAccOk">Guardar</button></div>`;
     $('#oAccOk', m.el).onclick = async () => { try { await api('PUT', `/api/orders/${o.id}/account`, { account_id: $('#oAccSel', m.el).value || null }); toast('Mayorista actualizado', 'ok'); m.close(); orderDetail(o.id); } catch (e) { toast(e.message, 'bad'); } };
   });
+  $('#chgSt', m.el)?.addEventListener('click', () => { m.close(); statusPicker(o, () => { render(); orderDetail(o.id); }); });
   $('#cancel', m.el)?.addEventListener('click', async () => {
     if (!(await confirmDlg('¿Cancelar el pedido? El stock regresará al inventario.'))) return;
     await POST(`/api/orders/${o.id}/cancel`); toast('Pedido cancelado', 'ok'); m.close(); render();
@@ -1050,7 +1053,8 @@ function customerForm(c, done) {
     box.innerHTML = `${open.length > 1 ? `<label class="f">Pedido<select id="scO">${open.map((o) => `<option value="${o.id}">${esc(o.tracking_code)} · ${STATUS[o.status]}</option>`).join('')}</select></label>` : `<p style="margin:0 0 6px"><b class="mono">${esc(open[0].tracking_code)}</b> · ${badge(open[0].status)}</p>`}
       <div class="grid g3"><label class="f">Día de entrega<input type="date" id="scD" /></label><label class="f">Hora acordada<input type="time" id="scT" /></label>
         <label class="f">Repartidor<select id="scR"><option value="">— Sin asignar —</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select></label></div>
-      <small class="muted">La ruta del repartidor se reordena respetando la hora acordada (±30 min).</small>`;
+      <small class="muted">La ruta del repartidor se reordena respetando la hora acordada (±30 min).</small>
+      <div class="row" style="margin-top:8px;gap:8px"><span class="muted">Estado del pedido:</span><span id="scSt"></span><button type="button" class="btn sm" id="scChg">${icon('check')} Cambiar estado</button></div>`;
     const fill = () => {
       const o = open.find((x) => String(x.id) === String($('#scO', box)?.value || open[0].id));
       $('#scD', box).value = o.scheduled_date || today(); $('#scT', box).value = o.appointment_time || ''; $('#scR', box).value = o.driver_id || '';
@@ -1058,6 +1062,10 @@ function customerForm(c, done) {
     };
     $('#scO', box)?.addEventListener('change', fill);
     fill();
+    const showSt = () => { $('#scSt', box).innerHTML = badge(sched.o.status); };
+    showSt();
+    $('#scO', box)?.addEventListener('change', showSt);
+    $('#scChg', box).onclick = () => statusPicker(sched.o, async () => { m.close(); render(); const c2 = await GET('/api/customers/' + c.id); customerForm(c2, done); });
   })();
   const applySchedule = async () => {
     if (!sched) return '';
@@ -1759,7 +1767,18 @@ async function bulkAssign(v, kind) {
   v.bulkPicked = picked;
 }
 
-function bulkStatus(status, kind, ids) {
+// Cambiar el estado de un pedido desde cualquier pantalla: elegir el estado y luego sus datos (motivo, quién recibió…)
+function statusPicker(order, onDone) {
+  const admin = store.user.role === 'admin';
+  const opts = [['pendiente', 'Pendiente', 'Quitar de la ruta / reprogramar'], ['fallido', 'Fallido', 'Intento no exitoso, con motivo'],
+    ...(admin ? [['entregado', 'Entregado', 'Registro manual (sin foto ni firma)']] : []), ['cancelado', 'Cancelado', 'Regresa la pieza al inventario']]
+    .filter(([k]) => k !== order.status);
+  const m = modal(`Estado del pedido ${order.tracking_code}`, `<p style="margin-top:0">Estado actual: ${badge(order.status)}</p>
+    <div class="stack">${opts.map(([k, l, d]) => `<button class="btn block" data-st="${k}" style="justify-content:flex-start;text-align:left"><span><b>${l}</b><br><small class="muted">${d}</small></span></button>`).join('')}</div>`,
+    { footer: '<button class="btn" data-close>Cerrar</button>' });
+  $$('[data-st]', m.el).forEach((b) => (b.onclick = () => { m.close(); bulkStatus(b.dataset.st, 'orders', [order.id], onDone); }));
+}
+function bulkStatus(status, kind, ids, onDone) {
   if (!status) return toast('Elige el nuevo estado', 'bad');
   if (!ids.length) return;
   const what = `${ids.length} ${kind === 'customers' ? `cliente${ids.length === 1 ? '' : 's'} (sus pedidos activos)` : `pedido${ids.length === 1 ? '' : 's'}`}`;
@@ -1786,8 +1805,9 @@ function bulkStatus(status, kind, ids) {
       const r = await POST('/api/orders/bulk-status', { status, ...fd, notify: !!f.notify?.checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: ids });
       toast(`${r.changed} pedido(s) ahora están ${STATUS[status].toLowerCase()}${r.skipped.length ? ` · ${r.skipped.length} no cambiaron` : ''}`, r.skipped.length ? '' : 'ok');
       m.close();
-      if (r.skipped.length) modal('Pedidos que no cambiaron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
-      else render();
+      const after = () => (onDone ? onDone(r) : render());
+      if (r.skipped.length) modal('Pedidos que no cambiaron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: after });
+      else after();
     } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
   };
 }
