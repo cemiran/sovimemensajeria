@@ -846,7 +846,7 @@ async function viewDashboard(v) {
   for (const x of drivers) if (x.last_lat) { L.marker([x.last_lat, x.last_lng], { icon: truckIcon() }).addTo(map).bindPopup(`<b>${esc(x.name)}</b><br>${fmtDT(x.last_seen)}`); all.push([x.last_lat, x.last_lng]); }
   // Con filtro de oficina o ciudad: clientes con pedido abierto de esa selección
   if (fOff || fCity) {
-    const op = await GET(`/api/orders?limit=500&date=&status=pendiente,asignado,cargado,fallido${F}`);
+    const op = await GET(`/api/orders?limit=3000&date=&status=pendiente,asignado,cargado,fallido${F}`);
     const seen = new Map();
     for (const o of op.rows) if (o.lat != null) { const k = o.customer_id; if (!seen.has(k)) seen.set(k, []); seen.get(k).push(o); }
     const pts = [];
@@ -876,7 +876,7 @@ async function viewOrders(v) {
   const off = p.get('office_id') || '';
   const city = p.get('city') || '';
   const cityList = GET(`/api/dashboard/breakdown?office_id=${off}`).then((r) => r.city_list).catch(() => []);
-  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=500&status=${st}&date=${date}&date_to=${dateTo}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
+  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=3000&status=${st}&date=${date}&date_to=${dateTo}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn" id="asgX">${icon('upload')} Asignar por Excel</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
@@ -1177,7 +1177,7 @@ function customerForm(c, done) {
 async function viewCustomers(v) {
   const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
   const offF = new URLSearchParams(location.hash.split('?')[1] || '').get('office_id') || '';
-  const r = await GET(`/api/customers?limit=300&q=${encodeURIComponent(q)}&office_id=${offF}`);
+  const r = await GET(`/api/customers?limit=5000&q=${encodeURIComponent(q)}&office_id=${offF}`);
   const staffC = !driverMode();
   const offList = staffC ? await GET('/api/warehouses').catch(() => []) : [];
   const geoSt = staffC ? await GET('/api/customers/geocode').catch(() => null) : null;
@@ -2180,7 +2180,7 @@ async function viewOffice(v, id) {
   }
 
   if (tab === 'map') {
-    const r = await GET(`/api/customers?limit=500&office_id=${id}`);
+    const r = await GET(`/api/customers?limit=5000&office_id=${id}`);
     const pts = r.rows.filter((c) => c.lat != null);
     const act = pts.filter((c) => c.active_orders).length;
     body.innerHTML = `<div class="card">
@@ -2199,7 +2199,7 @@ async function viewOffice(v, id) {
 
   if (tab === 'cli') {
     const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q') || '';
-    const r = await GET(`/api/customers?limit=500&office_id=${id}&q=${encodeURIComponent(q)}`);
+    const r = await GET(`/api/customers?limit=5000&office_id=${id}&q=${encodeURIComponent(q)}`);
     body.innerHTML = `<div class="card">
       <form class="row" id="ofCq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" class="grow" placeholder="Número de serie o número de pedido (o nombre, teléfono)" /><button class="btn">Buscar</button>
         <button type="button" class="btn" id="ofImpC">${icon('upload')} Importar Excel</button><button type="button" class="btn" id="ofAsgX">${icon('truck')} Asignar por Excel</button>${admin ? `<button type="button" class="btn" id="ofAddC">${icon('plus')} Pasar clientes a esta oficina</button><button type="button" class="btn" id="ofMovX">${icon('upload')} Pasar por Excel</button>` : ''}<button type="button" class="btn primary" id="ofNewC">${icon('plus')} Nuevo cliente</button></form>
@@ -2218,7 +2218,7 @@ async function viewOffice(v, id) {
   }
 
   if (tab === 'ped') {
-    const r = await GET(`/api/orders?limit=300&date=&office_id=${id}&status=pendiente,asignado,cargado,fallido`);
+    const r = await GET(`/api/orders?limit=3000&date=&office_id=${id}&status=pendiente,asignado,cargado,fallido`);
     body.innerHTML = `<div class="card"><div class="row between"><h2>Pedidos abiertos</h2><a class="btn sm" href="#/orders?date=&office_id=${id}">Ver todos en Pedidos ›</a></div>
       <div class="table-wrap"><table><thead><tr><th>Pedido</th><th>Cliente</th><th>Fecha</th><th>Repartidor</th><th>Estado</th></tr></thead><tbody>
       ${r.rows.map((x) => `<tr class="click" data-o="${x.id}"><td><b>${esc(x.tracking_code)}</b>${x.sn_list ? `<br><small class="mono muted">S/N ${esc(x.sn_list)}</small>` : ''}</td><td>${esc(x.customer_name)}<br><small class="muted">${esc(x.address || '')}</small></td><td>${esc(x.scheduled_date || '')}${x.appointment_time ? ' ' + esc(x.appointment_time) : ''}</td><td>${esc(x.driver_name || '—')}</td><td>${badge(x.status)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No hay pedidos abiertos en esta oficina.</td></tr>'}

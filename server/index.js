@@ -51,8 +51,8 @@ const wrap = (fn) => (req, res, next) => {
     next(e);
   }
 };
-function paging(req) {
-  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+function paging(req, max = 500) {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), max);
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   return { limit, offset };
 }
@@ -1669,7 +1669,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { q } = req.query;
-    const { limit, offset } = paging(req);
+    const { limit, offset } = paging(req, 5000);
     const args = [];
     let w = '';
     let matchCol = 'NULL match_txt';
@@ -2157,7 +2157,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { status, date, driver_id, q, route_id, unrouted, account_id } = req.query;
-    const { limit, offset } = paging(req);
+    const { limit, offset } = paging(req, 5000);
     const where = [];
     const args = [];
     if (req.user.role === 'repartidor') {
