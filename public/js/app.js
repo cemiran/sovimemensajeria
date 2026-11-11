@@ -821,10 +821,16 @@ async function viewDashboard(v) {
   const bdRow = (x, attr) => {
     const tot = (x.pendientes || 0) + (x.en_ruta || 0) + (x.entregados || 0) + (x.fallidos || 0);
     return `<tr class="click" ${attr}><td><b>${esc(x.name || x.city)}</b>${x.cities ? `<br><small class="muted">${esc(x.cities)}</small>` : ''}</td><td class="r num">${fmtN(x.clientes)}</td><td class="r num">${fmtN(x.pendientes)}</td><td class="r num">${fmtN(x.en_ruta)}</td>
-      <td class="r num" style="color:var(--ok)"><b>${fmtN(x.entregados)}</b>${x.entregados_hoy ? `<br><small>+${x.entregados_hoy} hoy</small>` : ''}</td><td class="r num" style="color:var(--bad)">${fmtN(x.fallidos)}${x.fallidos_hoy ? `<br><small>+${x.fallidos_hoy} hoy</small>` : ''}</td>
+      <td class="r num" style="color:var(--ok)"><b>${fmtN(x.entregados)}</b>${x.entregados_hoy ? `<br><small>+${x.entregados_hoy} hoy</small>` : ''}</td><td class="r num" style="color:var(--bad)">${fmtN(x.fallidos)}${x.fallidos_hoy ? `<br><small>+${x.fallidos_hoy} hoy</small>` : ''}</td>${invCell(x)}
       <td style="min-width:110px"><div class="progress"><i style="width:${tot ? (x.entregados / tot) * 100 : 0}%;background:var(--ok)"></i></div><small class="muted">${pct(x.entregados, tot)} entregado</small></td></tr>`;
   };
-  const bdHead = (first) => `<thead><tr><th>${first}</th><th class="r">Clientes</th><th class="r">Pendientes</th><th class="r">En ruta</th><th class="r">Entregados</th><th class="r">Fallidos</th><th>Avance</th></tr></thead>`;
+  const bdHead = (first, inv) => `<thead><tr><th>${first}</th><th class="r">Clientes</th><th class="r">Pendientes</th><th class="r">En ruta</th><th class="r">Entregados</th><th class="r">Fallidos</th>${inv ? '<th class="r" title="Equipos con S/N libres: almacén + repartidores + abierto">Inventario disponible</th>' : ''}<th>Avance</th></tr></thead>`;
+  const invCell = (x) => {
+    if (x.inv_total == null) return '';
+    const need = (x.pendientes || 0) + (x.en_ruta || 0);
+    const short = need - x.inv_total;
+    return `<td class="r num" title="Almacén ${x.inv_almacen} · repartidores ${x.inv_repartidores} · abierto ${x.inv_abierto}"><b>${fmtN(x.inv_total)}</b><br><small class="muted">${fmtN(x.inv_almacen)} alm · ${fmtN(x.inv_repartidores)} rep${x.inv_abierto ? ` · ${fmtN(x.inv_abierto)} abierto` : ''}</small>${short > 0 ? `<br><small style="color:var(--bad)">faltan ${fmtN(short)}</small>` : need ? '<br><small style="color:var(--ok)">alcanza ✓</small>' : ''}</td>`;
+  };
   const c = (s) => orders.rows.filter((o) => s.includes(o.status)).length;
   const T = an.totals || {};
   const nDel = T.delivered || 0, nFail = T.failed || 0;
@@ -859,7 +865,7 @@ async function viewDashboard(v) {
     </div>
   </div>`;
   if (bd) v.querySelector('.grid.g4').insertAdjacentHTML('afterend', `<div class="grid g2" style="margin-top:14px">
-    ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina')}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
+    ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina', true)}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
     <div class="card"><div class="row between"><h2>${icon('live')} Por ciudad</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Ciudad')}<tbody>${bd.cities.map((x) => bdRow(x, `data-city="${esc(x.city)}"`)).join('') || '<tr><td colspan="7" class="muted">Sin datos</td></tr>'}</tbody></table></div></div></div>`);
   const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}`; };
   $('#dashF').onchange = (e) => { const f = new FormData($('#dashF')); go(f.get('office_id') ?? '', e.target.name === 'office_id' ? '' : f.get('city') || ''); };

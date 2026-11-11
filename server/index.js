@@ -1830,6 +1830,13 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
       SUM(o.status = 'fallido' AND date(o.delivered_at,'localtime') = '${d}') fallidos_hoy`;
   const from = `FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.status <> 'cancelado'`;
   const offices = db.prepare(`SELECT w.id, w.name, w.city cities, ${cols} ${from} JOIN warehouses w ON w.id = ${OFFICE_OF('c')} ${W} GROUP BY w.id ORDER BY w.is_default DESC, w.name`).all(...A);
+  // inventario disponible (equipos con S/N libres): en el almacén de la oficina, con sus repartidores y en abierto
+  const inv = db.prepare(`SELECT
+      SUM(s.holder_id IS NULL AND s.open_pool = 0 AND s.warehouse_id = ?) almacen,
+      SUM(s.holder_id IN (SELECT u.id FROM users u WHERE ${OFFICE_OF('u')} = ?)) repartidores,
+      SUM(s.holder_id IS NULL AND s.open_pool = 1 AND s.warehouse_id = ?) abierto
+    FROM serials s WHERE s.status = 'disponible'`);
+  for (const o of offices) { const r = inv.get(o.id, o.id, o.id); Object.assign(o, { inv_almacen: r.almacen || 0, inv_repartidores: r.repartidores || 0, inv_abierto: r.abierto || 0 }); o.inv_total = o.inv_almacen + o.inv_repartidores + o.inv_abierto; }
   const cities = db.prepare(`SELECT COALESCE(NULLIF(TRIM(c.city),''),'Sin ciudad') city, ${cols} ${from} ${W} GROUP BY lower(TRIM(COALESCE(c.city,''))) ORDER BY clientes DESC`).all(...A);
   // ciudades disponibles para filtrar (dentro de la oficina)
   const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
