@@ -4577,9 +4577,14 @@ function openReceipt(e) {
   $('#prR', m.el).onclick = () => printEl($('#rcpt', m.el));
 }
 
-const rcState = { q: '', from: '', to: '', kind: '', result: 'entregado' };
+const rcState = { q: '', from: '', to: '', kind: '', result: 'entregado', office_id: '', city: '', driver_id: '' };
 async function viewReceipts(v) {
   if (!rcState.from) { rcState.from = new Date(Date.now() - 6 * 864e5).toLocaleDateString('en-CA'); rcState.to = today(); }
+  const [rcOffs, rcCities, rcDrivers] = await Promise.all([
+    store.user.role === 'admin' ? GET('/api/warehouses').catch(() => []) : [],
+    GET(`/api/dashboard/breakdown?office_id=${rcState.office_id}`).then((r) => r.city_list || []).catch(() => []),
+    GET('/api/users?role=repartidor').catch(() => []),
+  ]);
   v.innerHTML = topbar('Recepciones', `<button class="btn primary" id="ctrBtn">${icon('sign')} Recepción en mostrador</button>`,
     'Quién recibió cada paquete, con firma, fotografía, hora y ubicación.') + `
   <div class="card">
@@ -4589,12 +4594,21 @@ async function viewReceipts(v) {
       <input type="date" name="to" value="${rcState.to}" aria-label="Hasta" style="width:auto" />
       <select name="kind" aria-label="Tipo"><option value="">Ruta y mostrador</option><option value="ruta">En ruta</option><option value="mostrador">En mostrador</option></select>
       <select name="result" aria-label="Resultado"><option value="entregado">Entregados</option><option value="fallido">No entregados</option><option value="">Todos</option></select>
+      ${rcOffs.length > 1 ? `<select name="office_id" aria-label="Oficina"><option value="">Todas las oficinas</option>${rcOffs.map((w) => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select>` : ''}
+      <select name="city" aria-label="Ciudad"><option value="">Todas las ciudades</option>${rcCities.map((c) => `<option>${esc(c)}</option>`).join('')}</select>
+      <select name="driver_id" aria-label="Repartidor"><option value="">Todos los repartidores</option>${rcDrivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.active ? '' : ' (inactivo)'}</option>`).join('')}</select>
     </form>
     <div id="rcList" class="rc-grid"></div>
     <div class="pager" id="rcMore"></div>
   </div>`;
   const f = $('#rcF');
   f.kind.value = rcState.kind; f.result.value = rcState.result;
+  if (f.office_id) f.office_id.value = rcState.office_id;
+  if (rcState.city && !rcCities.some((c) => c.toLowerCase() === rcState.city.toLowerCase())) rcState.city = '';
+  f.city.value = rcCities.find((c) => c.toLowerCase() === rcState.city.toLowerCase()) || '';
+  f.driver_id.value = rcState.driver_id;
+  // al cambiar de oficina se recargan sus ciudades
+  f.office_id?.addEventListener('change', (e) => { e.stopPropagation(); Object.assign(rcState, Object.fromEntries(new FormData(f)), { city: '' }); render(); });
   let offset = 0;
   let rows = [];
   const load = async (reset) => {

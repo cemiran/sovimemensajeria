@@ -2924,6 +2924,9 @@ app.get(
     if (req.query.result) { where.push('e.result = ?'); args.push(req.query.result); }
     if (req.query.kind) { where.push('e.kind = ?'); args.push(req.query.kind); }
     if (req.query.driver_id) { where.push('e.driver_id = ?'); args.push(Number(req.query.driver_id)); }
+    const offR = req.user.office || Number(req.query.office_id) || null;
+    if (offR) { where.push(`${OFFICE_OF('c')} = ?`); args.push(offR); }
+    if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
     if (req.query.q) { where.push('(o.tracking_code LIKE ? OR c.name LIKE ? OR e.receiver_name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const from = `FROM evidences e JOIN orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=e.driver_id ${w}`;
