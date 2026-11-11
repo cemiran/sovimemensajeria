@@ -1436,6 +1436,20 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
       }
       qtyBy.set(p.id, (qtyBy.get(p.id) || 0) + it.qty);
     }
+    // Si el cliente ya tenía un pedido abierto (p. ej. el que cargó la oficina), esta entrega lo reemplaza:
+    // se cancela el anterior (sin pedido duplicado) y el nuevo hereda su mayorista y notas. Solo uno por entrega.
+    const prev = db.prepare(`SELECT * FROM orders WHERE customer_id=? AND id<>? AND status IN ('pendiente','asignado','fallido','cargado')
+      AND (status<>'cargado' OR driver_id=?) ORDER BY CASE status WHEN 'cargado' THEN 0 WHEN 'asignado' THEN 1 ELSE 2 END, id LIMIT 1`).get(c.id, oid, me);
+    if (prev) {
+      db.prepare("UPDATE orders SET account_id=COALESCE(account_id, ?), notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?")
+        .run(prev.account_id, `Reemplaza a ${prev.tracking_code}`, oid);
+      for (const x of db.prepare("SELECT id FROM serials WHERE order_id=? AND status='asignado'").all(prev.id)) {
+        db.prepare("UPDATE serials SET status='disponible', order_id=NULL, assigned_at=NULL, updated_at=datetime('now') WHERE id=?").run(x.id);
+        serialEvent(x.id, 'liberado', prev.id, me, `Pedido reemplazado por ${code}`);
+      }
+      db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?")
+        .run(`Cancelado: reemplazado por ${code} (entrega registrada por el repartidor)`, prev.id);
+    }
     for (const [pid, qty] of qtyBy) {
       db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, pid, qty);
       // la existencia libre baja como en cualquier pedido; si ya estaba apartada para otro pedido no se descuenta dos veces
