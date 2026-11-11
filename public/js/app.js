@@ -981,10 +981,10 @@ async function orderDetail(id) {
           <dt>Estado</dt><dd>${badge(o.status)} ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</dd>
           ${staff ? `<dt>Mayorista</dt><dd id="oAcc">${o.account_name ? `<b>${esc(o.account_name)}</b>` : '<span class="muted">Sin mayorista</span>'} <button class="btn sm ghost" id="oAccEd">Cambiar</button></dd>` : ''}
           <dt>Cliente</dt><dd><b>${esc(o.customer_name)}</b>${o.customer_phone ? `<br>Móvil: <a href="tel:${esc(o.customer_phone)}">${esc(o.customer_phone)}</a>` : ''}${o.customer_phone_alt ? `<br>Adicional: <a href="tel:${esc(o.customer_phone_alt)}">${esc(o.customer_phone_alt)}</a>` : ''}${o.telnor_phone ? `<br>Telnor: <span class="mono">${esc(o.telnor_phone)}</span>` : ''}</dd>
-          <dt>Dirección</dt><dd>${esc(o.address)}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}</dd>
+          <dt>Dirección</dt><dd>${esc(o.address)}${o.customer_colonia && !String(o.address || '').toUpperCase().includes(String(o.customer_colonia).toUpperCase()) ? `, Col. ${esc(o.customer_colonia)}` : ''}${o.customer_city ? `, ${esc(o.customer_city)}` : ''}${o.address_reference ? `<br><small class="muted">${esc(o.address_reference)}</small>` : ''}${staff ? ` <button class="btn sm ghost" id="oAddrEd" title="Editar domicilio y datos del cliente">${icon('edit')} Editar</button>` : ''}</dd>
           <dt>Ventana</dt><dd>${o.appointment_time ? `<b>⏰ ${esc(o.appointment_time)}</b> (hora acordada)` : o.window_start ? `${esc(o.window_start)}–${esc(o.window_end)}` : 'Libre'}</dd>
           <dt>Fecha</dt><dd>${esc(o.scheduled_date)}</dd>
-          <dt>Repartidor</dt><dd>${esc(o.driver_name || '—')} ${o.stop_seq ? `· parada ${o.stop_seq} · ETA ${esc(o.eta || '—')}` : ''}</dd>
+          <dt>Repartidor</dt><dd id="oDrv">${esc(o.driver_name || '—')} ${o.stop_seq ? `· parada ${o.stop_seq} · ETA ${esc(o.eta || '—')}` : ''}${staff && ['pendiente', 'asignado'].includes(o.status) ? ` <button class="btn sm ghost" id="oDrvEd">${icon('truck')} ${o.driver_id ? 'Cambiar' : 'Asignar'}</button>` : ''}</dd>
           ${o.shipment_type && o.shipment_type !== 'general' || o.temp_min != null || o.temp_max != null || o.requires_seal ? `<dt>Tipo de envío</dt><dd><b>${esc(SHIP_TYPES[o.shipment_type] || 'General')}</b>${fmtRange(o.temp_min, o.temp_max) ? ` · ${fmtRange(o.temp_min, o.temp_max)}` : ''}${o.requires_seal ? ` · sello ${esc(o.seal_number || '')} a verificar` : ''}</dd>` : ''}
           <dt>Cobro (COD)</dt><dd>${money(o.cod_amount)}</dd>
           <dt>Intentos</dt><dd>${o.attempts}</dd>
@@ -997,7 +997,7 @@ async function orderDetail(id) {
         <div class="label-print printable" id="lbl"><b>${esc(SETTINGS.company_name)}</b><svg id="bc"></svg><div>${esc(o.customer_name)}</div><small>${esc(o.address)}</small></div>
       </div>
       <div class="stack">
-        ${o.lat != null ? '<div id="omap" class="map sm"></div>' : '<p class="muted">Cliente sin geolocalización</p>'}
+        ${o.lat != null || staff ? `<div id="omap" class="map sm"></div>${staff ? `<small class="muted">${o.lat != null ? 'Arrastra el pin <b>C</b> o toca el mapa en el domicilio correcto para corregir la ubicación del cliente.' : '<b style="color:var(--warn)">Cliente sin ubicación:</b> toca el mapa en su domicilio para ubicarlo.'}${['calle', 'colonia', 'ciudad'].includes(o.geo_quality) ? ` <span class="chip warn">${GEO_Q[o.geo_quality][0]}</span>` : ''}</small>` : ''}` : '<p class="muted">Cliente sin geolocalización</p>'}
         <div><h3>Evidencias</h3>${o.evidences.length ? o.evidences.map((e) => `
           <div class="card" style="padding:12px;margin-bottom:10px">
             <div class="row between">${badge(e.result)}<small class="muted">${fmtDT(e.created_at)}</small></div>
@@ -1049,11 +1049,52 @@ async function orderDetail(id) {
     const e = o.evidences.find((x) => String(x.id) === b.dataset.rcpt);
     openReceipt({ ...e, tracking_code: o.tracking_code, customer_name: o.customer_name, address: o.address, customer_phone: o.customer_phone, cod_amount: o.cod_amount, public_link: o.public_link, driver_name: e.kind === 'mostrador' ? '' : o.driver_name, serials_text: e.result === 'entregado' ? o.serials.map((x) => x.serial).join(', ') : '' });
   }));
-  if (o.lat != null) {
-    const map = makeMap($('#omap', m.el), [o.lat, o.lng], 15);
-    L.marker([o.lat, o.lng], { icon: pinIcon('C', '#1d5a96') }).addTo(map).bindPopup('Cliente');
+  if (o.lat != null || staff) {
+    const has = o.lat != null;
+    const map = makeMap($('#omap', m.el), has ? [o.lat, o.lng] : depotLatLng(), has ? 15 : 12);
+    const pin = has ? L.marker([o.lat, o.lng], { icon: pinIcon('C', '#1d5a96'), draggable: staff }).addTo(map).bindPopup('Cliente') : null;
     for (const e of o.evidences) if (e.lat) L.circleMarker([e.lat, e.lng], { radius: 8, color: e.result === 'entregado' ? '#1f8a4c' : '#c0392b' }).addTo(map).bindPopup('GPS del repartidor');
+    if (staff) {
+      // corregir la ubicación del cliente: arrastrando el pin o tocando el mapa
+      const savePin = async (ll) => {
+        if (!(await confirmDlg(`¿Guardar la nueva ubicación de ${o.customer_name}? Se usará en todas sus entregas${o.route_id ? ' y se reordenará la ruta' : ''}.`))) { if (pin && has) pin.setLatLng([o.lat, o.lng]); return; }
+        try {
+          await api('PUT', '/api/customers/' + o.customer_id, { lat: ll.lat, lng: ll.lng });
+          if (o.route_id) await POST(`/api/routes/${o.route_id}/optimize`, {}).catch(() => {});
+          toast('Ubicación guardada', 'ok'); m.close(); orderDetail(o.id);
+        } catch (er) { toast(er.message, 'bad'); if (pin && has) pin.setLatLng([o.lat, o.lng]); }
+      };
+      pin?.on('dragend', () => savePin(pin.getLatLng()));
+      map.on('click', (ev) => savePin(ev.latlng));
+    }
   }
+  // editar domicilio / datos del cliente
+  $('#oAddrEd', m.el)?.addEventListener('click', async () => {
+    const c = await GET('/api/customers/' + o.customer_id);
+    m.close();
+    customerForm(c, async () => { if (o.route_id) await POST(`/api/routes/${o.route_id}/optimize`, {}).catch(() => {}); render(); orderDetail(o.id); });
+  });
+  // cambiar (o asignar) repartidor: el pedido pasa a la ruta de ese repartidor en la fecha elegida y se reordena
+  $('#oDrvEd', m.el)?.addEventListener('click', async () => {
+    let drivers = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
+    if (store.user.role !== 'repartidor') { drivers = drivers.filter((d) => d.id !== store.user.id); drivers.unshift({ id: store.user.id, name: `Yo (${store.user.name})` }); }
+    $('#oDrv', m.el).innerHTML = `<div class="row" style="gap:6px;flex-wrap:wrap"><select id="oDrvSel"><option value="">Elige repartidor…</option>${drivers.map((d) => `<option value="${d.id}" ${d.id === o.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select>
+      <input type="date" id="oDrvDate" value="${esc(o.scheduled_date && o.scheduled_date >= today() ? o.scheduled_date : today())}" style="width:auto" />
+      <button class="btn sm primary" id="oDrvOk">Guardar</button>${o.driver_id ? '<button class="btn sm ghost" id="oDrvRm" title="Quitar de la ruta: vuelve a pendiente">Quitar repartidor</button>' : ''}</div>`;
+    $('#oDrvOk', m.el).onclick = async () => {
+      const id = $('#oDrvSel', m.el).value;
+      if (!id) return toast('Elige el repartidor', 'bad');
+      try {
+        const r = await POST('/api/routes/assign', { driver_id: id, date: $('#oDrvDate', m.el).value, order_ids: [o.id] });
+        if (r.skipped?.length) return toast(`No se movió: ${r.skipped[0].reason}`, 'bad');
+        toast(`Pedido asignado a ${r.driver}`, 'ok'); m.close(); render(); orderDetail(o.id);
+      } catch (er) { toast(er.message, 'bad'); }
+    };
+    $('#oDrvRm', m.el)?.addEventListener('click', async () => {
+      try { await POST('/api/orders/bulk-status', { status: 'pendiente', order_ids: [o.id] }); toast('Pedido sin repartidor (pendiente)', 'ok'); m.close(); render(); orderDetail(o.id); }
+      catch (er) { toast(er.message, 'bad'); }
+    });
+  });
   $('#oAccEd', m.el)?.addEventListener('click', async () => {
     const { rows } = await GET('/api/accounts');
     $('#oAcc', m.el).innerHTML = `<div class="row"><select id="oAccSel"><option value="">— Sin mayorista —</option>${rows.filter((a) => a.active || a.id === o.account_id).map((a) => `<option value="${a.id}" ${a.id === o.account_id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select><button class="btn sm primary" id="oAccOk">Guardar</button></div>`;
