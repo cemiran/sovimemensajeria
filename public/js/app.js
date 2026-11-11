@@ -4610,6 +4610,9 @@ async function viewMyRoute(v) {
   <span data-gps></span><div id="ckBanner"></div>
   ${!navigator.onLine ? '<div class="offline-bar">Sin conexión. Puedes seguir registrando entregas.</div>' : ''}
   ${queued.length ? `<div class="offline-bar">${queued.length} evidencias en cola de envío</div>` : ''}
+  ${r.status === 'planificada' && open.length ? `<div class="card" style="margin-bottom:12px;border:2px solid var(--brand,#1d5a96)"><div class="row between"><div><b style="font-size:17px">Ruta lista: ${open.length} parada${open.length === 1 ? '' : 's'}</b><br><small class="muted">Al iniciar se avisa a tus clientes que vas en camino y a la primera parada que llegas pronto.</small></div>
+      <button class="btn primary lg" id="startRoute">▶ Iniciar ruta</button></div></div>`
+    : r.started_at ? `<div class="info-bar" style="margin-bottom:12px">${icon('route')} Ruta en curso desde las ${new Date(r.started_at.replace(' ', 'T') + 'Z').toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</div>` : ''}
   ${next ? `<div class="card next-card">
     <small class="muted">Siguiente parada · ${next.stop_seq} de ${r.stops.length}${next.eta ? ' · llegada estimada ' + esc(next.eta) : ''}</small>
     <h2 style="margin:4px 0 2px">${esc(next.customer_name)}</h2><div>${esc(next.address)}</div>${next.address_reference ? `<small class="muted">${esc(next.address_reference)}</small>` : ''}
@@ -4646,6 +4649,20 @@ async function viewMyRoute(v) {
   const showMe = (p) => { if (!$('#mymap')) return gpsListeners.delete(showMe); if (meMk) meMk.setLatLng([p.lat, p.lng]); else meMk = L.marker([p.lat, p.lng], { icon: meIcon(), zIndexOffset: 1000 }).addTo(map); };
   if (GPS.last) showMe(GPS.last);
   gpsListeners.add(showMe);
+  $('#startRoute')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (!(await confirmDlg(`¿Iniciar tu ruta? Se avisará a tus ${open.length} cliente(s) que vas en camino.`))) return;
+    btn.disabled = true;
+    try {
+      const x = await POST('/api/my/route/start', {});
+      toast(`Ruta iniciada · ${x.notified} cliente(s) avisados${x.first_notified ? ' · la primera parada sabe que llegas pronto' : ''}`, 'ok');
+      render();
+    } catch (er) {
+      btn.disabled = false;
+      toast(er.message, 'bad');
+      if (/checklist/i.test(er.message)) location.hash = '#/check';
+    }
+  });
   $('#reopt').onclick = async () => {
     const p = GPS.last || (await getPosition());
     try { const o = await POST(`/api/routes/${r.id}/optimize`, p ? { lat: p.lat, lng: p.lng } : {}); toast(`Ruta re-optimizada: ${o.distance_km} km restantes`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }

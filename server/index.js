@@ -2548,7 +2548,7 @@ function registerEvidence(req, result) {
   notify.queueEvent(result, o.id);
   // Aviso "tu repartidor está cerca" para la siguiente parada de la ruta
   if (o.route_id && !counter) {
-    const nx = db.prepare("SELECT id, leg_km FROM orders WHERE route_id=? AND status='cargado' ORDER BY stop_seq LIMIT 1").get(o.route_id);
+    const nx = db.prepare("SELECT id, leg_km FROM orders WHERE route_id=? AND status IN ('asignado','cargado') ORDER BY stop_seq LIMIT 1").get(o.route_id);
     if (nx) {
       const mins = Math.max(5, Math.round(((nx.leg_km || 2) / (Number(s.avg_speed_kmh) || 22)) * 60 + (Number(s.service_minutes) || 6)));
       notify.queueEvent('proximo', nx.id, { minutos: mins });
@@ -2991,6 +2991,50 @@ app.get(
     const route = db.prepare('SELECT * FROM routes WHERE id=?').get(r.id);
     route.stops = db.prepare(`${ORDER_SELECT} WHERE o.route_id=? ORDER BY o.stop_seq`).all(r.id);
     res.json(route);
+  })
+);
+app.post(
+  '/api/my/route/start',
+  auth('repartidor'),
+  wrap((req, res) => {
+    const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY CASE status WHEN 'en_curso' THEN 0 ELSE 1 END, id DESC LIMIT 1").get(req.user.id, today());
+    if (!r) throw new HttpError(404, 'No tienes ruta para hoy');
+    if (getSettings().require_vehicle_check === '1' && !todayCheck(req.user.id)) {
+      const e = new HttpError(409, 'Antes de iniciar, llena el checklist de tu unidad (menú Mi ruta → Checklist de unidad)');
+      e.data = { code: 'check_required' };
+      throw e;
+    }
+    const s = getSettings();
+    const open = db.prepare("SELECT id, eta, leg_km FROM orders WHERE route_id=? AND status IN ('asignado','cargado') ORDER BY stop_seq").all(r.id);
+    if (!open.length) throw new HttpError(409, 'Tu ruta no tiene paradas pendientes');
+    const speed = Number(s.avg_speed_kmh) || 22;
+    tx(() => {
+      db.prepare("UPDATE routes SET status='en_curso', started_at=COALESCE(started_at, datetime('now')) WHERE id=?").run(r.id);
+      // la hora estimada de llegada se recorre a la hora real de salida (si cambió más de 10 min)
+      const toMin = (t) => (/^\d{1,2}:\d{2}$/.test(t || '') ? Number(t.split(':')[0]) * 60 + Number(t.split(':')[1]) : null);
+      const first = open[0];
+      const e1 = toMin(first.eta);
+      if (e1 != null) {
+        const now = new Date(); const nowMin = now.getHours() * 60 + now.getMinutes();
+        const plannedStart = e1 - Math.round(((first.leg_km || 2) / speed) * 60);
+        const delta = nowMin - plannedStart;
+        if (Math.abs(delta) > 10) {
+          const up = db.prepare('UPDATE orders SET eta=? WHERE id=?');
+          for (const o of open) { const m = toMin(o.eta); if (m == null) continue; const t = Math.max(0, Math.min(23 * 60 + 59, m + delta)); up.run(`${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`, o.id); }
+        }
+      }
+    });
+    // avisos (según la matriz de Notificaciones y solo al móvil del cliente); sin repetir "en camino"
+    let avisados = 0;
+    for (const o of open) {
+      if (db.prepare("SELECT 1 FROM messages WHERE order_id=? AND event='en_camino' LIMIT 1").get(o.id)) continue;
+      if (notify.queueEvent('en_camino', o.id)) avisados++;
+    }
+    const f = open[0];
+    const mins = Math.max(5, Math.round(((f.leg_km || 2) / speed) * 60 + 2));
+    const cerca = notify.queueEvent('proximo', f.id, { minutos: mins }) ? 1 : 0;
+    audit(req, 'ruta.iniciar', `Ruta ${r.id}: ${open.length} paradas, ${avisados} clientes avisados`);
+    res.json({ ok: true, stops: open.length, notified: avisados, first_notified: cerca });
   })
 );
 app.post(
