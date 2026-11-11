@@ -189,6 +189,10 @@ function makeMap(el, center, zoom = 12) {
 const pinIcon = (label, color, chk = false) => L.divIcon({ className: '', html: `<div class="pin${chk ? ' chk' : ''}" style="background:${color}"><span>${esc(label)}</span></div>${chk ? '<b class="pin-q" title="Ubicación por revisar">!</b>' : ''}`, iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -26] });
 // ubicación aproximada (calle, colonia o centro de la ciudad): se marca para que el repartidor la revise o la oficina la corrija
 const geoChk = (q) => ['calle', 'colonia', 'ciudad'].includes(q);
+// teléfonos del cliente para el repartidor: móvil, adicional y la línea Telnor (todos se pueden marcar)
+const fmtTel = (p) => { const d = String(p || '').replace(/\D/g, '').slice(-10); return d.length === 10 ? `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}` : String(p || ''); };
+const phonesLine = (o) => [o.customer_phone && ['Móvil', o.customer_phone], o.customer_phone_alt && ['Adicional', o.customer_phone_alt], o.telnor_phone && ['Telnor', o.telnor_phone]]
+  .filter(Boolean).map(([l, p]) => `<a href="tel:${esc(String(p).replace(/[^\d+]/g, ''))}" class="tel-l${l === 'Telnor' ? ' telnor' : ''}" onclick="event.stopPropagation()">${icon('phone')} ${l}: <b class="mono">${esc(fmtTel(p))}</b></a>`).join('');
 const geoWarn = (q) => (geoChk(q) ? `<span class="chip warn" title="El pin está en su ${q === 'ciudad' ? 'ciudad' : q}; el repartidor la confirma al llegar o la oficina mueve el pin">⚠ Ubicación por revisar · ${q === 'ciudad' ? 'centro de la ciudad' : q === 'calle' ? 'por calle' : 'en su colonia'}</span>` : '');
 const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin">🏭</div>', iconSize: [30, 30], iconAnchor: [15, 15] });
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
@@ -4895,6 +4899,7 @@ async function viewMyRoute(v) {
   ${next ? `<div class="card next-card">
     <small class="muted">Siguiente parada · ${next.stop_seq} de ${r.stops.length}${next.eta ? ' · llegada estimada ' + esc(next.eta) : ''}</small>
     <h2 style="margin:4px 0 2px">${esc(next.customer_name)}</h2><div>${esc(next.address)}</div>${next.address_reference ? `<small class="muted">${esc(next.address_reference)}</small>` : ''}
+    <div class="tels">${phonesLine(next)}</div>
     ${geoChk(next.geo_quality) ? `<div style="margin-top:6px">${geoWarn(next.geo_quality)}<br><small class="muted">Al llegar al domicilio toca <b>📍 Estoy aquí</b> para dejar la ubicación correcta.</small> <button class="btn sm" data-here="${next.id}">📍 Estoy aquí</button></div>` : ''}
     ${next.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(next.cod_amount)}</div>` : ''}
     <div class="row" style="margin-top:12px"><a class="btn primary lg grow" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
@@ -4913,7 +4918,7 @@ async function viewMyRoute(v) {
     const actionable = ['asignado', 'cargado'].includes(s.status) && !q;
     return `<div class="stop ${cls}"><div class="n">${s.status === 'entregado' || q ? '✓' : s.status === 'fallido' ? '✕' : s.stop_seq}</div><div>
       <div class="row between"><span class="addr">${esc(s.customer_name)}</span><span class="num muted">${esc(s.eta || '')}</span></div>
-      <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}${geoChk(s.geo_quality) && actionable ? `${geoWarn(s.geo_quality)}<br>` : ''}
+      <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}${geoChk(s.geo_quality) && actionable ? `${geoWarn(s.geo_quality)}<br>` : ''}<div class="tels">${phonesLine(s)}</div>
       <small class="muted">${esc(s.tracking_code)} ${s.appointment_time ? `· <b>⏰ ${esc(s.appointment_time)}</b>` : s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
@@ -5005,7 +5010,7 @@ async function viewNavigate(v, id) {
     <button class="btn nav-fab" id="recenter" aria-label="Centrar en mi ubicación">${icon('target')}</button>
     <div class="nav-sheet">
       <div class="row between"><div class="grow"><small class="muted">Parada ${s.stop_seq} de ${stops.length} · ${esc(s.tracking_code)}</small>
-        <h2 style="margin:2px 0">${esc(s.customer_name)}</h2><div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small>` : ''}</div>
+        <h2 style="margin:2px 0">${esc(s.customer_name)}</h2><div>${esc(s.address)}</div><div class="tels">${phonesLine(s)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small>` : ''}</div>
         <a href="#/my" class="btn sm ghost" aria-label="Cerrar navegación">${icon('x')}</a></div>
       ${s.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(s.cod_amount)}</div>` : ''}
       <div class="arrive" id="arrive" hidden>${icon('live')} Llegaste al domicilio</div>
@@ -5146,7 +5151,7 @@ async function viewScan(v) {
     q = q.trim();
     if (q.length < 3) return ($('#fsRes').innerHTML = '<p class="muted">Escribe al menos 3 letras o números del S/N o del pedido.</p>');
     const r = await GET('/api/orders?limit=30&date=&q=' + encodeURIComponent(q));
-    $('#fsRes').innerHTML = r.rows.map((o) => `<button class="live-row" data-o="${o.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(o.customer_name)}</b><br><small class="mono">${o.sn_list ? 'S/N ' + esc(o.sn_list) + ' · ' : ''}${esc(o.tracking_code)}</small><br><small class="muted">${esc(o.address || '')} · ${esc(o.scheduled_date || '')}</small></span>${badge(o.status)}</button>`).join('')
+    $('#fsRes').innerHTML = r.rows.map((o) => `<button class="live-row" data-o="${o.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(o.customer_name)}</b><br><small class="mono">${o.sn_list ? 'S/N ' + esc(o.sn_list) + ' · ' : ''}${esc(o.tracking_code)}</small><br><small class="muted">${esc(o.address || '')} · ${esc(o.scheduled_date || '')}</small>${o.telnor_phone ? `<br><small>Telnor: <b class="mono">${esc(fmtTel(o.telnor_phone))}</b></small>` : ''}</span>${badge(o.status)}</button>`).join('')
       || '<p class="muted">No tienes pedidos con ese número de serie o número de pedido. Para ver un equipo de tu inventario usa <a href="#/stock">Inventario</a>.</p>';
     $$('[data-o]', v).forEach((b) => (b.onclick = () => open(r.rows.find((o) => o.id === Number(b.dataset.o)))));
   };
@@ -5168,7 +5173,7 @@ async function viewDeliver(v, id, mode) {
   startTracking();
   v.innerHTML = topbar(isFail ? 'Entrega no realizada' : 'Recepción del cliente', `<a href="#/my" class="btn sm">Volver</a>`) + `
   <div class="card stack">
-    <div><b>${esc(o.customer_name)}</b> · <span class="mono">${esc(o.tracking_code)}</span><br><small>${esc(o.address)}</small>
+    <div><b>${esc(o.customer_name)}</b> · <span class="mono">${esc(o.tracking_code)}</span><br><small>${esc(o.address)}</small><div class="tels">${phonesLine(o)}</div>
       ${o.items.length ? `<br><small class="muted">${o.items.map((i) => `${i.qty}× ${esc(i.name)}`).join(', ')}</small>` : ''}
       ${o.cod_amount && !isFail ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(o.cod_amount)} al cliente</div>` : ''}</div>
     <div class="row between" id="verifyRow"><span id="verifyTxt">${verified ? '✅ Paquete verificado por escaneo' : '⚠️ Escanea la etiqueta para verificar el paquete'}</span>${verified ? '' : `<button class="btn sm" id="verify">${icon('scan')} Verificar</button>`}</div>
