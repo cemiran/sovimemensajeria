@@ -2279,6 +2279,34 @@ function canSee(user, order) {
   if (STAFF.includes(user.role)) return !user.office || customerOffice(order.customer_id) === user.office;
   return order.driver_id === user.id;
 }
+// Ordena pedidos por ciudad y, dentro de cada ciudad, por cercanía (vecino más cercano desde su oficina):
+// los renglones seguidos quedan juntos en el mapa y al seleccionarlos se arma una ruta compacta.
+function geoSort(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const k = canonCity(r.customer_city || '') || 'Sin ciudad';
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const out = [];
+  const cities = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  for (const [city, list] of cities) {
+    const geo = list.filter((r) => r.lat != null), none = list.filter((r) => r.lat == null);
+    const offId = officeForCity(city) || db.prepare('SELECT id FROM warehouses WHERE is_default=1').get()?.id;
+    const w = offId ? db.prepare('SELECT lat, lng FROM warehouses WHERE id=? AND lat IS NOT NULL').get(offId) : null;
+    let cur = w || (geo.length ? { lat: geo.reduce((a, r) => a + r.lat, 0) / geo.length, lng: geo.reduce((a, r) => a + r.lng, 0) / geo.length } : null);
+    const kx = Math.cos(((cur?.lat || 32) * Math.PI) / 180);
+    let i = 0;
+    while (geo.length) {
+      let bi = 0, bd = Infinity;
+      for (let j = 0; j < geo.length; j++) { const dx = (geo[j].lng - cur.lng) * kx, dy = geo[j].lat - cur.lat, d = dx * dx + dy * dy; if (d < bd) { bd = d; bi = j; } }
+      cur = geo.splice(bi, 1)[0];
+      out.push({ ...cur, city_group: city, geo_seq: ++i });
+    }
+    for (const r of none) out.push({ ...r, city_group: city, geo_seq: null });
+  }
+  return out;
+}
 function customerOffice(customerId) {
   return db.prepare(`SELECT ${OFFICE_OF('c')} o FROM customers c WHERE c.id = ?`).get(customerId)?.o ?? null;
 }
@@ -2334,7 +2362,7 @@ app.get(
     const rows = db.prepare(`${ORDER_SELECT} ${w} ORDER BY o.scheduled_date DESC, o.route_id, o.stop_seq, o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     const snq = db.prepare("SELECT GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id = ?");
     for (const r of rows) r.sn_list = snq.get(r.id).l;
-    res.json({ total, rows });
+    res.json({ total, rows: req.query.sort === 'geo' ? geoSort(rows) : rows });
   })
 );
 app.get(
