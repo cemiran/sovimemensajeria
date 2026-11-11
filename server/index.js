@@ -1822,7 +1822,8 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const city = String(req.query.city || '').trim();
   const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
   const [p1, p2] = [okD(req.query.from) ? req.query.from : today(), okD(req.query.to) ? req.query.to : today()].sort();
-  const W = `WHERE 1 ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
+  const drvB = Number(req.query.driver_id) || null;
+  const W = `WHERE 1 ${drvB ? `AND o.driver_id = ${drvB}` : ''} ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
   const A = city ? [city] : [];
   const cols = `COUNT(DISTINCT c.id) clientes,
       SUM(o.status = 'pendiente') pendientes, SUM(o.status IN ('asignado','cargado')) en_ruta,
@@ -2811,7 +2812,8 @@ app.get(
     if (req.user.role === 'repartidor') {
       where.push('r.driver_id = ?');
       args.push(req.user.id);
-    } else if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
+    } else if (Number(req.query.driver_id)) { where.push('r.driver_id = ?'); args.push(Number(req.query.driver_id)); }
+    else if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
     const rows = db
       .prepare(
         `SELECT r.*, u.name driver_name,
@@ -3164,7 +3166,7 @@ app.get(
         `SELECT u.id, u.name, u.vehicle, u.last_lat, u.last_lng, u.last_seen,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status IN ('asignado','cargado')) pending,
           (SELECT COUNT(*) FROM orders o WHERE o.driver_id=u.id AND o.scheduled_date=? AND o.status='entregado') delivered
-         FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) || null } }, 'u')} ORDER BY u.name`
+         FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${Number(req.query.driver_id) ? `AND u.id = ${Number(req.query.driver_id)}` : ''} ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) || null } }, 'u')} ORDER BY u.name`
       )
       .all(today(), today());
     res.json(rows);
@@ -3208,7 +3210,8 @@ app.get(
     const sreq = { user: { office: offA } };
     const cityA = String(req.query.city || '').trim();
     const cityW = cityA ? ` AND lower(TRIM(c2.city)) = '${cityA.toLowerCase().replace(/'/g, "''")}'` : '';
-    const OFF = offA || cityA ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '';
+    const drvA = Number(req.query.driver_id) || null;
+    const OFF = (offA || cityA ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '') + (drvA ? ` AND o.driver_id = ${drvA}` : '');
     const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
     const R = [from, to, from, to];
     const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
@@ -3221,7 +3224,7 @@ app.get(
            FROM routes r WHERE r.driver_id=u.id AND r.date BETWEEN ? AND ? AND r.started_at IS NOT NULL) hours,
         (SELECT ROUND(AVG(e.distance_to_customer_m)) FROM evidences e WHERE e.driver_id=u.id AND date(e.created_at,'localtime') BETWEEN ? AND ?) avg_gps_dev_m
        FROM users u LEFT JOIN orders o ON o.driver_id=u.id AND ${IN}
-       WHERE (u.role='repartidor' OR u.can_deliver=1) ${inOffice(sreq, 'u')} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
+       WHERE (u.role='repartidor' OR u.can_deliver=1) ${inOffice(sreq, 'u')}${drvA ? ` AND u.id = ${drvA}` : ''} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, from, to, from, to, ...R)
       .map((d) => ({
         ...d,
         success_rate: d.delivered + d.failed ? +((d.delivered / (d.delivered + d.failed)) * 100).toFixed(1) : null,

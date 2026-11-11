@@ -824,9 +824,11 @@ async function viewDashboard(v) {
   const admin = store.user.role === 'admin';
   const fOff = admin ? prm.get('office_id') || '' : '';
   const fCity = prm.get('city') || '';
-  const F = `&office_id=${fOff}&city=${encodeURIComponent(fCity)}`;
+  const fDrv = prm.get('driver_id') || '';
+  const F = `&office_id=${fOff}&city=${encodeURIComponent(fCity)}&driver_id=${fDrv}`;
+  const drvList = await GET('/api/users?role=repartidor').then((r) => (Array.isArray(r) ? r : r.rows || []).filter((u) => u.active)).catch(() => []);
   const [orders, routes, drivers, an, bd, offs] = await Promise.all([
-    GET(`/api/orders?date=${d}&date_to=${dTo}&limit=200000${F}`), GET(`/api/routes?date=${d}&date_to=${dTo}&office_id=${fOff}`), GET(`/api/tracking/drivers?office_id=${fOff}`), GET(`/api/analytics?from=${d}&to=${dTo}${F}`),
+    GET(`/api/orders?date=${d}&date_to=${dTo}&limit=200000${F}`), GET(`/api/routes?date=${d}&date_to=${dTo}&office_id=${fOff}&driver_id=${fDrv}`), GET(`/api/tracking/drivers?office_id=${fOff}&driver_id=${fDrv}`), GET(`/api/analytics?from=${d}&to=${dTo}${F}`),
     GET(`/api/dashboard/breakdown?${F.slice(1)}&from=${d}&to=${dTo}`).catch(() => null), admin ? GET('/api/offices').catch(() => []) : Promise.resolve([]),
   ]);
   const pct = (a, b) => (b ? fmtN((a / b) * 100, 0) + '%' : '—');
@@ -855,9 +857,10 @@ async function viewDashboard(v) {
     <label class="row" style="gap:6px">${icon('history')}<select name="per">${[['hoy', 'Hoy'], ['ayer', 'Ayer'], ['7', 'Últimos 7 días'], ['30', 'Últimos 30 días'], ['mes', 'Este mes'], ['rango', 'Elegir fechas…']].map(([k, l]) => `<option value="${k}" ${k === per ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     ${per === 'rango' ? `<input type="date" name="from" value="${d}" /><small>a</small><input type="date" name="to" value="${dTo}" />` : ''}
     ${admin && offs.length > 1 ? `<label class="row" style="gap:6px">${icon('building')}<select name="office_id"><option value="">Todas las oficinas</option>${offs.map((o) => `<option value="${o.id}" ${String(o.id) === fOff ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>` : ''}
+    <label class="row" style="gap:6px">${icon('truck')}<select name="driver_id"><option value="">Todos los repartidores</option>${drvList.map((u) => `<option value="${u.id}" ${String(u.id) === fDrv ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}</select></label>
     <label class="row" style="gap:6px">${icon('live')}<select name="city"><option value="">Todas las ciudades</option>${(bd?.city_list || []).map((c) => `<option ${c.toLowerCase() === fCity.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
-    ${fOff || fCity ? `<a class="btn sm ghost" href="#/dashboard?per=${per}${per === 'rango' ? `&from=${d}&to=${dTo}` : ''}">Quitar filtros</a>` : ''}
-    <small class="muted grow" style="text-align:right">${fOff || fCity ? `Viendo: ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : 'Viendo todo'}</small>
+    ${fOff || fCity || fDrv ? `<a class="btn sm ghost" href="#/dashboard?per=${per}${per === 'rango' ? `&from=${d}&to=${dTo}` : ''}">Quitar filtros</a>` : ''}
+    <small class="muted grow" style="text-align:right">${fOff || fCity || fDrv ? `Viendo: ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity, drvList.find((u) => String(u.id) === fDrv)?.name].filter(Boolean).join(' · '))}` : 'Viendo todo'}</small>
   </form>
   <div class="grid g4">
     <div class="card kpi"><div class="label">Pedidos ${esc(perTxt)}</div><div class="value">${T.total || 0}</div><div class="sub">${c(['pendiente'])} sin ruta · programados o atendidos ${esc(perTxt)}</div></div>
@@ -882,7 +885,7 @@ async function viewDashboard(v) {
     ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina', true)}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
     <div class="card"><div class="row between"><h2>${icon('live')} Por ciudad</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Ciudad')}<tbody>${bd.cities.map((x) => bdRow(x, `data-city="${esc(x.city)}"`)).join('') || '<tr><td colspan="7" class="muted">Sin datos</td></tr>'}</tbody></table></div></div></div>`);
   const perQ = () => { const f = new FormData($('#dashF')); const pp = f.get('per') || per; return `&per=${pp}${pp === 'rango' ? `&from=${f.get('from') || d}&to=${f.get('to') || dTo}` : ''}`; };
-  const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}${perQ()}`; };
+  const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}&driver_id=${new FormData($('#dashF')).get('driver_id') || ''}${perQ()}`; };
   $('#dashF').onchange = (e) => { const f = new FormData($('#dashF')); go(f.get('office_id') ?? '', e.target.name === 'office_id' ? '' : f.get('city') || ''); };
   $$('[data-off]', v).forEach((tr) => (tr.onclick = () => admin && go(tr.dataset.off, '')));
   $$('[data-city]', v).forEach((tr) => (tr.onclick = () => tr.dataset.city !== 'Sin ciudad' && go(null, tr.dataset.city)));
