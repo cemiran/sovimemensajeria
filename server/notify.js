@@ -378,7 +378,9 @@ async function processQueue() {
     // los más urgentes primero: "está por llegar", luego entregado/no entregado, luego "va en camino"
     const msgs = db.prepare(`SELECT * FROM messages WHERE status='pendiente' AND next_try_at<=datetime('now')
       ORDER BY CASE event WHEN 'prueba' THEN 0 WHEN 'proximo' THEN 1 WHEN 'entregado' THEN 2 WHEN 'fallido' THEN 2 WHEN 'registrado' THEN 4 ELSE 3 END, id LIMIT 40`).all();
-    const smsLimit = Math.max(1, Number(s.sms_limit_30min) || 28);
+    // si el teléfono rechazó SMS por su límite en la última media hora, se baja solo al ritmo seguro (25 por 30 min)
+    const limitHit = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND error LIKE 'Teléfono: límite%' AND gw_checked_at >= datetime('now','-30 minutes')").get().n;
+    const smsLimit = Math.max(1, limitHit ? Math.min(25, Number(s.sms_limit_30min) || 28) : Number(s.sms_limit_30min) || 28);
     const smsGapMs = Math.max(0, Number(s.sms_gap_seconds ?? 3)) * 1000;
     let smsRecent = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND sent_at >= datetime('now','-30 minutes')").get().n;
     for (const m of msgs) {
