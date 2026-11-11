@@ -807,21 +807,33 @@ const skeleton = () => `<div class="skel-wrap"><div class="skel h"></div><div cl
 
 // ================= STAFF: Tablero =================
 async function viewDashboard(v) {
-  const d = today();
   const prm = new URLSearchParams(location.hash.split('?')[1] || '');
+  // Periodo: hoy, ayer, últimos 7 / 30 días, este mes o un rango
+  const iso = (x) => x.toLocaleDateString('en-CA');
+  const per = prm.get('per') || 'hoy';
+  const now0 = new Date(); const back = (n) => { const x = new Date(now0); x.setDate(x.getDate() - n); return iso(x); };
+  let d = today(), dTo = today();
+  if (per === 'ayer') d = dTo = back(1);
+  else if (per === '7') d = back(6);
+  else if (per === '30') d = back(29);
+  else if (per === 'mes') d = iso(new Date(now0.getFullYear(), now0.getMonth(), 1));
+  else if (per === 'rango') { d = prm.get('from') || today(); dTo = prm.get('to') || d; if (dTo < d) [d, dTo] = [dTo, d]; }
+  const one = d === dTo;
+  const fmtD = (x) => new Date(x + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+  const perTxt = per === 'hoy' ? 'hoy' : per === 'ayer' ? 'ayer' : one ? `del ${fmtD(d)}` : `del ${fmtD(d)} al ${fmtD(dTo)}`;
   const admin = store.user.role === 'admin';
   const fOff = admin ? prm.get('office_id') || '' : '';
   const fCity = prm.get('city') || '';
   const F = `&office_id=${fOff}&city=${encodeURIComponent(fCity)}`;
   const [orders, routes, drivers, an, bd, offs] = await Promise.all([
-    GET(`/api/orders?date=${d}&limit=500${F}`), GET(`/api/routes?date=${d}&office_id=${fOff}`), GET(`/api/tracking/drivers?office_id=${fOff}`), GET(`/api/analytics?from=${d}&to=${d}${F}`),
-    GET(`/api/dashboard/breakdown?${F.slice(1)}`).catch(() => null), admin ? GET('/api/offices').catch(() => []) : Promise.resolve([]),
+    GET(`/api/orders?date=${d}&date_to=${dTo}&limit=200000${F}`), GET(`/api/routes?date=${d}&date_to=${dTo}&office_id=${fOff}`), GET(`/api/tracking/drivers?office_id=${fOff}`), GET(`/api/analytics?from=${d}&to=${dTo}${F}`),
+    GET(`/api/dashboard/breakdown?${F.slice(1)}&from=${d}&to=${dTo}`).catch(() => null), admin ? GET('/api/offices').catch(() => []) : Promise.resolve([]),
   ]);
   const pct = (a, b) => (b ? fmtN((a / b) * 100, 0) + '%' : '—');
   const bdRow = (x, attr) => {
     const tot = (x.pendientes || 0) + (x.en_ruta || 0) + (x.entregados || 0) + (x.fallidos || 0);
     return `<tr class="click" ${attr}><td><b>${esc(x.name || x.city)}</b>${x.cities ? `<br><small class="muted">${esc(x.cities)}</small>` : ''}</td><td class="r num">${fmtN(x.clientes)}</td><td class="r num">${fmtN(x.pendientes)}</td><td class="r num">${fmtN(x.en_ruta)}</td>
-      <td class="r num" style="color:var(--ok)"><b>${fmtN(x.entregados)}</b>${x.entregados_hoy ? `<br><small>+${x.entregados_hoy} hoy</small>` : ''}</td><td class="r num" style="color:var(--bad)">${fmtN(x.fallidos)}${x.fallidos_hoy ? `<br><small>+${x.fallidos_hoy} hoy</small>` : ''}</td>${invCell(x)}
+      <td class="r num" style="color:var(--ok)"><b>${fmtN(x.entregados)}</b>${x.entregados_hoy ? `<br><small>+${x.entregados_hoy} ${esc(perTxt)}</small>` : ''}</td><td class="r num" style="color:var(--bad)">${fmtN(x.fallidos)}${x.fallidos_hoy ? `<br><small>+${x.fallidos_hoy} ${esc(perTxt)}</small>` : ''}</td>${invCell(x)}
       <td style="min-width:110px"><div class="progress"><i style="width:${tot ? (x.entregados / tot) * 100 : 0}%;background:var(--ok)"></i></div><small class="muted">${pct(x.entregados, tot)} entregado</small></td></tr>`;
   };
   const bdHead = (first, inv) => `<thead><tr><th>${first}</th><th class="r">Clientes</th><th class="r">Pendientes</th><th class="r">En ruta</th><th class="r">Entregados</th><th class="r">Fallidos</th>${inv ? '<th class="r" title="Equipos con S/N libres: almacén + repartidores + abierto">Inventario disponible</th>' : ''}<th>Avance</th></tr></thead>`;
@@ -838,21 +850,23 @@ async function viewDashboard(v) {
   const hr = new Date().getHours();
   v.innerHTML = topbar(`${hr < 12 ? 'Buenos días' : hr < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${esc(firstName(store.user.name))}`,
     `<a class="btn" href="#/routes">${icon('route')} Planificar rutas</a><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`,
-    `Resumen del ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}`) + `
+    per === 'hoy' ? `Resumen del ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}` : `Resumen ${perTxt}`) + `
   <form class="row card" id="dashF" style="gap:8px;flex-wrap:wrap;padding:10px 14px;margin-bottom:12px">
+    <label class="row" style="gap:6px">${icon('history')}<select name="per">${[['hoy', 'Hoy'], ['ayer', 'Ayer'], ['7', 'Últimos 7 días'], ['30', 'Últimos 30 días'], ['mes', 'Este mes'], ['rango', 'Elegir fechas…']].map(([k, l]) => `<option value="${k}" ${k === per ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    ${per === 'rango' ? `<input type="date" name="from" value="${d}" /><small>a</small><input type="date" name="to" value="${dTo}" />` : ''}
     ${admin && offs.length > 1 ? `<label class="row" style="gap:6px">${icon('building')}<select name="office_id"><option value="">Todas las oficinas</option>${offs.map((o) => `<option value="${o.id}" ${String(o.id) === fOff ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>` : ''}
     <label class="row" style="gap:6px">${icon('live')}<select name="city"><option value="">Todas las ciudades</option>${(bd?.city_list || []).map((c) => `<option ${c.toLowerCase() === fCity.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
-    ${fOff || fCity ? '<a class="btn sm ghost" href="#/dashboard">Quitar filtros</a>' : ''}
+    ${fOff || fCity ? `<a class="btn sm ghost" href="#/dashboard?per=${per}${per === 'rango' ? `&from=${d}&to=${dTo}` : ''}">Quitar filtros</a>` : ''}
     <small class="muted grow" style="text-align:right">${fOff || fCity ? `Viendo: ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : 'Viendo todo'}</small>
   </form>
   <div class="grid g4">
-    <div class="card kpi"><div class="label">Pedidos hoy</div><div class="value">${T.total || 0}</div><div class="sub">${c(['pendiente'])} sin ruta · programados o atendidos hoy</div></div>
+    <div class="card kpi"><div class="label">Pedidos ${esc(perTxt)}</div><div class="value">${T.total || 0}</div><div class="sub">${c(['pendiente'])} sin ruta · programados o atendidos ${esc(perTxt)}</div></div>
     <div class="card kpi"><div class="label">En ruta</div><div class="value">${c(['asignado', 'cargado'])}</div><div class="sub">${c(['cargado'])} ya en vehículo</div></div>
-    <div class="card kpi"><div class="label">Entregados hoy</div><div class="value" style="color:var(--ok)">${nDel}</div><div class="sub">${done ? fmtN((nDel / done) * 100, 1) + '% de éxito' : '—'}</div></div>
-    <div class="card kpi"><div class="label">Fallidos hoy</div><div class="value" style="color:var(--bad)">${nFail}</div><div class="sub">${routes.length} rutas · ${fmtN(routes.reduce((a, r) => a + (r.distance_km || 0), 0), 1)} km plan</div></div>
+    <div class="card kpi"><div class="label">Entregados ${esc(perTxt)}</div><div class="value" style="color:var(--ok)">${nDel}</div><div class="sub">${done ? fmtN((nDel / done) * 100, 1) + '% de éxito' : '—'}</div></div>
+    <div class="card kpi"><div class="label">Fallidos ${esc(perTxt)}</div><div class="value" style="color:var(--bad)">${nFail}</div><div class="sub">${routes.length} rutas · ${fmtN(routes.reduce((a, r) => a + (r.distance_km || 0), 0), 1)} km plan</div></div>
   </div>
   <div class="grid g-main" style="margin-top:14px">
-    <div class="card"><div class="row between"><h2>${fOff || fCity ? `Clientes con pedido · ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : 'Rutas del día'}</h2><small class="muted" id="dmapInfo">🚚 posición de repartidores</small></div><div id="dmap" class="map${fOff || fCity ? ' tall' : ''}"></div>
+    <div class="card"><div class="row between"><h2>${fOff || fCity ? `Clientes con pedido · ${esc([offs.find((o) => String(o.id) === fOff)?.name, fCity].filter(Boolean).join(' · '))}` : per === 'hoy' ? 'Rutas del día' : `Rutas ${esc(perTxt)}`}</h2><small class="muted" id="dmapInfo">🚚 posición de repartidores</small></div><div id="dmap" class="map${fOff || fCity ? ' tall' : ''}"></div>
       ${fOff || fCity ? `<div class="legend" style="margin-top:8px">${['pendiente', 'asignado', 'cargado', 'fallido'].map((k) => `<span><i style="background:${PIN_COLORS[k]}"></i>${STATUS[k]}</span>`).join('')}<span>🚚 Repartidor</span></div>` : ''}</div>
     <div class="stack">
       <div class="card"><h2>Avance por repartidor</h2>${drivers.length ? drivers.map((x) => {
@@ -867,7 +881,8 @@ async function viewDashboard(v) {
   if (bd) v.querySelector('.grid.g4').insertAdjacentHTML('afterend', `<div class="grid g2" style="margin-top:14px">
     ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina', true)}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
     <div class="card"><div class="row between"><h2>${icon('live')} Por ciudad</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Ciudad')}<tbody>${bd.cities.map((x) => bdRow(x, `data-city="${esc(x.city)}"`)).join('') || '<tr><td colspan="7" class="muted">Sin datos</td></tr>'}</tbody></table></div></div></div>`);
-  const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}`; };
+  const perQ = () => { const f = new FormData($('#dashF')); const pp = f.get('per') || per; return `&per=${pp}${pp === 'rango' ? `&from=${f.get('from') || d}&to=${f.get('to') || dTo}` : ''}`; };
+  const go = (o, c) => { location.hash = `#/dashboard?office_id=${o ?? fOff}&city=${encodeURIComponent(c ?? fCity)}${perQ()}`; };
   $('#dashF').onchange = (e) => { const f = new FormData($('#dashF')); go(f.get('office_id') ?? '', e.target.name === 'office_id' ? '' : f.get('city') || ''); };
   $$('[data-off]', v).forEach((tr) => (tr.onclick = () => admin && go(tr.dataset.off, '')));
   $$('[data-city]', v).forEach((tr) => (tr.onclick = () => tr.dataset.city !== 'Sin ciudad' && go(null, tr.dataset.city)));

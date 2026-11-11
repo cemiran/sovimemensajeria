@@ -1820,14 +1820,15 @@ app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
 app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const off = req.user.office || Number(req.query.office_id) || null;
   const city = String(req.query.city || '').trim();
-  const d = today();
+  const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const [p1, p2] = [okD(req.query.from) ? req.query.from : today(), okD(req.query.to) ? req.query.to : today()].sort();
   const W = `WHERE 1 ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
   const A = city ? [city] : [];
   const cols = `COUNT(DISTINCT c.id) clientes,
       SUM(o.status = 'pendiente') pendientes, SUM(o.status IN ('asignado','cargado')) en_ruta,
       SUM(o.status = 'entregado') entregados, SUM(o.status = 'fallido') fallidos,
-      SUM(o.status = 'entregado' AND date(o.delivered_at,'localtime') = '${d}') entregados_hoy,
-      SUM(o.status = 'fallido' AND date(o.delivered_at,'localtime') = '${d}') fallidos_hoy`;
+      SUM(o.status = 'entregado' AND date(o.delivered_at,'localtime') BETWEEN '${p1}' AND '${p2}') entregados_hoy,
+      SUM(o.status = 'fallido' AND date(o.delivered_at,'localtime') BETWEEN '${p1}' AND '${p2}') fallidos_hoy`;
   const from = `FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND o.status <> 'cancelado'`;
   const offices = db.prepare(`SELECT w.id, w.name, w.city cities, ${cols} ${from} JOIN warehouses w ON w.id = ${OFFICE_OF('c')} ${W} GROUP BY w.id ORDER BY w.is_default DESC, w.name`).all(...A);
   // inventario disponible (equipos con S/N libres): en el almacén de la oficina, con sus repartidores y en abierto
@@ -2800,7 +2801,10 @@ app.get(
   wrap((req, res) => {
     const where = [];
     const args = [];
-    if (req.query.date) {
+    if (req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date_to || '') && req.query.date_to !== req.query.date) {
+      where.push('r.date BETWEEN ? AND ?');
+      args.push(...[req.query.date, req.query.date_to].sort());
+    } else if (req.query.date) {
       where.push('r.date = ?');
       args.push(req.query.date);
     }
