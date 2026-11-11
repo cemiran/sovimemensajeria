@@ -2122,7 +2122,7 @@ async function nominatim(q, bias) {
   if (r.status === 429) throw new Error('rate');
   if (!r.ok) return null;
   const j = await r.json();
-  return j[0] ? { lat: Number(j[0].lat), lng: Number(j[0].lon) } : null;
+  return j[0] ? { lat: Number(j[0].lat), lng: Number(j[0].lon), cat: j[0].category, type: j[0].type, addr: j[0].addresstype } : null;
 }
 // Limpia el domicilio para el buscador: "Blvd. Benito Juárez 984-Loc 8 B" -> "Boulevard Benito Juárez 984"
 const CITY_OSM = { rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito', 'san quintin': 'San Quintín', 'san luis rio colorado': 'San Luis Río Colorado', 'san luis r c': 'San Luis Río Colorado' };
@@ -2181,7 +2181,31 @@ function colonyCenter(colonia, city, excludeId = 0) {
   return { ...c, n: near.length || peers.length };
 }
 // Ubica un domicilio probando varias búsquedas (de la más exacta a la más general). Devuelve { lat, lng, quality } o null.
-async function geocodeAddress({ address, colonia, city }) {
+// Centro de la colonia: el del mapa (zona/colonia de OpenStreetMap) o, si no está, el de nuestros clientes bien ubicados en ella
+const colAnchorCache = new Map();
+async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0) {
+  if (!col) return null;
+  const key = normCity(city) + '|' + colKey(col);
+  if (!colAnchorCache.has(key)) {
+    let a = null;
+    const colS = String(col).replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªoAO]?|primera|segunda|tercera)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').replace(/^(fracc?(ionamiento)?|col(onia)?)\.?\s+/i, '').trim();
+    // variantes: tal cual, sin "2a sección"/"Fracc.", y en plural o singular ("INFONAVIT PRESIDENTE" = "INFONAVIT Presidentes")
+    const pl = (x) => (/s$/i.test(x) ? x.replace(/e?s$/i, '') : /[aeiou]$/i.test(x) ? x + 'S' : x + 'ES');
+    for (const v of [...new Set([col, colS, pl(colS)])].filter(Boolean)) {
+      try {
+        const g = await nominatim(`${v}, ${cityName}, ${st}`, bias); await pause(1100);
+        // solo una zona (colonia, fraccionamiento, barrio), no una calle que se llame igual
+        if (g && inBox(g) && g.cat !== 'highway' && (['place', 'landuse', 'boundary'].includes(g.cat) || ['suburb', 'neighbourhood', 'quarter', 'residential', 'city_district', 'hamlet', 'village', 'isolated_dwelling'].includes(g.addr))) { a = { lat: g.lat, lng: g.lng, src: 'mapa' }; break; }
+      } catch (e) { if (e.message === 'rate') await pause(30000); }
+    }
+    colAnchorCache.set(key, a);
+  }
+  const ext = colAnchorCache.get(key);
+  if (ext) return ext;
+  const own = colonyCenter(col, city, excludeId);
+  return own && own.n >= 2 ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
+}
+async function geocodeAddress({ address, colonia, city, id = 0 }) {
   const cityName = osmCity(city);
   const st = stateOf(city);
   const ctr = await cityCenter(city).catch(() => null);
@@ -2200,26 +2224,71 @@ async function geocodeAddress({ address, colonia, city }) {
   if (street) tries.push(['photon', 'calle']);
   if (name && name !== street) tries.push([`${name}, ${col ? col + ', ' : ''}${cityName}, ${st}`, 'calle']);
   if (name && name !== street) tries.push(['photon-calle', 'calle']);
-  if (col) tries.push([`${col}, ${cityName}, ${st}`, 'colonia']);
-  const colS = String(col).replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªoAO]?|primera|segunda|tercera)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').trim();
-  if (colS && colS !== col) tries.push([`${colS}, ${cityName}, ${st}`, 'colonia']);
-  if (col) tries.push(['photon-col', 'colonia']);
-  for (const [q, quality] of tries) {
+  const anchor = await colonyAnchor(col, city, cityName, st, bias, inBox, id);
+  const house = (g) => g.cat === 'building' || ['house', 'building', 'apartments', 'detached', 'commercial'].includes(g.type) || ['building', 'house'].includes(g.addr) || (g.cat === 'place' && g.type === 'house');
+  let street1 = null;
+  for (const [q] of tries) {
     try {
-      let g;
+      let g, quality;
       if (q === 'photon') {
         g = await photon(`${street}${col ? ', ' + col : ''}, ${cityName}`, ctr);
-        if (g && !['house', 'street'].includes(g.type)) g = null;
+        quality = g?.type === 'house' ? 'exacta' : g?.type === 'street' ? 'calle' : null;
       } else if (q === 'photon-calle') {
         g = await photon(`${name}, ${cityName}, ${st}`, ctr);
-        if (g && g.type !== 'street') g = null;
-      } else if (q === 'photon-col') {
-        g = await photon(`${col}, ${cityName}, ${st}`, ctr);
-      } else { g = await nominatim(q, bias); await pause(1100); }
-      if (g && inBox(g)) return { lat: g.lat, lng: g.lng, quality };
+        quality = g?.type === 'street' ? 'calle' : null;
+      } else {
+        g = await nominatim(q, bias); await pause(1100);
+        // con número: exacta solo si encontró el edificio; si encontró la calle, es "calle"
+        quality = g ? (house(g) ? 'exacta' : 'calle') : null;
+      }
+      if (!g || !quality || !inBox(g)) continue;
+      // debe quedar dentro de su colonia: una avenida larga con el mismo nombre puede estar a kilómetros
+      if (anchor && haversine(g, anchor) > (quality === 'exacta' ? 2.5 : 1.2)) continue;
+      if (quality === 'exacta') return { lat: g.lat, lng: g.lng, quality };
+      if (!street1) street1 = { lat: g.lat, lng: g.lng, quality: 'calle' };
+      if (anchor) break; // calle dentro de su colonia: suficiente
     } catch (e) { if (e.message === 'rate') await pause(30000); }
   }
-  return null;
+  if (street1 && anchor) return street1;
+  if (anchor) return { lat: anchor.lat, lng: anchor.lng, quality: 'colonia' };
+  return street1; // sin colonia para validar: la calle (queda por revisar)
+}
+// Auditoría en segundo plano: revisa las ubicaciones guardadas contra su colonia y corrige las que quedaron lejos
+const gaudit = { running: false, done: 0, fixed: 0 };
+async function geoAudit() {
+  if (gaudit.running || geo.running || refine.running) return;
+  gaudit.running = true;
+  const setK = (k, v) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v));
+  try {
+    for (;;) {
+      if (getSettings().geo_audit !== '1') break;
+      const last = Number(getSettings().geo_audit_last || 0);
+      const c = db.prepare("SELECT * FROM customers WHERE id > ? AND lat IS NOT NULL AND geo_quality IN ('exacta','calle','colonia','ciudad') ORDER BY id LIMIT 1").get(last);
+      if (!c) { setK('geo_audit', '0'); break; }
+      const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+      const cityName = osmCity(c.city), st = stateOf(c.city);
+      const ctr = await cityCenter(c.city).catch(() => null);
+      const rr = ctr?.r || 0.2;
+      const bias = ctr ? `${ctr.lng - rr * 1.2},${ctr.lat + rr},${ctr.lng + rr * 1.2},${ctr.lat - rr}` : null;
+      const inBox = (g) => !ctr || (Math.abs(g.lat - ctr.lat) < rr && Math.abs(g.lng - ctr.lng) < rr * 1.2);
+      const anchor = await colonyAnchor(colA, c.city, cityName, st, bias, inBox, c.id);
+      const lim = c.geo_quality === 'exacta' ? 2.5 : c.geo_quality === 'calle' ? 1.5 : 1;
+      if (anchor && (c.geo_quality === 'ciudad' || haversine(c, anchor) > lim)) {
+        const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city, id: c.id });
+        if (hit) {
+          db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('exacta','calle','colonia','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
+          db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `${c.name}: estaba a ${haversine(c, anchor).toFixed(1)} km de su colonia (${colA}); reubicado (${hit.quality})`);
+          gaudit.fixed++;
+        }
+      }
+      gaudit.done++;
+      setK('geo_audit_last', c.id);
+    }
+  } catch (e) {
+    console.error('geoAudit', e.message);
+  } finally {
+    gaudit.running = false;
+  }
 }
 app.get('/api/geocode', auth(...STAFF), wrap(async (req, res) => {
   const { address = '', colonia = '', city = '' } = req.query;
@@ -2245,7 +2314,7 @@ async function geocodePending() {
       if (!c) break;
       // colonia escrita en el domicilio ("…, Col. MADERO") si no viene aparte
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
-      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', id: c.id });
       void dl; void dg;
       let hit2 = hit;
       if (!hit2 || hit2.quality === 'colonia') { const cc = colonyCenter(colA, c.city, c.id); if (cc) hit2 = { lat: cc.lat, lng: cc.lng, quality: 'colonia' }; }
@@ -2262,6 +2331,7 @@ async function geocodePending() {
   } finally {
     geo.running = false;
     if (getSettings().geo_refine === '1') setImmediate(refineApprox);
+    else if (getSettings().geo_audit === '1') setImmediate(geoAudit);
   }
 }
 // Mejora ubicaciones aproximadas (centro de la colonia o de la calle): si encuentra el domicilio exacto lo actualiza;
@@ -2278,7 +2348,7 @@ async function refineApprox() {
       const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_refine', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
-      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', id: c.id });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
       const rank = { exacta: 3, calle: 2, colonia: 1, ciudad: 0 };
       if (c.geo_quality === 'ciudad' && (!hit || hit.quality === 'colonia')) {
@@ -2296,6 +2366,7 @@ async function refineApprox() {
     console.error('refine', e.message);
   } finally {
     refine.running = false;
+    if (getSettings().geo_audit === '1') setImmediate(geoAudit);
   }
 }
 app.get(
