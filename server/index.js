@@ -712,12 +712,19 @@ function assignSerial(o, raw, user) {
     throw new HttpError(409, `El S/N ${sn} ${where}`);
   }
   // El repartidor toma del inventario disponible de su oficina, del abierto o del que él trae
+  // (también del almacén de la oficina que atiende la ciudad del cliente; y si no trae inventario asignado de ese
+  // artículo, puede usar uno que tenga otro repartidor de su oficina: el inventario queda abierto para entregar)
   if (user.role === 'repartidor') {
+    const offs = new Set([user.office, customerOffice(o.customer_id)].filter(Boolean).map(Number));
     if (s.holder_id && s.holder_id !== user.id) {
-      const h = db.prepare('SELECT name FROM users WHERE id=?').get(s.holder_id);
-      throw new HttpError(409, `El S/N ${sn} lo trae ${h?.name || 'otro repartidor'}`);
+      const mine = db.prepare("SELECT COUNT(*) n FROM serials WHERE holder_id=? AND product_id=? AND status='disponible'").get(user.id, s.product_id).n;
+      if (mine || !offs.has(Number(userOffice(s.holder_id)))) {
+        const h = db.prepare('SELECT name FROM users WHERE id=?').get(s.holder_id);
+        throw new HttpError(409, `El S/N ${sn} lo trae ${h?.name || 'otro repartidor'}${mine ? `; tú traes ${mine} de este artículo: usa uno de los tuyos` : ''}`);
+      }
+      serialEvent(s.id, 'traspaso', o.id, user.id, `Lo traía ${db.prepare('SELECT name FROM users WHERE id=?').get(s.holder_id)?.name || 'otro repartidor'}; lo entrega ${user.name}`);
     }
-    if (!s.holder_id && !s.open_pool && s.warehouse_id && user.office && s.warehouse_id !== user.office) {
+    if (!s.holder_id && !s.open_pool && s.warehouse_id && offs.size && !offs.has(Number(s.warehouse_id))) {
       const w = db.prepare('SELECT name FROM warehouses WHERE id=?').get(s.warehouse_id);
       throw new HttpError(409, `El S/N ${sn} está en el almacén ${w?.name || 'de otra oficina'}, no en el de tu oficina`);
     }
