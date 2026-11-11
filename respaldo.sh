@@ -3,7 +3,10 @@
 # copia consistente de la base de datos; se conservan los últimos 14 días.
 set -e
 D=$(date +%F)
-docker exec -e BK_FILE="/app/data/respaldos/ultimamilla-$D.db" sovime node --disable-warning=ExperimentalWarning -e '
+# "./respaldo.sh ahora": copia nueva con hora (antes de cada cambio o actualización); sin argumento, la diaria
+F="/app/data/respaldos/ultimamilla-$D.db"
+[ "$1" = "ahora" ] && F="/app/data/respaldos/ultimamilla-$D-$(date +%H%M%S).db"
+docker exec -e BK_FILE="$F" sovime node --disable-warning=ExperimentalWarning -e '
 const { DatabaseSync } = require("node:sqlite");
 const fs = require("fs");
 const f = process.env.BK_FILE;

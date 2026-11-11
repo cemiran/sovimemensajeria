@@ -2201,9 +2201,15 @@ async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0)
     colAnchorCache.set(key, a);
   }
   const ext = colAnchorCache.get(key);
-  if (ext) return ext;
+  // colonia "amplia" o genérica (p. ej. Telnor pone "CENTRO" a clientes de toda Ensenada): si nuestros clientes con
+  // ubicación exacta en esa colonia están dispersos (mitad a más de 2.5 km del centro), la colonia no sirve para validar
+  const k = colKey(col);
+  const spread = db.prepare(`SELECT lat, lng, colonia FROM customers WHERE lat IS NOT NULL AND geo_quality IN ('exacta','manual','gps_entrega','repartidor') AND lower(TRIM(city)) = lower(TRIM(?)) AND id <> ?`)
+    .all(String(city || ''), excludeId).filter((p) => colKey(p.colonia) === k);
+  const broad = (a) => { if (spread.length < 5) return false; const ds = spread.map((p) => haversine(p, a)).sort((x, y) => x - y); return ds[Math.floor(ds.length / 2)] > 2.5; };
+  if (ext) return broad(ext) ? null : ext;
   const own = colonyCenter(col, city, excludeId);
-  return own && own.n >= 2 ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
+  return own && own.n >= 2 && !broad(own) ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
 }
 async function geocodeAddress({ address, colonia, city, id = 0 }) {
   const cityName = osmCity(city);
