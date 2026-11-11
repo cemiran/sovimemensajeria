@@ -379,7 +379,8 @@ async function processQueue() {
     const msgs = db.prepare(`SELECT * FROM messages WHERE status='pendiente' AND next_try_at<=datetime('now')
       ORDER BY CASE event WHEN 'prueba' THEN 0 WHEN 'proximo' THEN 1 WHEN 'entregado' THEN 2 WHEN 'fallido' THEN 2 WHEN 'registrado' THEN 4 ELSE 3 END, id LIMIT 40`).all();
     // si el teléfono rechazó SMS por su límite en la última media hora, se baja solo al ritmo seguro (25 por 30 min)
-    const limitHit = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND error LIKE 'Teléfono: límite%' AND gw_checked_at >= datetime('now','-30 minutes')").get().n;
+    // (solo rechazos NUEVOS: de SMS mandados en los últimos 30 min)
+    const limitHit = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_state='Failed' AND error LIKE 'Teléfono: límite%' AND sent_at >= datetime('now','-30 minutes')").get().n;
     const smsLimit = Math.max(1, limitHit ? Math.min(25, Number(s.sms_limit_30min) || 28) : Number(s.sms_limit_30min) || 28);
     const smsGapMs = Math.max(0, Number(s.sms_gap_seconds ?? 3)) * 1000;
     let smsRecent = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND sent_at >= datetime('now','-30 minutes')").get().n;
@@ -390,8 +391,10 @@ async function processQueue() {
         continue;
       }
       if (m.channel === 'sms' && s.sms_provider === 'android') {
-        // tope del teléfono: se espera a que se libere (sin contar intento)
-        if (smsRecent >= smsLimit) continue;
+        // tope del teléfono: los avisos masivos ("va en camino") esperan a que se libere;
+        // los urgentes ("está por llegar", entregado, no entregado, prueba) salen siempre
+        const urgent = ['proximo', 'entregado', 'fallido', 'prueba'].includes(m.event);
+        if (!urgent && smsRecent >= smsLimit) continue;
         smsRecent++;
       }
       try {
