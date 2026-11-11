@@ -2125,6 +2125,9 @@ async function nominatim(q, bias) {
 }
 // Limpia el domicilio para el buscador: "Blvd. Benito Juárez 984-Loc 8 B" -> "Boulevard Benito Juárez 984"
 const CITY_OSM = { rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito', 'san quintin': 'San Quintín', 'san luis rio colorado': 'San Luis Río Colorado', 'san luis r c': 'San Luis Río Colorado' };
+// estado de cada ciudad (San Luis Río Colorado está en Sonora)
+const CITY_STATE = { 'san luis rio colorado': 'Sonora' };
+const stateOf = (city) => CITY_STATE[normCity(osmCity(city))] || 'Baja California';
 function osmCity(city) { const k = normCity(city); return CITY_OSM[k] || String(city || '').trim() || 'Tijuana'; }
 function cleanStreet(addr) {
   let x = String(addr || '').split(',')[0];
@@ -2156,12 +2159,13 @@ async function cityCenter(city) {
   const fixed = CITY_CENTERS[normCity(osmCity(city))];
   if (fixed) return fixed;
   const k = osmCity(city);
-  if (!(k in geoCityCache)) { geoCityCache[k] = await nominatim(`${k}, Baja California, México`); await pause(1100); }
+  if (!(k in geoCityCache)) { geoCityCache[k] = await nominatim(`${k}, ${stateOf(city)}, México`); await pause(1100); }
   return geoCityCache[k];
 }
 // Ubica un domicilio probando varias búsquedas (de la más exacta a la más general). Devuelve { lat, lng, quality } o null.
 async function geocodeAddress({ address, colonia, city }) {
   const cityName = osmCity(city);
+  const st = stateOf(city);
   const ctr = await cityCenter(city).catch(() => null);
   const rr = ctr?.r || 0.2;
   const bias = ctr ? `${ctr.lng - rr * 1.2},${ctr.lat + rr},${ctr.lng + rr * 1.2},${ctr.lat - rr}` : null;
@@ -2172,18 +2176,25 @@ async function geocodeAddress({ address, colonia, city }) {
   const m = street.match(/^(.*?)\s+(\d+)\s*[A-Za-z]?$/);
   const name = m ? m[1] : street.replace(/\s+\d+.*$/, '');
   const tries = [];
-  if (m) tries.push([{ street: `${m[2]} ${m[1]}`, city: cityName, state: 'Baja California', country: 'México' }, 'exacta']);
-  if (street) tries.push([`${street}, ${col ? col + ', ' : ''}${cityName}, Baja California`, 'exacta']);
-  if (street && col) tries.push([`${street}, ${cityName}, Baja California`, 'exacta']);
+  if (m) tries.push([{ street: `${m[2]} ${m[1]}`, city: cityName, state: st, country: 'México' }, 'exacta']);
+  if (street) tries.push([`${street}, ${col ? col + ', ' : ''}${cityName}, ${st}`, 'exacta']);
+  if (street && col) tries.push([`${street}, ${cityName}, ${st}`, 'exacta']);
   if (street) tries.push(['photon', 'calle']);
-  if (name && name !== street) tries.push([`${name}, ${col ? col + ', ' : ''}${cityName}, Baja California`, 'calle']);
-  if (col) tries.push([`${col}, ${cityName}, Baja California`, 'colonia']);
+  if (name && name !== street) tries.push([`${name}, ${col ? col + ', ' : ''}${cityName}, ${st}`, 'calle']);
+  if (name && name !== street) tries.push(['photon-calle', 'calle']);
+  if (col) tries.push([`${col}, ${cityName}, ${st}`, 'colonia']);
+  if (col) tries.push(['photon-col', 'colonia']);
   for (const [q, quality] of tries) {
     try {
       let g;
       if (q === 'photon') {
         g = await photon(`${street}${col ? ', ' + col : ''}, ${cityName}`, ctr);
         if (g && !['house', 'street'].includes(g.type)) g = null;
+      } else if (q === 'photon-calle') {
+        g = await photon(`${name}, ${cityName}, ${st}`, ctr);
+        if (g && g.type !== 'street') g = null;
+      } else if (q === 'photon-col') {
+        g = await photon(`${col}, ${cityName}, ${st}`, ctr);
       } else { g = await nominatim(q, bias); await pause(1100); }
       if (g && inBox(g)) return { lat: g.lat, lng: g.lng, quality };
     } catch (e) { if (e.message === 'rate') await pause(30000); }
@@ -2211,7 +2222,9 @@ async function geocodePending() {
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
       const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
       void dl; void dg;
+      const ctrC = hit ? null : await cityCenter(c.city || 'Tijuana').catch(() => null);
       if (hit) db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(hit.lat, hit.lng, hit.quality, c.id);
+      else if (ctrC) db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='ciudad' WHERE id=?").run(ctrC.lat, ctrC.lng, c.id);
       else db.prepare("UPDATE customers SET geo_quality='no_encontrada' WHERE id=?").run(c.id);
       geo.done++;
       if (hit?.quality === 'exacta') geo.found++; else if (hit) geo.approx++; else geo.failed++;
@@ -2235,13 +2248,14 @@ async function refineApprox() {
     for (;;) {
       if (getSettings().geo_refine !== '1') break;
       const last = Number(getSettings().geo_refine_last || 0);
-      const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle') AND id > ? ORDER BY id LIMIT 1").get(last);
+      const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_refine', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
       const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
-      if (hit && (hit.quality === 'exacta' || (hit.quality === 'calle' && c.geo_quality === 'colonia'))) {
-        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle')").run(hit.lat, hit.lng, hit.quality, c.id);
+      const rank = { exacta: 3, calle: 2, colonia: 1, ciudad: 0 };
+      if (hit && rank[hit.quality] > rank[c.geo_quality]) {
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
         refine.improved++;
       }
       refine.done++;
@@ -3820,7 +3834,7 @@ app.get(
     const staffN = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role<>'admin'");
     const drivers = n("SELECT COUNT(*) n FROM users WHERE active=1 AND (role='repartidor' OR can_deliver=1)");
     const noLoc = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND geo_quality='no_encontrada'");
-    const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia')");
+    const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia','ciudad')");
     const pendingGeo = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='')");
     const serialZero = db.prepare("SELECT name, stock FROM products WHERE serialized=1 AND stock<=0").all();
     const vehicles = n('SELECT COUNT(*) n FROM vehicles WHERE active=1');
