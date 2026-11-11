@@ -1842,6 +1842,33 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
   res.json({ offices, cities, city_list: list });
 }));
+// Renglones del resumen para la hoja: oficinas (con inventario) y ciudades
+function resumenRows() {
+  const now = new Date().toISOString();
+  const stat = (W, args) => db.prepare(`SELECT COUNT(DISTINCT c.id) clientes, SUM(o.status='pendiente') pen, SUM(o.status IN ('asignado','cargado')) ruta,
+      SUM(o.status='entregado') ent, SUM(o.status='fallido') fal, SUM(o.status='cancelado') can
+    FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE ${W}`).get(...args);
+  const pct = (r) => { const t = (r.pen || 0) + (r.ruta || 0) + (r.ent || 0) + (r.fal || 0); return t ? Math.round(((r.ent || 0) / t) * 1000) / 10 : 0; };
+  const rows = [];
+  for (const w of db.prepare('SELECT * FROM warehouses WHERE active = 1 ORDER BY is_default DESC, name').all()) {
+    const r = stat(`${OFFICE_OF('c')} = ?`, [w.id]);
+    const inv = db.prepare(`SELECT SUM(s.holder_id IS NULL AND s.open_pool = 0 AND s.warehouse_id = ?) alm,
+        SUM(s.holder_id IN (SELECT u.id FROM users u WHERE ${OFFICE_OF('u')} = ?)) rep, SUM(s.holder_id IS NULL AND s.open_pool = 1 AND s.warehouse_id = ?) ab
+      FROM serials s WHERE s.status = 'disponible'`).get(w.id, w.id, w.id);
+    const disp = (inv.alm || 0) + (inv.rep || 0) + (inv.ab || 0);
+    const need = (r.pen || 0) + (r.ruta || 0);
+    rows.push([`Oficina · ${w.name}`, now, 'Oficina', w.name, w.city || '', r.clientes || 0, r.pen || 0, r.ruta || 0, r.ent || 0, r.fal || 0, r.can || 0, pct(r),
+      inv.alm || 0, inv.rep || 0, inv.ab || 0, disp, need, Math.max(0, need - disp)]);
+  }
+  for (const c of db.prepare("SELECT TRIM(city) city FROM customers WHERE TRIM(COALESCE(city,'')) <> '' GROUP BY lower(TRIM(city)) ORDER BY COUNT(*) DESC").all()) {
+    const r = stat('lower(TRIM(c.city)) = lower(?)', [c.city]);
+    const off = officeForCity(c.city);
+    const on = off ? db.prepare('SELECT name FROM warehouses WHERE id=?').get(off)?.name : '';
+    rows.push([`Ciudad · ${canonCity(c.city)}`, now, 'Ciudad', canonCity(c.city), on || '', r.clientes || 0, r.pen || 0, r.ruta || 0, r.ent || 0, r.fal || 0, r.can || 0, pct(r),
+      '', '', '', '', (r.pen || 0) + (r.ruta || 0), '']);
+  }
+  return rows;
+}
 // Supervisor operativo de la oficina (lo nombra el administrador; queda asignado a esa oficina)
 app.put('/api/offices/:id/supervisor', auth('admin'), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
@@ -3781,6 +3808,10 @@ if (require.main === module) {
     process.exit(1);
   }
   notify.start();
+  // Resumen por oficina y ciudad en la hoja de Google (cada 15 min)
+  const resumenTick = () => notify.pushResumen(resumenRows()).catch((e) => console.error('resumen sheet', e.message));
+  setTimeout(resumenTick, 60000);
+  setInterval(resumenTick, 15 * 60000).unref();
   setTimeout(geocodePending, 5000);
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));

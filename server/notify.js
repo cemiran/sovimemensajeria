@@ -429,4 +429,14 @@ async function testChannel(channel, to) {
   return { ok: true, detail: r.simulated ? 'Modo simulación: el mensaje no salió (configura un proveedor)' : `Enviado a ${dest}` };
 }
 
-module.exports = { EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl };
+// Pestaña "Resumen": un renglón por oficina y por ciudad (se reescribe por clave en la columna A)
+const RESUMEN_HEADERS = ['Clave', 'Actualizado', 'Tipo', 'Nombre', 'Ciudades', 'Clientes', 'Pendientes', 'En ruta', 'Entregados', 'No entregados', 'Cancelados', 'Avance %',
+  'Inventario almacén', 'Inventario repartidores', 'Inventario abierto', 'Inventario disponible', 'Por entregar', 'Faltan'];
+async function pushResumen(rows) {
+  const s = getSettings();
+  if (s.sheets_enabled !== '1' || !s.sheets_url) return { skipped: true };
+  let n = 0;
+  for (const row of rows) { await postSheet(s, { sheet: 'Resumen', headers: RESUMEN_HEADERS, row }); n++; }
+  return { sent: n };
+}
+module.exports = { EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
