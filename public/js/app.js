@@ -191,8 +191,9 @@ const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin"
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
 
-function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null, depotLL = null } = {}) {
+function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null, depotLL = null, into = null } = {}) {
   const pts = [];
+  const tgt = into || map;
   const dll = depotLL && depotLL[0] != null ? depotLL : depotLatLng();
   if (depot) { L.marker(dll, { icon: depotIcon() }).addTo(map).bindPopup(depotLL ? 'Punto de salida' : esc(SETTINGS.depot_name)); pts.push(dll); }
   for (const s of stops) {
@@ -200,12 +201,12 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
     const ll = [s.lat, s.lng];
     pts.push(ll);
     const mk = L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color) })
-      .addTo(map)
+      .addTo(tgt)
       .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${onEdit ? stopEditButtons() : ''}`);
     if (onEdit) wireStopEdit(map, mk, s, onEdit);
     collect?.push({ s, mk });
   }
-  if (pts.length > 1) L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(map);
+  if (pts.length > 1) L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(tgt);
   if (fit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 15 });
   return pts;
 }
@@ -4016,7 +4017,7 @@ async function viewLive(v) {
     if (!selected) { trailInfo = null; return; }
     const t = await GET('/api/tracking/trail/' + selected);
     trailInfo = t;
-    drawRoute(L.layerGroup().addTo(trailLayer), t.stops, '#e5612a', { depot: false, fit: false });
+    drawRoute(map, t.stops, '#e5612a', { depot: false, fit: false, into: L.layerGroup().addTo(trailLayer), onEdit: () => drawTrail(false) });
     const pts = t.points.map((p) => [p.lat, p.lng]);
     if (pts.length > 1) L.polyline(pts, { color: '#1d5a96', weight: 5, opacity: 0.85 }).addTo(trailLayer);
     if (pts.length) L.circleMarker(pts[0], { radius: 6, color: '#1d5a96', fillColor: '#fff', fillOpacity: 1 }).addTo(trailLayer).bindPopup('Inicio del recorrido');
@@ -4033,7 +4034,8 @@ async function viewLive(v) {
       pts.push([d.last_lat, d.last_lng]);
     }
     if (first && pts.length && !selected) { map.fitBounds([...pts, depotLatLng()], { padding: [40, 40], maxZoom: 14 }); first = false; }
-    if (selected) await drawTrail(fit);
+    const editing = (map._popup && map._popup.isOpen && map._popup.isOpen()) || document.querySelector('#lmap .leaflet-marker-draggable') || map.getContainer().style.cursor === 'crosshair';
+    if (selected && (!editing || fit)) await drawTrail(fit);
     $('#llist').innerHTML = `<h2>Repartidores</h2><p class="muted" style="margin-top:-6px"><small>Toca uno para ver su recorrido de hoy.</small></p>` + ds.map((d) => {
       const mins = d.last_seen ? (Date.now() - Date.parse(d.last_seen.replace(' ', 'T') + 'Z')) / 60000 : null;
       const st = mins == null ? ['Sin señal', ''] : mins < 5 ? ['En línea', 'ok'] : mins < 30 ? [`Hace ${Math.round(mins)} min`, 'warn'] : ['Desconectado', 'off'];
