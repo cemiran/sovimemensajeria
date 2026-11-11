@@ -1738,7 +1738,7 @@ app.get(
     res.json({ total, rows });
   })
 );
-const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
+const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'colonia', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
 const custVal = (b, f) => {
   if (f.startsWith('notify_')) return b[f] === undefined ? 1 : [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
   if (f === 'office_id') return b[f] === '' || b[f] == null ? officeForCity(b.city) : Number(b[f]);
@@ -1938,6 +1938,7 @@ app.post(
     if (req.user.office) b.office_id = req.user.office; // el personal de una oficina registra clientes de su oficina
     const vals = customerFields.map((f) => custVal(b, f));
     const r = db.prepare(`INSERT INTO customers (${customerFields.join(',')}) VALUES (${customerFields.map(() => '?').join(',')})`).run(...vals);
+    if (b.lat != null && b.lat !== '') db.prepare('UPDATE customers SET geo_quality=? WHERE id=?').run(['exacta', 'calle', 'colonia'].includes(b.geo_quality) ? b.geo_quality : 'manual', Number(r.lastInsertRowid));
     res.status(201).json({ id: Number(r.lastInsertRowid) });
   })
 );
@@ -1953,7 +1954,7 @@ app.put(
     const vals = customerFields.map((f) => custVal(b, f));
     db.prepare(`UPDATE customers SET ${customerFields.map((f) => f + '=?').join(',')} WHERE id=?`).run(...vals, c.id);
     const moved = b.lat != null && b.lat !== '' && (Number(b.lat) !== c.lat || Number(b.lng) !== c.lng);
-    if (moved) db.prepare("UPDATE customers SET geo_quality='manual' WHERE id=?").run(c.id);
+    if (moved) db.prepare('UPDATE customers SET geo_quality=? WHERE id=?').run(['exacta', 'calle', 'colonia'].includes(req.body.geo_quality) ? req.body.geo_quality : 'manual', c.id);
     res.json({ ok: true });
   })
 );
@@ -2162,6 +2163,23 @@ async function cityCenter(city) {
   if (!(k in geoCityCache)) { geoCityCache[k] = await nominatim(`${k}, ${stateOf(city)}, México`); await pause(1100); }
   return geoCityCache[k];
 }
+// Colonia / fraccionamiento: "TERRAZAS DEL VALLE 2A SECCION" y "Terrazas del Valle" son la misma
+const colKey = (x) => normCity(String(x || '').replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªo]?|primera|segunda|tercera|1ra|2da|3ra)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').replace(/^(col(onia)?|fracc?(ionamiento)?|fracc)\.?\s+/i, ''));
+const GOOD_GEO = ['exacta', 'manual', 'gps_entrega', 'repartidor', 'archivo'];
+const APPROX_GEO = ['calle', 'colonia', 'ciudad'];
+// Centro de una colonia según nuestros propios clientes bien ubicados en ella (mediana, sin los que queden a >3 km)
+function colonyCenter(colonia, city, excludeId = 0) {
+  const k = colKey(colonia);
+  if (!k) return null;
+  const peers = db.prepare(`SELECT lat, lng, colonia FROM customers WHERE lat IS NOT NULL AND geo_quality IN (${GOOD_GEO.map(() => '?').join(',')}) AND lower(TRIM(city)) = lower(TRIM(?)) AND id <> ?`)
+    .all(...GOOD_GEO, String(city || ''), excludeId).filter((p) => colKey(p.colonia) === k);
+  if (!peers.length) return null;
+  const med = (a) => { const x = [...a].sort((p, q) => p - q); return x[Math.floor(x.length / 2)]; };
+  let c = { lat: med(peers.map((p) => p.lat)), lng: med(peers.map((p) => p.lng)) };
+  const near = peers.filter((p) => haversine(p, c) < 3);
+  if (near.length) c = { lat: med(near.map((p) => p.lat)), lng: med(near.map((p) => p.lng)) };
+  return { ...c, n: near.length || peers.length };
+}
 // Ubica un domicilio probando varias búsquedas (de la más exacta a la más general). Devuelve { lat, lng, quality } o null.
 async function geocodeAddress({ address, colonia, city }) {
   const cityName = osmCity(city);
@@ -2183,6 +2201,8 @@ async function geocodeAddress({ address, colonia, city }) {
   if (name && name !== street) tries.push([`${name}, ${col ? col + ', ' : ''}${cityName}, ${st}`, 'calle']);
   if (name && name !== street) tries.push(['photon-calle', 'calle']);
   if (col) tries.push([`${col}, ${cityName}, ${st}`, 'colonia']);
+  const colS = String(col).replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªoAO]?|primera|segunda|tercera)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').trim();
+  if (colS && colS !== col) tries.push([`${colS}, ${cityName}, ${st}`, 'colonia']);
   if (col) tries.push(['photon-col', 'colonia']);
   for (const [q, quality] of tries) {
     try {
@@ -2204,8 +2224,13 @@ async function geocodeAddress({ address, colonia, city }) {
 app.get('/api/geocode', auth(...STAFF), wrap(async (req, res) => {
   const { address = '', colonia = '', city = '' } = req.query;
   const hit = String(address).trim() ? await geocodeAddress({ address, colonia, city }) : null;
+  if (hit && hit.quality !== 'colonia') return res.json(hit);
+  // no se encontró el domicilio: su colonia según nuestros clientes, o la del mapa
+  const colA = colonia || (String(address).match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+  const cc = colonyCenter(colA, city);
+  if (cc) return res.json({ lat: cc.lat, lng: cc.lng, quality: 'colonia' });
   if (hit) return res.json(hit);
-  // no se encontró: el centro de la ciudad, solo para acercar el mapa
+  // ni la colonia: el centro de la ciudad, solo para acercar el mapa
   const c = await cityCenter(city).catch(() => null);
   res.json(c ? { lat: c.lat, lng: c.lng, quality: 'ciudad' } : { quality: null });
 }));
@@ -2222,8 +2247,10 @@ async function geocodePending() {
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
       const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
       void dl; void dg;
-      const ctrC = hit ? null : await cityCenter(c.city || 'Tijuana').catch(() => null);
-      if (hit) db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(hit.lat, hit.lng, hit.quality, c.id);
+      let hit2 = hit;
+      if (!hit2 || hit2.quality === 'colonia') { const cc = colonyCenter(colA, c.city, c.id); if (cc) hit2 = { lat: cc.lat, lng: cc.lng, quality: 'colonia' }; }
+      const ctrC = hit2 ? null : await cityCenter(c.city || 'Tijuana').catch(() => null);
+      if (hit2) db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(hit2.lat, hit2.lng, hit2.quality, c.id);
       else if (ctrC) db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='ciudad' WHERE id=?").run(ctrC.lat, ctrC.lng, c.id);
       else db.prepare("UPDATE customers SET geo_quality='no_encontrada' WHERE id=?").run(c.id);
       geo.done++;
@@ -2254,6 +2281,10 @@ async function refineApprox() {
       const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana' });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
       const rank = { exacta: 3, calle: 2, colonia: 1, ciudad: 0 };
+      if (c.geo_quality === 'ciudad' && (!hit || hit.quality === 'colonia')) {
+        const cc = colonyCenter(colA, c.city, c.id);
+        if (cc) { db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='colonia' WHERE id=? AND geo_quality='ciudad'").run(cc.lat, cc.lng, c.id); refine.improved++; refine.done++; setK('geo_refine_last', c.id); continue; }
+      }
       if (hit && rank[hit.quality] > rank[c.geo_quality]) {
         db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
         refine.improved++;
@@ -2674,6 +2705,12 @@ function registerEvidence(req, result) {
     return Number(r.lastInsertRowid);
   });
   if (counter) audit(req, 'recepcion.mostrador', `${o.tracking_code} → ${b.receiver_name}`);
+  if (result === 'entregado' && !counter && lat != null) {
+    const cq = db.prepare('SELECT geo_quality, lat FROM customers WHERE id=?').get(o.customer_id);
+    const far = cq.geo_quality === 'ciudad' || cq.lat == null ? 25000 : 3000; // del centro de la ciudad cualquier punto de la ciudad; de la colonia, hasta 3 km
+    if ((cq.lat == null || APPROX_GEO.includes(cq.geo_quality)) && (dist == null || dist <= far))
+      db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='gps_entrega' WHERE id=?").run(lat, lng, o.customer_id);
+  }
   notify.queueSheet(evId, o.id);
   notify.queueEvent(result, o.id);
   // Aviso "tu repartidor está cerca" para la siguiente parada de la ruta
@@ -2700,6 +2737,18 @@ app.post('/api/evidences/:id/photo', auth(...STAFF), wrap((req, res) => {
   res.json({ ok: true, photo_path: name });
 }));
 app.post('/api/orders/:id/deliver', auth(), wrap((req, res) => res.json(registerEvidence(req, 'entregado'))));
+// "Estoy en el domicilio": el repartidor fija la ubicación del cliente con su GPS
+app.post('/api/orders/:id/location', auth(), wrap((req, res) => {
+  const o = db.prepare('SELECT o.*, c.name cname FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (!canSee(req.user, o)) throw new HttpError(403, 'Sin permiso');
+  const lat = Number(req.body?.lat), lng = Number(req.body?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw new HttpError(400, 'Sin ubicación GPS');
+  const q = STAFF.includes(req.user.role) && !req.headers['x-as-driver'] ? 'manual' : 'repartidor';
+  db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=?').run(lat, lng, q, o.customer_id);
+  audit(req, 'clientes.ubicacion', `${o.cname}: ubicación confirmada en el domicilio por ${req.user.name} (${o.tracking_code})`);
+  res.json({ ok: true, geo_quality: q });
+}));
 app.post('/api/orders/:id/fail', auth(), wrap((req, res) => res.json(registerEvidence(req, 'fallido'))));
 // El repartidor inició la navegación hacia esta parada: avisa al cliente una sola vez
 app.post(

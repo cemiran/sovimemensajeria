@@ -172,6 +172,8 @@ td.r, th.r { text-align: right; }
   box-shadow: 0 1px 4px rgba(0,0,0,.35);
 }
 .pin span { transform: rotate(45deg); }
+.pin.chk { outline: 3px dashed #e5612a; outline-offset: 1px; }
+.pin-q { position: absolute; top: -8px; right: -8px; width: 16px; height: 16px; border-radius: 50%; background: #e5612a; color: #fff; font-size: 11px; line-height: 16px; text-align: center; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
 .depot-pin { width: 30px; height: 30px; border-radius: 8px; background: #17211e; color: #fff; display: grid; place-items: center; font-size: 15px; border: 2px solid #fff; }
 .truck-pin { width: 34px; height: 34px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; border: 3px solid #fff; box-shadow: 0 1px 5px rgba(0,0,0,.4); font-size: 16px; }
 

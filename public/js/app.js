@@ -186,7 +186,10 @@ function makeMap(el, center, zoom = 12) {
   setTimeout(() => { map.invalidateSize(); if (map._lastFit) fitAfter(...map._lastFit); }, 150);
   return map;
 }
-const pinIcon = (label, color) => L.divIcon({ className: '', html: `<div class="pin" style="background:${color}"><span>${esc(label)}</span></div>`, iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -26] });
+const pinIcon = (label, color, chk = false) => L.divIcon({ className: '', html: `<div class="pin${chk ? ' chk' : ''}" style="background:${color}"><span>${esc(label)}</span></div>${chk ? '<b class="pin-q" title="Ubicación por revisar">!</b>' : ''}`, iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -26] });
+// ubicación aproximada (calle, colonia o centro de la ciudad): se marca para que el repartidor la revise o la oficina la corrija
+const geoChk = (q) => ['calle', 'colonia', 'ciudad'].includes(q);
+const geoWarn = (q) => (geoChk(q) ? `<span class="chip warn" title="El pin está en su ${q === 'ciudad' ? 'ciudad' : q}; el repartidor la confirma al llegar o la oficina mueve el pin">⚠ Ubicación por revisar · ${q === 'ciudad' ? 'centro de la ciudad' : q === 'calle' ? 'por calle' : 'en su colonia'}</span>` : '');
 const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin">🏭</div>', iconSize: [30, 30], iconAnchor: [15, 15] });
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
@@ -200,9 +203,9 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
     if (s.lat == null) continue;
     const ll = [s.lat, s.lng];
     pts.push(ll);
-    const mk = L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color) })
+    const mk = L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color, geoChk(s.geo_quality) && !['entregado', 'fallido'].includes(s.status)) })
       .addTo(tgt)
-      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${onEdit ? stopEditButtons() : ''}`);
+      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${geoChk(s.geo_quality) ? '<br>' + geoWarn(s.geo_quality) : ''}${onEdit ? stopEditButtons() : ''}`);
     if (onEdit) wireStopEdit(map, mk, s, onEdit);
     collect?.push({ s, mk });
   }
@@ -269,9 +272,9 @@ function editableCustomerPin(map, layer, c, onSaved) {
 // Clientes sin ubicación: lista para abrirlos y marcarlos en el mapa
 async function unlocatedCustomers(officeId) {
   const r = await GET(`/api/customers?limit=200000${officeId ? '&office_id=' + officeId : ''}`);
-  const list = r.rows.filter((c) => c.lat == null);
-  const m = modal(`Clientes sin ubicación (${list.length})`, `<div class="stack"><input id="unQ" placeholder="Buscar por nombre, dirección o ciudad" />
-    <div class="table-wrap" style="max-height:60vh"><table><tbody>${list.map((c) => `<tr class="click" data-u="${c.id}" data-t="${esc((c.name + ' ' + c.address + ' ' + (c.city || '')).toLowerCase())}"><td><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.city ? ', ' + esc(c.city) : ''}</small></td><td><small class="muted">${c.geo_quality === 'no_encontrada' ? 'no encontrado' : 'por ubicar'}</small></td><td class="r"><button class="btn sm">Ubicar</button></td></tr>`).join('') || '<tr><td class="muted">Todos los clientes tienen ubicación ✅</td></tr>'}</tbody></table></div>
+  const list = r.rows.filter((c) => c.lat == null || geoChk(c.geo_quality)).sort((a, b) => (a.lat == null ? 0 : a.geo_quality === 'ciudad' ? 1 : 2) - (b.lat == null ? 0 : b.geo_quality === 'ciudad' ? 1 : 2));
+  const m = modal(`Ubicaciones por revisar (${list.length})`, `<div class="stack"><input id="unQ" placeholder="Buscar por nombre, dirección o ciudad" />
+    <div class="table-wrap" style="max-height:60vh"><table><tbody>${list.map((c) => `<tr class="click" data-u="${c.id}" data-t="${esc((c.name + ' ' + c.address + ' ' + (c.city || '')).toLowerCase())}"><td><b>${esc(c.name)}</b><br><small class="muted">${esc(c.address || '')}${c.city ? ', ' + esc(c.city) : ''}</small></td><td><small class="muted">${c.lat == null ? (c.geo_quality === 'no_encontrada' ? 'no encontrado' : 'por ubicar') : geoWarn(c.geo_quality)}</small></td><td class="r"><button class="btn sm">Ubicar</button></td></tr>`).join('') || '<tr><td class="muted">Todos los clientes tienen ubicación ✅</td></tr>'}</tbody></table></div>
     <small class="muted">Abre el cliente, toca <b>Ubicar</b> o toca el mapa en su domicilio, y guarda.</small></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
   $('#unQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-u]', m.el).forEach((tr) => (tr.hidden = !!q && !tr.dataset.t.includes(q))); };
   $$('tr[data-u]', m.el).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.u), () => { tr.remove(); })));
@@ -949,7 +952,7 @@ async function viewOrders(v) {
     </form>
     <div class="row" style="gap:6px;margin-bottom:8px;flex-wrap:wrap"><small class="muted">Marca un pedido y agrega los más cercanos:</small><input type="number" id="nearN" min="1" value="20" style="width:80px" /><button type="button" class="btn sm" id="nearGo">${icon('live')} Seleccionar N más cercanos</button><small class="muted">· al asignar, la ruta se ordena sola por el camino más corto</small></div>
     <div class="table-wrap"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos los que se pueden asignar" /></th><th>Guía</th><th>Cliente</th><th>Ciudad</th><th>Dirección</th><th>Fecha</th><th>Repartidor</th><th>Parada</th><th>Estado</th></tr></thead><tbody>
-    ${data.rows.map((o, ix) => `${sort === 'geo' && o.city_group && (ix === 0 || data.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row" style="background:var(--bg-soft,#f3f6fa)"><td><input type="checkbox" data-citysel="${esc(o.city_group)}" title="Seleccionar toda la ciudad" /></td><td colspan="9"><b>${icon('live')} ${esc(o.city_group)}</b> <small class="muted">· ${data.rows.filter((x) => x.city_group === o.city_group).length} pedidos en orden de cercanía</small></td></tr>` : ''}<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" data-city="${esc(o.city_group || '')}" data-lat="${o.lat ?? ''}" data-lng="${o.lng ?? ''}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><b>${esc(o.customer_city || '—')}</b>${o.customer_colonia ? `<br><small class="muted">${esc(o.customer_colonia)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Sin pedidos</td></tr>'}
+    ${data.rows.map((o, ix) => `${sort === 'geo' && o.city_group && (ix === 0 || data.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row" style="background:var(--bg-soft,#f3f6fa)"><td><input type="checkbox" data-citysel="${esc(o.city_group)}" title="Seleccionar toda la ciudad" /></td><td colspan="9"><b>${icon('live')} ${esc(o.city_group)}</b> <small class="muted">· ${data.rows.filter((x) => x.city_group === o.city_group).length} pedidos en orden de cercanía</small></td></tr>` : ''}<tr class="click" data-id="${o.id}"><td><input type="checkbox" data-sel="${o.id}" data-city="${esc(o.city_group || '')}" data-lat="${o.lat ?? ''}" data-lng="${o.lng ?? ''}" ${['entregado', 'cancelado'].includes(o.status) ? `disabled title="Pedido ${STATUS[o.status].toLowerCase()}"` : ''} /></td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}</td><td>${esc(o.customer_name)}${o.account_name ? `<br><small class="muted">${icon('building')} ${esc(o.account_name)}</small>` : ''}</td><td><b>${esc(o.customer_city || '—')}</b>${o.customer_colonia ? `<br><small class="muted">${esc(o.customer_colonia)}</small>` : ''}</td><td><small>${esc(o.address)}</small>${geoChk(o.geo_quality) && !['entregado', 'cancelado'].includes(o.status) ? `<br><small style="color:#e5612a" title="Ubicación aproximada: revisar">⚠ ubicación por revisar</small>` : ''}</td><td class="num">${esc(o.scheduled_date)}</td><td>${esc(o.driver_name || '—')}</td><td class="num">${o.stop_seq ?? '—'}${o.eta ? ` <small class="muted">${o.eta}</small>` : ''}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">Sin pedidos</td></tr>'}
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
@@ -1194,6 +1197,7 @@ function customerForm(c, done) {
       <label class="f"><span>Teléfono Telnor <small class="muted">(número de la línea / servicio)</small></span><input name="external_id" type="tel" inputmode="tel" value="${esc(c.external_id)}" placeholder="10 dígitos de la línea Telnor" /></label>
       <label class="f">Dirección *<div class="row"><input name="address" required class="grow" value="${esc(c.address)}" placeholder="Calle, número, colonia" /><button type="button" class="btn" id="geo">Ubicar</button></div></label>
       <div class="grid g3">
+        <label class="f">Colonia o fraccionamiento<input name="colonia" value="${esc(c.colonia || '')}" placeholder="Si no se encuentra el domicilio, se ubica en su colonia" /></label>
         <label class="f">Ciudad<input name="city" value="${esc(c.city || SETTINGS.default_city || 'Tijuana')}" /></label>
         <label class="f">Oficina que lo atiende<select name="office_id" id="cfOff"><option value="">Según la ciudad</option></select></label>
         <label class="f">C.P.<input name="zip" value="${esc(c.zip)}" /></label>
@@ -1206,7 +1210,7 @@ function customerForm(c, done) {
       ${c.id && !driverMode() ? `<fieldset id="schedBox"><legend>${icon('truck')} Programar entrega</legend><div id="schedBody"><small class="muted">Cargando pedidos…</small></div></fieldset>` : ''}
       <div><div class="row between"><small class="muted">Toca el mapa para fijar la ubicación exacta</small><button type="button" class="btn sm" id="here">📍 Estoy aquí</button></div>
         <div id="cmap" class="map sm" style="margin-top:6px"></div><small class="muted num" id="coords"></small></div>
-      <input type="hidden" name="lat" value="${c.lat ?? ''}" /><input type="hidden" name="lng" value="${c.lng ?? ''}" />
+      <input type="hidden" name="lat" value="${c.lat ?? ''}" /><input type="hidden" name="lng" value="${c.lng ?? ''}" /><input type="hidden" name="geo_quality" value="" />
       <label class="f">Notas<textarea name="notes">${esc(c.notes)}</textarea></label>
       <fieldset><legend>${icon('chat')} Avisos sobre sus envíos</legend><div class="row">
         ${[['notify_whatsapp', 'WhatsApp'], ['notify_sms', 'SMS'], ['notify_email', 'Correo']].map(([k, l]) => `<label class="check-pill"><input type="checkbox" name="${k}" ${c[k] === 0 ? '' : 'checked'} /> ${l}</label>`).join('')}
@@ -1217,8 +1221,9 @@ function customerForm(c, done) {
   f.phone.addEventListener('input', mobChk); f.external_id.addEventListener('input', mobChk); mobChk();
   const map = makeMap($('#cmap', m.el), c.lat ? [c.lat, c.lng] : null, c.lat ? 16 : 12);
   let mk = null;
-  const setPt = (lat, lng, pan) => {
+  const setPt = (lat, lng, pan, q = '') => {
     f.lat.value = lat.toFixed(6); f.lng.value = lng.toFixed(6);
+    f.geo_quality.value = q; // si viene de "Ubicar" y es aproximada, se guarda marcada "por revisar"; si se movió a mano, es manual
     $('#coords', m.el).textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
     if (mk) mk.setLatLng([lat, lng]); else mk = L.marker([lat, lng], { draggable: true }).addTo(map).on('dragend', (e) => setPt(e.target.getLatLng().lat, e.target.getLatLng().lng));
     if (pan) map.setView([lat, lng], 16);
@@ -1233,8 +1238,8 @@ function customerForm(c, done) {
     btn.disabled = true; btn.textContent = 'Buscando…';
     try {
       const r = await GET('/api/geocode?' + geoQ());
-      if (r.quality === 'exacta') { setPt(r.lat, r.lng, true); toast('Ubicado. Revisa el pin y arrástralo si hace falta', 'ok'); }
-      else if (r.quality === 'calle' || r.quality === 'colonia') { setPt(r.lat, r.lng, true); toast(`Ubicación aproximada (${r.quality}): arrastra el pin al domicilio exacto`, ''); }
+      if (r.quality === 'exacta') { setPt(r.lat, r.lng, true, 'exacta'); toast('Ubicado. Revisa el pin y arrástralo si hace falta', 'ok'); }
+      else if (r.quality === 'calle' || r.quality === 'colonia') { setPt(r.lat, r.lng, true, r.quality); toast(`Ubicación aproximada (${r.quality}): arrastra el pin al domicilio exacto`, ''); }
       else if (r.quality === 'ciudad') { map.setView([r.lat, r.lng], 14); toast('No se encontró el número: toca el mapa en el domicilio correcto', 'bad'); }
       else toast('No se encontró: toca el mapa en el domicilio correcto', 'bad');
     } catch (er) { toast(er.message || 'No se pudo buscar; marca en el mapa', 'bad'); }
@@ -1306,7 +1311,7 @@ async function viewCustomers(v) {
   const notFound = geoSt ? (geoSt.stats.no_encontrada || 0) : 0;
   v.innerHTML = topbar('Clientes', `${staffC ? `<button class="btn" id="impC">${icon('upload')} Importar Excel</button><button class="btn" id="asgX">${icon('truck')} Asignar por Excel</button>` : ''}<button class="btn primary" id="newC">${icon('plus')} Registrar cliente</button>`) + `
   ${pend ? `<div class="info-bar">${icon('live')} Ubicando ${pend} domicilio(s) en el mapa… (≈1 por segundo; puedes seguir trabajando)</div>` : ''}
-  ${notFound ? `<div class="offline-bar row between"><span>${notFound} domicilio(s) no se encontraron en el mapa: ábrelos y marca la ubicación tocando el mapa.</span><span class="row" style="gap:6px"><button class="btn sm" id="geoList">Ver y ubicar</button><button class="btn sm" id="geoRetry">Reintentar</button></span></div>` : ''}
+  ${notFound || r.rows.some((c) => geoChk(c.geo_quality)) ? `<div class="offline-bar row between"><span>${notFound ? `${notFound} domicilio(s) no se encontraron · ` : ''}${r.rows.filter((c) => geoChk(c.geo_quality)).length} ubicación(es) aproximada(s) por revisar: ábrelas y mueve el pin al domicilio, o espera a que el repartidor la confirme al entregar.</span><span class="row" style="gap:6px"><button class="btn sm" id="geoList">Ver y ubicar</button><button class="btn sm" id="geoRetry">Reintentar</button></span></div>` : ''}
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
@@ -3318,7 +3323,7 @@ function importCustomers(opts) {
   m.el.addEventListener('click', (e) => { if (m.el.dataset.done && (e.target === m.el || e.target.closest('[data-close]'))) setTimeout(render, 50); });
   step1();
 }
-const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle', 'warn'], colonia: ['Aprox. por colonia', 'warn'], ciudad: ['Aprox. centro de la ciudad (corrígela)', 'warn'], gps_entrega: ['GPS de la entrega', 'ok'], no_encontrada: ['No encontrada', 'off'], archivo: ['Del archivo', 'ok'], manual: ['Manual', 'ok'], pendiente: ['Buscando…', ''] };
+const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle', 'warn'], colonia: ['Aprox. por colonia', 'warn'], repartidor: ['Confirmada por el repartidor', 'ok'], ciudad: ['Aprox. centro de la ciudad (corrígela)', 'warn'], gps_entrega: ['GPS de la entrega', 'ok'], no_encontrada: ['No encontrada', 'off'], archivo: ['Del archivo', 'ok'], manual: ['Manual', 'ok'], pendiente: ['Buscando…', ''] };
 
 // ================= Importación masiva de inventario =================
 const IMP_FIELDS = [
@@ -4797,6 +4802,7 @@ async function viewMyRoute(v) {
   ${next ? `<div class="card next-card">
     <small class="muted">Siguiente parada · ${next.stop_seq} de ${r.stops.length}${next.eta ? ' · llegada estimada ' + esc(next.eta) : ''}</small>
     <h2 style="margin:4px 0 2px">${esc(next.customer_name)}</h2><div>${esc(next.address)}</div>${next.address_reference ? `<small class="muted">${esc(next.address_reference)}</small>` : ''}
+    ${geoChk(next.geo_quality) ? `<div style="margin-top:6px">${geoWarn(next.geo_quality)}<br><small class="muted">Al llegar al domicilio toca <b>📍 Estoy aquí</b> para dejar la ubicación correcta.</small> <button class="btn sm" data-here="${next.id}">📍 Estoy aquí</button></div>` : ''}
     ${next.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(next.cod_amount)}</div>` : ''}
     <div class="row" style="margin-top:12px"><a class="btn primary lg grow" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
   </div>` : `<div class="card empty">${icon('check')}<p><b>¡Ruta terminada!</b><br>No quedan paradas por visitar.</p></div>`}
@@ -4814,13 +4820,13 @@ async function viewMyRoute(v) {
     const actionable = ['asignado', 'cargado'].includes(s.status) && !q;
     return `<div class="stop ${cls}"><div class="n">${s.status === 'entregado' || q ? '✓' : s.status === 'fallido' ? '✕' : s.stop_seq}</div><div>
       <div class="row between"><span class="addr">${esc(s.customer_name)}</span><span class="num muted">${esc(s.eta || '')}</span></div>
-      <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}
+      <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}${geoChk(s.geo_quality) && actionable ? `${geoWarn(s.geo_quality)}<br>` : ''}
       <small class="muted">${esc(s.tracking_code)} ${s.appointment_time ? `· <b>⏰ ${esc(s.appointment_time)}</b>` : s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
         ${s.lat != null ? `<a class="btn sm" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
         ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone))}">${icon('chat')}</a>` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
-        <a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a><a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>` : ''}
+        ${geoChk(s.geo_quality) ? `<button class="btn sm" data-here="${s.id}" title="Estoy en el domicilio: guardar mi ubicación como la del cliente">📍 Estoy aquí</button>` : ''}<a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a><a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>` : ''}
     </div></div>`;
   }).join('')}</div>`;
   paintGps();
@@ -4844,6 +4850,16 @@ async function viewMyRoute(v) {
       if (/checklist/i.test(er.message)) location.hash = '#/check';
     }
   });
+  // "Estoy aquí": el repartidor fija la ubicación del cliente con su GPS
+  $$('[data-here]', v).forEach((b) => (b.onclick = async () => {
+    const st = r.stops.find((x) => String(x.id) === b.dataset.here);
+    b.disabled = true;
+    const p = await getPosition(12000) || GPS.last;
+    if (!p) { b.disabled = false; return toast('No se obtuvo tu ubicación GPS. Activa la ubicación del teléfono.', 'bad'); }
+    if (!(await confirmDlg(`¿Estás en el domicilio de ${st.customer_name}? Se guardará tu ubicación actual como la del cliente${p.acc ? ` (precisión ±${Math.round(p.acc)} m)` : ''}.`))) { b.disabled = false; return; }
+    try { await POST(`/api/orders/${st.id}/location`, { lat: p.lat, lng: p.lng }); toast('Ubicación del cliente guardada. ¡Gracias!', 'ok'); render(); }
+    catch (er) { b.disabled = false; toast(er.message, 'bad'); }
+  }));
   $('#reopt').onclick = async () => {
     const p = GPS.last || (await getPosition());
     try { const o = await POST(`/api/routes/${r.id}/optimize`, p ? { lat: p.lat, lng: p.lng } : {}); toast(`Ruta re-optimizada: ${o.distance_km} km restantes`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }
