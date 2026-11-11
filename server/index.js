@@ -2143,7 +2143,17 @@ async function photon(q, center) {
   return { lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0], type: f.properties?.type, city: f.properties?.city || f.properties?.county || '' };
 }
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// Centro urbano fijo de cada ciudad (el buscador devolvía el centro del MUNICIPIO, que en Ensenada queda lejísimos)
+// r = radio en grados (~0.15° ≈ 16 km) dentro del cual se aceptan resultados
+const CITY_CENTERS = {
+  tijuana: { lat: 32.5149, lng: -117.0382, r: 0.17 }, ensenada: { lat: 31.8667, lng: -116.5964, r: 0.15 },
+  mexicali: { lat: 32.6245, lng: -115.4523, r: 0.17 }, 'playas de rosarito': { lat: 32.3661, lng: -117.0618, r: 0.12 },
+  tecate: { lat: 32.5725, lng: -116.6264, r: 0.1 }, 'san luis rio colorado': { lat: 32.456, lng: -114.7717, r: 0.12 },
+  'san quintin': { lat: 30.56, lng: -115.938, r: 0.3 },
+};
 async function cityCenter(city) {
+  const fixed = CITY_CENTERS[normCity(osmCity(city))];
+  if (fixed) return fixed;
   const k = osmCity(city);
   if (!(k in geoCityCache)) { geoCityCache[k] = await nominatim(`${k}, Baja California, México`); await pause(1100); }
   return geoCityCache[k];
@@ -2152,8 +2162,9 @@ async function cityCenter(city) {
 async function geocodeAddress({ address, colonia, city }) {
   const cityName = osmCity(city);
   const ctr = await cityCenter(city).catch(() => null);
-  const bias = ctr ? `${ctr.lng - 0.35},${ctr.lat + 0.3},${ctr.lng + 0.35},${ctr.lat - 0.3}` : null;
-  const inBox = (g) => !ctr || (Math.abs(g.lat - ctr.lat) < 0.3 && Math.abs(g.lng - ctr.lng) < 0.35);
+  const rr = ctr?.r || 0.2;
+  const bias = ctr ? `${ctr.lng - rr * 1.2},${ctr.lat + rr},${ctr.lng + rr * 1.2},${ctr.lat - rr}` : null;
+  const inBox = (g) => !ctr || (Math.abs(g.lat - ctr.lat) < rr && Math.abs(g.lng - ctr.lng) < rr * 1.2);
   const street = cleanStreet(address);
   // colonia: la que venga aparte o la escrita en el domicilio ("…, Col. MADERO" / "…, Zona Centro, …")
   const col = String(colonia || (String(address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '').replace(/^col(onia)?\.?\s*/i, '').trim();
