@@ -2440,14 +2440,28 @@ function geoSort(rows) {
     const w = offId ? db.prepare('SELECT lat, lng FROM warehouses WHERE id=? AND lat IS NOT NULL').get(offId) : null;
     let cur = w || (geo.length ? { lat: geo.reduce((a, r) => a + r.lat, 0) / geo.length, lng: geo.reduce((a, r) => a + r.lng, 0) / geo.length } : null);
     const kx = Math.cos(((cur?.lat || 32) * Math.PI) / 180);
+    const d2 = (a, b) => ((a.lng - b.lng) * kx) ** 2 + (a.lat - b.lat) ** 2;
+    // colonias de la ciudad: se recorren en orden de cercanía (desde la oficina) y dentro de cada una, pedido por pedido
+    const cols = new Map();
+    const colName = (r) => String(r.customer_colonia || '').replace(/\s+/g, ' ').trim() || 'Sin colonia';
+    for (const r of geo) { const k = colKey(colName(r)) || 'sin colonia'; if (!cols.has(k)) cols.set(k, { name: colName(r), rows: [] }); const g = cols.get(k); if (colName(r).length < g.name.length) g.name = colName(r); g.rows.push(r); }
+    const pend = [...cols.values()].map((c) => ({ ...c, lat: c.rows.reduce((a, r) => a + r.lat, 0) / c.rows.length, lng: c.rows.reduce((a, r) => a + r.lng, 0) / c.rows.length }));
     let i = 0;
-    while (geo.length) {
+    while (pend.length) {
       let bi = 0, bd = Infinity;
-      for (let j = 0; j < geo.length; j++) { const dx = (geo[j].lng - cur.lng) * kx, dy = geo[j].lat - cur.lat, d = dx * dx + dy * dy; if (d < bd) { bd = d; bi = j; } }
-      cur = geo.splice(bi, 1)[0];
-      out.push({ ...cur, city_group: city, geo_seq: ++i });
+      for (let j = 0; j < pend.length; j++) { const d = d2(pend[j], cur); if (d < bd) { bd = d; bi = j; } }
+      const col = pend.splice(bi, 1)[0];
+      const left = [...col.rows];
+      while (left.length) {
+        let ri = 0, rd = Infinity;
+        for (let j = 0; j < left.length; j++) { const d = d2(left[j], cur); if (d < rd) { rd = d; ri = j; } }
+        cur = left.splice(ri, 1)[0];
+        out.push({ ...cur, city_group: city, col_group: col.name, geo_seq: ++i });
+      }
     }
-    for (const r of none) out.push({ ...r, city_group: city, geo_seq: null });
+    // sin ubicación al final de su ciudad, también por colonia
+    none.sort((a, b) => colName(a).localeCompare(colName(b), 'es'));
+    for (const r of none) out.push({ ...r, city_group: city, col_group: colName(r), geo_seq: null });
   }
   return out;
 }
@@ -2495,6 +2509,12 @@ app.get(
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
     if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
+    if (req.query.colonia) {
+      // misma colonia aunque esté escrita distinto ("2A SECCION", "Fracc.", mayúsculas o acentos)
+      const k = colKey(req.query.colonia);
+      const ids = db.prepare(`SELECT DISTINCT colonia FROM customers WHERE colonia IS NOT NULL`).all().map((r) => r.colonia).filter((x) => colKey(x) === k);
+      if (ids.length) { where.push(`c.colonia IN (${ids.map(() => '?').join(',')})`); args.push(...ids); } else where.push('0');
+    }
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
@@ -2509,6 +2529,18 @@ app.get(
     res.json({ total, rows: req.query.sort === 'geo' ? geoSort(rows) : rows });
   })
 );
+app.get('/api/orders/colonias', auth(...STAFF), wrap((req, res) => {
+  const where = ["TRIM(COALESCE(c.colonia,'')) <> ''"];
+  const args = [];
+  const off = req.user.office || Number(req.query.office_id) || null;
+  if (off) { where.push(`${OFFICE_OF('c')} = ?`); args.push(off); }
+  if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
+  if (req.query.open === '1') where.push("o.status IN ('pendiente','asignado','cargado','fallido')");
+  const rows = db.prepare(`SELECT c.colonia, c.city, COUNT(*) n FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${where.join(' AND ')} AND o.status <> 'cancelado' GROUP BY c.colonia, c.city`).all(...args);
+  const m = new Map();
+  for (const r of rows) { const k = colKey(r.colonia); const nm = String(r.colonia).replace(/\s+/g, ' ').trim(); const x = m.get(k) || { name: nm, city: r.city, n: 0 }; if (nm.length < x.name.length) x.name = nm; x.n += r.n; m.set(k, x); }
+  res.json([...m.values()].sort((a, b) => a.name.localeCompare(b.name, 'es')));
+}));
 app.get(
   '/api/orders/tracking/:code',
   auth(),

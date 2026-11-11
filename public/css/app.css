@@ -733,3 +733,5 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .staff-photo img, .staff-photo > span { width: 120px; height: 140px; object-fit: cover; border-radius: 12px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; background: var(--bg); }
 .staff-photo > span .ic { width: 48px; height: 48px; }
 .doc-row { justify-content: space-between; padding: 4px 0; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 6px; }
+
+.col-row td { background: var(--bg, #fff); border-top: 1px dashed var(--border, #e3e8ee); font-size: 13px; }
