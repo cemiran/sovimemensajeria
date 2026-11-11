@@ -2883,6 +2883,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     const b = req.body || {};
+    selfDriver(req, b.driver_id);
     const drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
     if (!drv) throw new HttpError(400, 'Elige el repartidor');
     if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);
@@ -2897,6 +2898,12 @@ app.post(
     res.json(assignOrdersTo(req, drv, ids, date));
   })
 );
+// El despachador (o admin) puede asignarse pedidos a sí mismo: se le activa "También reparte" para entregar en modo repartidor
+function selfDriver(req, id) {
+  if (Number(id) !== req.user.id || req.user.role === 'repartidor') return;
+  const u = db.prepare('SELECT can_deliver FROM users WHERE id=?').get(req.user.id);
+  if (u && !u.can_deliver) { db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(req.user.id); audit(req, 'usuario.tambien_reparte', `${req.user.name} se asignó pedidos: se activó "También reparte"`); }
+}
 function assignOrdersTo(req, drv, ids, date) {
   {
     const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
@@ -2941,6 +2948,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     const b = req.body || {};
+    selfDriver(req, b.driver_id);
     const drv = db.prepare("SELECT id, name, active, capacity FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
     if (!drv) throw new HttpError(400, 'Elige el repartidor');
     if (!drv.active) throw new HttpError(409, `${drv.name} está desactivado`);

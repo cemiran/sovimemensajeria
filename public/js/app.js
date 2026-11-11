@@ -1943,7 +1943,11 @@ async function bulkAssign(v, kind) {
     if (all) { all.checked = ids.length && ids.length === boxes().length; all.indeterminate = ids.length > 0 && ids.length < boxes().length; }
     bar.hidden = !ids.length;
     if (!ids.length) return;
-    if (!drivers) drivers = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
+    if (!drivers) {
+      drivers = (await GET('/api/users?role=repartidor')).filter((d) => d.active);
+      // el despachador o admin puede asignarse a sí mismo (primera opción)
+      if (store.user.role !== 'repartidor') { drivers = drivers.filter((d) => d.id !== store.user.id); drivers.unshift({ id: store.user.id, name: `Yo (${store.user.name})`, self: true }); }
+    }
     const prev = { d: $('#bkDrv', bar)?.value, f: $('#bkDate', bar)?.value, multi: $('#bkMulti', bar)?.checked, t: $('#bkTo', bar)?.value, pd: $('#bkPer', bar)?.value, sun: $('#bkSun', bar)?.checked ?? true };
     bar.innerHTML = `<b>${ids.length} ${kind === 'customers' ? 'cliente' : 'pedido'}${ids.length === 1 ? '' : 's'}</b>
       <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
@@ -1973,6 +1977,7 @@ async function bulkAssign(v, kind) {
         btn.disabled = true;
         try {
           const r = await POST('/api/routes/assign-range', { driver_id: drv.value, date_from: from, date_to: to, per_day: per, skip_sunday: $('#bkSun', bar).checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: picked() });
+          if (Number(drv.value) === store.user.id && !store.user.can_deliver) { store.user = { ...store.user, can_deliver: 1 }; setTimeout(() => toast('Te asignaste pedidos: usa el botón "Modo repartidor" para verlos en tu ruta y entregarlos', ''), 1500); }
           modal(`Programación de ${esc(r.driver)}`, `<p style="margin-top:0">${r.assigned} pedido(s) programados · ${r.per_day} por día${r.not_scheduled ? ` · <b style="color:var(--warn)">${r.not_scheduled} no cupieron en el rango</b> (siguen pendientes)` : ''}</p>
             <div class="table-wrap"><table><thead><tr><th>Día</th><th class="r">Pedidos</th><th></th></tr></thead><tbody>${r.days.map((d) => `<tr><td>${new Date(d.date + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'short' })}</td><td class="r num"><b>${d.assigned}</b></td><td><small class="muted">${d.unlocated ? d.unlocated + ' sin ubicación' : ''}</small></td></tr>`).join('')}</tbody></table></div>
             ${r.skipped.length ? `<h3>No se movieron</h3><div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}`,
@@ -1985,6 +1990,7 @@ async function bulkAssign(v, kind) {
       try {
         const body = { driver_id: drv.value, date: $('#bkDate', bar).value, [kind === 'customers' ? 'customer_ids' : 'order_ids']: picked() };
         const r = await POST('/api/routes/assign', body);
+        if (Number(drv.value) === store.user.id && !store.user.can_deliver) { store.user = { ...store.user, can_deliver: 1 }; setTimeout(() => toast('Te asignaste pedidos: usa el botón "Modo repartidor" para verlos en tu ruta y entregarlos', ''), 1500); }
         toast(`${r.assigned} pedido(s) asignados a ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}${r.unlocated ? ` · ${r.unlocated} sin ubicación en el mapa` : ''}`, r.skipped.length ? '' : 'ok');
         if (r.skipped.length) {
           const m = modal('Pedidos que no se movieron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
