@@ -318,10 +318,26 @@ function scanFormats() {
   return ['QR_CODE', 'EAN_13', 'EAN_8', 'UPC_A', 'UPC_E', 'CODE_128', 'CODE_39', 'CODE_93', 'ITF', 'CODABAR', 'DATA_MATRIX', 'PDF_417']
     .map((k) => F[k]).filter((x) => x != null);
 }
+// Imagen de un archivo, compatible con todos los navegadores (iOS < 15 no tiene createImageBitmap)
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+async function loadImage(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch {}
+    try { return await createImageBitmap(file); } catch {}
+  }
+  return new Promise((ok, fail) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { ok(img); setTimeout(() => URL.revokeObjectURL(url), 1000); };
+    img.onerror = () => { URL.revokeObjectURL(url); fail(new Error('No se pudo abrir la foto (formato no compatible). Toma la foto con la cámara de la app.')); };
+    img.src = url;
+  });
+}
+const imgW = (b) => b.naturalWidth || b.width, imgH = (b) => b.naturalHeight || b.height;
 // Lectura robusta desde una foto: imagen completa y, si no aparece, franjas con más contraste
 // (y girada 90° para códigos verticales). Así se leen códigos pequeños o de barras finas dentro de fotos grandes.
 async function decodeImageFile(file, onStep) {
-  const bmp = await createImageBitmap(file);
+  const bmp = await loadImage(file);
   let host = document.getElementById('scanDecodeTmp');
   if (!host) { host = document.createElement('div'); host.id = 'scanDecodeTmp'; host.hidden = true; document.body.appendChild(host); }
   const attempt = async (blob) => {
@@ -334,14 +350,22 @@ async function decodeImageFile(file, onStep) {
     const c = document.createElement('canvas');
     [c.width, c.height] = rotate ? [h, w] : [w, h];
     const g = c.getContext('2d');
-    g.filter = 'grayscale(1) contrast(1.6)';
+    const native = 'filter' in g;
+    if (native) g.filter = 'grayscale(1) contrast(1.6)';
     if (rotate) { g.translate(h, 0); g.rotate(Math.PI / 2); }
     g.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
+    if (!native || !g.filter || g.filter === 'none') {
+      try {
+        const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+        for (let i = 0; i < px.length; i += 4) { const y = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; const v = Math.max(0, Math.min(255, (y - 128) * 1.6 + 128)); px[i] = px[i + 1] = px[i + 2] = v; }
+        g.putImageData(d, 0, 0);
+      } catch {}
+    }
     return new Promise((r) => c.toBlob(r, 'image/png'));
   };
-  const r0 = await attempt(file);
+  const W = imgW(bmp), H = imgH(bmp);
+  const r0 = await attempt(Math.max(W, H) > 2000 ? await render(0, 0, W, H, false) : file);
   if (r0) return r0;
-  const W = bmp.width, H = bmp.height;
   const plans = [[0, 0, W, H, false]];
   for (const rot of [false, true]) {
     const long = rot ? W : H; // franjas a lo largo del eje donde se apilan los códigos
@@ -460,9 +484,22 @@ function openScanner({ title = 'Escanear código', continuous = false, onCode, h
     try {
       scanner = new Html5Qrcode('reader', { verbose: false, formatsToSupport: scanFormats(), experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
       const camId = (() => { try { return localStorage.getItem('um_cam'); } catch { return null; } })();
-      await scanner.start(camId ? { deviceId: { exact: camId } } : { facingMode: 'environment' },
-        { fps: 12, aspectRatio: 1.333, qrbox: (w, h) => ({ width: Math.floor(Math.min(w * 0.9, 420)), height: Math.floor(Math.min(h * 0.55, 220)) }) },
-        (txt) => handle(txt, 'cámara'));
+      const cfg = (vc) => ({ fps: 12, ...(IS_IOS ? {} : { aspectRatio: 1.333 }), videoConstraints: vc,
+        qrbox: (w, h) => ({ width: Math.floor(Math.min(w * 0.9, 420)), height: Math.floor(Math.min(h * 0.55, 220)) }) });
+      const hi = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+      try {
+        await scanner.start(camId ? { deviceId: { exact: camId } } : { facingMode: 'environment' },
+          cfg(camId ? { deviceId: { exact: camId }, ...hi } : { facingMode: { ideal: 'environment' }, ...hi }), (txt) => handle(txt, 'cámara'));
+      } catch (e1) {
+        if (/Permission|NotAllowed/i.test(String(e1?.name || e1))) throw e1;
+        // la cámara guardada no existe en este teléfono o no acepta la resolución: cámara trasera con lo que dé
+        try { localStorage.removeItem('um_cam'); } catch {}
+        try { await scanner.clear(); } catch {}
+        scanner = new Html5Qrcode('reader', { verbose: false, formatsToSupport: scanFormats(), experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+        await scanner.start({ facingMode: 'environment' }, cfg(undefined), (txt) => handle(txt, 'cámara'));
+      }
+      // iOS: el video debe ir "en línea" y sin sonido o se queda en negro / se abre a pantalla completa
+      $$('#reader video', m.el).forEach((vd) => { vd.setAttribute('playsinline', ''); vd.setAttribute('webkit-playsinline', ''); vd.muted = true; vd.play?.().catch(() => {}); });
       $m('#camBar').hidden = false;
       $m('#camPause').textContent = 'Pausar';
       // Selector de cámara (si hay más de una) y linterna (si el teléfono la soporta)
@@ -558,26 +595,23 @@ function openScanner({ title = 'Escanear código', continuous = false, onCode, h
 }
 
 function compressImage(file, maxSide = 1280, quality = 0.7) {
-  return new Promise((ok, fail) => {
-    const img = new Image();
-    img.onload = () => {
-      const k = Math.min(1, maxSide / Math.max(img.width, img.height));
+  return loadImage(file).then((img) => {
+    {
+      const k = Math.min(1, maxSide / Math.max(imgW(img), imgH(img)));
       const c = document.createElement('canvas');
-      c.width = Math.round(img.width * k);
-      c.height = Math.round(img.height * k);
+      c.width = Math.max(1, Math.round(imgW(img) * k));
+      c.height = Math.max(1, Math.round(imgH(img) * k));
       const ctx = c.getContext('2d');
       ctx.drawImage(img, 0, 0, c.width, c.height);
+      try { img.close?.(); } catch {}
       // sello de tiempo en la foto
       ctx.font = `${Math.max(14, c.width / 40)}px sans-serif`;
       ctx.fillStyle = 'rgba(0,0,0,.55)';
       ctx.fillRect(0, c.height - c.width / 22, c.width, c.width / 22);
       ctx.fillStyle = '#fff';
       ctx.fillText(new Date().toLocaleString('es-MX'), 10, c.height - c.width / 80);
-      URL.revokeObjectURL(img.src);
-      ok(c.toDataURL('image/jpeg', quality));
-    };
-    img.onerror = fail;
-    img.src = URL.createObjectURL(file);
+      return c.toDataURL('image/jpeg', quality);
+    }
   });
 }
 function signaturePad(canvas) {
