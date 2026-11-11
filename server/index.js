@@ -1870,6 +1870,63 @@ app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
   res.json({ rows: out, drivers });
 }));
 // Tablero: avance por oficina y por ciudad (hoy y acumulado)
+app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
+  const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const to = okD(req.query.to) ? req.query.to : today();
+  const from = okD(req.query.from) ? req.query.from : to;
+  const dayMs = 864e5;
+  const dd = (x) => new Date(x + 'T12:00:00Z');
+  const iso = (t) => new Date(t).toISOString().slice(0, 10);
+  const nDays = Math.round((dd(to) - dd(from)) / dayMs) + 1;
+  const pFrom = iso(dd(from) - nDays * dayMs), pTo = iso(dd(from) - dayMs);
+  // filtros: oficina (el personal de una oficina, siempre la suya), ciudad y repartidor
+  const off = req.user.office || Number(req.query.office_id) || null;
+  const city = String(req.query.city || '').trim();
+  const drv = Number(req.query.driver_id) || null;
+  const cw = [];
+  const ca = [];
+  if (off) { cw.push(`${OFFICE_OF('c')} = ?`); ca.push(off); }
+  if (city) { cw.push('lower(TRIM(c.city)) = lower(TRIM(?))'); ca.push(city); }
+  if (drv) { cw.push('o.driver_id = ?'); ca.push(drv); }
+  const W = cw.length ? ' AND ' + cw.join(' AND ') : '';
+  const J = 'FROM orders o JOIN customers c ON c.id = o.customer_id';
+  const DONE = "date(o.delivered_at,'localtime')";
+  const per = (f, t) => db.prepare(`SELECT SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
+      SUM(o.status='entregado' AND o.attempts <= 1) first_try, COUNT(DISTINCT CASE WHEN o.status='entregado' THEN o.driver_id END) drivers,
+      COUNT(DISTINCT CASE WHEN o.status='entregado' THEN ${DONE} END) days
+    ${J} WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W}`).get(f, t, ...ca);
+  const cur = per(from, to), prev = per(pFrom, pTo);
+  // tendencia: el periodo (o los últimos 14 días si es un solo día)
+  const sFrom = nDays < 7 ? iso(dd(to) - 13 * dayMs) : from;
+  const rows = db.prepare(`SELECT ${DONE} d, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
+    ${J} WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W} GROUP BY d`).all(sFrom, to, ...ca);
+  const byD = new Map(rows.map((r) => [r.d, r]));
+  const series = [];
+  for (let t = dd(sFrom).getTime(); t <= dd(to).getTime(); t += dayMs) { const k = iso(t); series.push({ d: k, delivered: byD.get(k)?.delivered || 0, failed: byD.get(k)?.failed || 0 }); }
+  // ranking de repartidores del periodo
+  const drivers = db.prepare(`SELECT u.id, u.name, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed, SUM(o.status='entregado' AND o.attempts <= 1) first_try,
+      COUNT(DISTINCT CASE WHEN o.status='entregado' THEN ${DONE} END) days
+    ${J} JOIN users u ON u.id = o.driver_id WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, ...ca);
+  // cartera (todo lo que no está cancelado, sin importar fechas)
+  const port = db.prepare(`SELECT SUM(o.status='entregado') delivered, SUM(o.status IN ('pendiente','asignado','cargado','fallido')) open,
+      SUM(o.status IN ('pendiente','asignado','cargado','fallido') AND o.scheduled_date < ?) overdue, SUM(o.status IN ('asignado','cargado')) in_route
+    ${J} WHERE o.status <> 'cancelado'${W}`).get(today(), ...ca);
+  // por oficina (para la tarjeta de resultados)
+  const offices = db.prepare(`SELECT ${OFFICE_OF('c')} id, (SELECT name FROM warehouses WHERE id = ${OFFICE_OF('c')}) name,
+      SUM(o.status='entregado' AND ${DONE} BETWEEN ? AND ?) delivered, SUM(o.status='fallido' AND ${DONE} BETWEEN ? AND ?) failed,
+      SUM(o.status='entregado') delivered_all, SUM(o.status IN ('pendiente','asignado','cargado','fallido')) open,
+      SUM(o.status IN ('pendiente','asignado','cargado','fallido') AND o.scheduled_date < ?) overdue
+    ${J} WHERE o.status <> 'cancelado'${W} GROUP BY 1 ORDER BY delivered_all DESC`).all(from, to, from, to, today(), ...ca);
+  // alertas
+  const openW = `o.status IN ('pendiente','asignado','cargado','fallido')${W}`;
+  const alerts = {
+    overdue: port.overdue || 0,
+    geo_check: db.prepare(`SELECT COUNT(DISTINCT c.id) n ${J} WHERE ${openW} AND (c.lat IS NULL OR c.geo_quality IN ('calle','colonia','ciudad'))`).get(...ca).n,
+    no_route_today: db.prepare(`SELECT COUNT(*) n ${J} WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?${W}`).get(today(), ...ca).n,
+    sms_failed: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND status='error' AND error NOT LIKE 'Vencido%' AND created_at >= datetime('now','-1 day')").get().n,
+  };
+  res.json({ from, to, prev: { from: pFrom, to: pTo }, days: nDays, cur, prevp: prev, series, drivers, portfolio: port, offices, alerts });
+}));
 app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const off = req.user.office || Number(req.query.office_id) || null;
   const city = String(req.query.city || '').trim();

@@ -834,6 +834,7 @@ async function viewDashboard(v) {
   const fDrv = prm.get('driver_id') || '';
   const F = `&office_id=${fOff}&city=${encodeURIComponent(fCity)}&driver_id=${fDrv}`;
   const drvList = await GET('/api/users?role=repartidor').then((r) => (Array.isArray(r) ? r : r.rows || []).filter((u) => u.active)).catch(() => []);
+  const exP = GET(`/api/dashboard/exec?from=${d}&to=${dTo}${F}`).catch(() => null);
   const [orders, routes, drivers, an, bd, offs] = await Promise.all([
     GET(`/api/orders?date=${d}&date_to=${dTo}&limit=200000${F}`), GET(`/api/routes?date=${d}&date_to=${dTo}&office_id=${fOff}&driver_id=${fDrv}`), GET(`/api/tracking/drivers?office_id=${fOff}&driver_id=${fDrv}`), GET(`/api/analytics?from=${d}&to=${dTo}${F}`),
     GET(`/api/dashboard/breakdown?${F.slice(1)}&from=${d}&to=${dTo}`).catch(() => null), admin ? GET('/api/offices').catch(() => []) : Promise.resolve([]),
@@ -888,6 +889,9 @@ async function viewDashboard(v) {
       <div class="card"><h2>Stock bajo</h2>${an.lowStock.length ? `<table><tbody>${an.lowStock.map((p) => `<tr><td>${esc(p.name)}<br><small class="muted">${esc(p.sku)}</small></td><td class="r num" style="color:var(--bad);font-weight:700">${p.stock}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Todo en orden ✅</p>'}</div>
     </div>
   </div>`;
+  const ex = await exP;
+  if (ex) $('#dashF').insertAdjacentHTML('afterend', execBoard(ex, bd, perTxt) + '<h2 class="ops-title">Operación</h2>');
+  wireExecBoard(v);
   if (bd) v.querySelector('.grid.g4').insertAdjacentHTML('afterend', `<div class="grid g2" style="margin-top:14px">
     ${bd.offices.length ? `<div class="card"><div class="row between"><h2>${icon('building')} Por oficina</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Oficina', true)}<tbody>${bd.offices.map((x) => bdRow(x, `data-off="${x.id}"`)).join('')}</tbody></table></div></div>` : ''}
     <div class="card"><div class="row between"><h2>${icon('live')} Por ciudad</h2><small class="muted">acumulado · toca para filtrar</small></div><div class="table-wrap"><table>${bdHead('Ciudad')}<tbody>${bd.cities.map((x) => bdRow(x, `data-city="${esc(x.city)}"`)).join('') || '<tr><td colspan="7" class="muted">Sin datos</td></tr>'}</tbody></table></div></div></div>`);
@@ -924,6 +928,106 @@ async function viewDashboard(v) {
     return;
   }
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
+}
+
+// ---------- Tablero de Dirección ----------
+// Indicadores clave contra el periodo anterior, tendencia diaria, ranking de repartidores, oficinas y alertas
+function execBoard(ex, bd, perTxt) {
+  const n = (x) => Number(x) || 0;
+  const goal = Number(SETTINGS.success_goal) || 95;
+  const rate = (a, b) => (n(b) ? (n(a) / n(b)) * 100 : null);
+  const c = ex.cur, p = ex.prevp;
+  const sr = rate(c.delivered, n(c.delivered) + n(c.failed)), srP = rate(p.delivered, n(p.delivered) + n(p.failed));
+  const ft = rate(c.first_try, c.delivered), ftP = rate(p.first_try, p.delivered);
+  const dDays = ex.drivers.reduce((a, x) => a + n(x.days), 0);
+  const prod = dDays ? n(c.delivered) / dDays : null;
+  const port = ex.portfolio, totP = n(port.delivered) + n(port.open);
+  const adv = rate(port.delivered, totP);
+  const fmtDay = (x) => new Date(x + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+  // variación contra el periodo anterior (en % para cantidades, en puntos para tasas)
+  const delta = (cur, prev, { pts = false, inverse = false } = {}) => {
+    if (cur == null || prev == null || (!pts && !n(prev))) return '<span class="xk-delta muted">sin periodo previo</span>';
+    const v = pts ? cur - prev : ((cur - prev) / prev) * 100;
+    if (Math.abs(v) < 0.05) return '<span class="xk-delta muted">= igual</span>';
+    const good = inverse ? v < 0 : v > 0;
+    return `<span class="xk-delta ${good ? 'up' : 'down'}" title="Contra ${fmtDay(ex.prev.from)} – ${fmtDay(ex.prev.to)}">${v > 0 ? '▲' : '▼'} ${fmtN(Math.abs(v), 1)}${pts ? ' pts' : '%'}</span>`;
+  };
+  const tile = (label, value, sub, extra = '', cls = '') => `<div class="xk ${cls}"><div class="xk-label">${label}</div><div class="xk-value">${value}</div>${extra}<div class="xk-sub">${sub}</div></div>`;
+  const meter = (v, goalV) => `<div class="xk-meter"><i style="width:${Math.max(0, Math.min(100, v || 0))}%"></i>${goalV ? `<b style="left:${goalV}%" title="Meta ${goalV}%"></b>` : ''}</div>`;
+  const kpis = [
+    tile('Entregas', fmtN(n(c.delivered)), `${delta(n(c.delivered), n(p.delivered))} · ${fmtN(n(c.delivered) / Math.max(1, ex.days), 1)} por día`),
+    tile('Tasa de éxito', sr == null ? '—' : fmtN(sr, 1) + '%', `${delta(sr, srP, { pts: true })} · meta ${goal}%`, meter(sr, goal), sr != null && sr < goal ? 'warn' : ''),
+    tile('Primer intento', ft == null ? '—' : fmtN(ft, 1) + '%', `${delta(ft, ftP, { pts: true })} · sin reintentos`, meter(ft)),
+    tile('Productividad', prod == null ? '—' : fmtN(prod, 1), `entregas por repartidor por día · ${n(c.drivers)} repartidor(es)`),
+    tile('Avance de la cartera', adv == null ? '—' : fmtN(adv, 1) + '%', `${fmtN(n(port.delivered))} de ${fmtN(totP)} · ${fmtN(n(port.open))} abiertos`, meter(adv)),
+    tile('Pendientes vencidos', fmtN(n(port.overdue)), n(port.overdue) ? 'con fecha anterior a hoy · reprogramar' : 'al día', '', n(port.overdue) ? 'bad' : 'good'),
+  ].join('');
+  // tendencia diaria: barras apiladas entregados + no entregados (estado), con tooltip
+  const max = Math.max(1, ...ex.series.map((x) => x.delivered + x.failed));
+  const step = Math.max(1, Math.ceil(ex.series.length / 8));
+  const nice = (() => { const r = Math.pow(10, Math.floor(Math.log10(max))); return Math.ceil(max / r) * r; })();
+  const trend = `<div class="xt-wrap"><div class="xt-grid">${[1, 0.5, 0].map((f) => `<div style="bottom:${f * 100}%"><span>${fmtN(nice * f)}</span></div>`).join('')}</div>
+    <div class="xt-bars">${ex.series.map((x, i) => {
+      const t = x.delivered + x.failed;
+      return `<div class="xt-col" data-tip="${esc(new Date(x.d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short' }))}|${x.delivered}|${x.failed}|${t ? fmtN((x.delivered / t) * 100, 1) + '%' : '—'}">
+        <div class="xt-stack" style="height:${(t / nice) * 100}%">${x.failed ? `<i class="f" style="flex:${x.failed}"></i>` : ''}${x.delivered ? `<i class="d" style="flex:${x.delivered}"></i>` : ''}</div>
+        <small>${(i % step === 0 && ex.series.length - 1 - i >= Math.ceil(step / 2)) || i === ex.series.length - 1 ? esc(fmtDay(x.d)) : ''}</small></div>`;
+    }).join('')}</div><div class="xt-tip" hidden></div></div>
+    <div class="legend" style="margin-top:6px"><span><i style="background:var(--ok)"></i>Entregados</span><span><i style="background:var(--bad)"></i>No entregados</span></div>`;
+  // alertas
+  const al = ex.alerts;
+  const alert = (k, nn, txt, href) => `<a class="xa ${nn ? k : 'ok'}" href="${href}"><b>${fmtN(nn)}</b><span>${txt}</span>${nn ? icon('chev') : '✓'}</a>`;
+  const alerts = [
+    alert('bad', al.overdue, 'pedidos vencidos sin entregar', '#/orders?date=&status=pendiente'),
+    alert('warn', al.no_route_today, 'pedidos de hoy sin ruta asignada', '#/routes'),
+    alert('warn', al.geo_check, 'clientes con ubicación por revisar', '#/customers'),
+    alert('warn', al.sms_failed, 'SMS no enviados (24 h)', '#/messages?status=error'),
+  ].join('');
+  // ranking
+  const maxD = Math.max(1, ...ex.drivers.map((x) => n(x.delivered)));
+  const rank = ex.drivers.length ? `<div class="table-wrap"><table class="xr"><thead><tr><th>#</th><th>Repartidor</th><th>Entregas</th><th class="r">Éxito</th><th class="r">1er intento</th><th class="r">Por día</th></tr></thead><tbody>${ex.drivers.slice(0, 12).map((x, i) => {
+    const r = rate(x.delivered, n(x.delivered) + n(x.failed)), f1 = rate(x.first_try, x.delivered);
+    return `<tr><td class="num">${i < 3 ? ['🥇', '🥈', '🥉'][i] : i + 1}</td><td><b>${esc(x.name)}</b></td>
+      <td style="min-width:140px"><div class="xr-bar"><i style="width:${(n(x.delivered) / maxD) * 100}%"></i><span>${fmtN(n(x.delivered))}</span></div></td>
+      <td class="r num ${r != null && r < goal ? 'xr-low' : ''}">${r == null ? '—' : fmtN(r, 1) + '%'}</td><td class="r num">${f1 == null ? '—' : fmtN(f1, 0) + '%'}</td><td class="r num">${x.days ? fmtN(n(x.delivered) / x.days, 1) : '—'}</td></tr>`;
+  }).join('')}</tbody></table></div>` : '<p class="muted">Sin entregas en el periodo</p>';
+  // oficinas
+  const invOf = (id) => bd?.offices?.find((o) => String(o.id) === String(id));
+  const offRows = ex.offices.map((o) => {
+    const tot = n(o.delivered_all) + n(o.open), a = rate(o.delivered_all, tot), r = rate(o.delivered, n(o.delivered) + n(o.failed));
+    const inv = invOf(o.id)?.inv_total;
+    const cover = inv == null ? '' : inv >= n(o.open) ? `<span class="chip ok" title="Inventario disponible ${inv} para ${o.open} pedidos abiertos">✓ ${fmtN(inv)}</span>` : `<span class="chip off" title="Inventario ${inv}: faltan ${n(o.open) - inv} equipos para cubrir los pedidos abiertos">⚠ faltan ${fmtN(n(o.open) - inv)}</span>`;
+    return `<tr><td><b>${esc(o.name || 'Oficina')}</b></td><td style="min-width:130px">${meter(a)}<small class="muted">${a == null ? '—' : fmtN(a, 1) + '%'} · ${fmtN(n(o.delivered_all))}/${fmtN(tot)}</small></td>
+      <td class="r num ${r != null && r < goal ? 'xr-low' : ''}">${r == null ? '—' : fmtN(r, 1) + '%'}<br><small class="muted">${fmtN(n(o.delivered))} entregas</small></td><td class="r num">${fmtN(n(o.open))}${n(o.overdue) ? `<br><small style="color:var(--bad)">${fmtN(n(o.overdue))} vencidos</small>` : ''}</td><td class="r">${cover}</td></tr>`;
+  }).join('');
+  return `<section class="exec">
+    <div class="exec-head"><div><small class="muted">VISTA DE DIRECCIÓN</small><h2 style="margin:2px 0 0">Desempeño ${esc(perTxt)}</h2></div><small class="muted">Comparado con ${esc(fmtDay(ex.prev.from))} – ${esc(fmtDay(ex.prev.to))}</small></div>
+    <div class="xk-grid">${kpis}</div>
+    <div class="grid g-main" style="margin-top:12px">
+      <div class="card"><div class="row between"><h3 style="margin:0">Tendencia diaria</h3><small class="muted">${ex.series.length} días</small></div>${trend}</div>
+      <div class="card"><h3 style="margin:0 0 8px">Alertas</h3><div class="xa-list">${alerts}</div></div>
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+      <div class="card"><div class="row between"><h3 style="margin:0">Ranking de repartidores</h3><small class="muted">éxito bajo la meta en naranja</small></div>${rank}</div>
+      <div class="card"><div class="row between"><h3 style="margin:0">Resultados por oficina</h3><small class="muted">avance de la cartera · inventario vs abiertos</small></div>
+        ${offRows ? `<div class="table-wrap"><table><thead><tr><th>Oficina</th><th>Avance</th><th class="r">Éxito</th><th class="r">Abiertos</th><th class="r">Inventario</th></tr></thead><tbody>${offRows}</tbody></table></div>` : '<p class="muted">Sin datos</p>'}</div>
+    </div>
+  </section>`;
+}
+function wireExecBoard(v) {
+  const tip = $('.xt-tip', v);
+  if (!tip) return;
+  $$('.xt-col', v).forEach((c) => {
+    c.onmouseenter = () => {
+      const [d, del, fail, sr] = c.dataset.tip.split('|');
+      tip.innerHTML = `<b>${d}</b><div><i style="background:var(--ok)"></i>Entregados <b>${del}</b></div><div><i style="background:var(--bad)"></i>No entregados <b>${fail}</b></div><div class="muted">Éxito ${sr}</div>`;
+      tip.hidden = false;
+      const w = c.parentElement.getBoundingClientRect(), r = c.getBoundingClientRect();
+      tip.style.left = Math.min(w.width - 150, Math.max(0, r.left - w.left + r.width / 2 - 75)) + 'px';
+      c.classList.add('on');
+    };
+    c.onmouseleave = () => { tip.hidden = true; c.classList.remove('on'); };
+  });
 }
 
 // ================= STAFF: Pedidos =================
