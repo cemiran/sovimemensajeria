@@ -692,7 +692,8 @@ function serialsRequiredError(o) {
 function assignSerial(o, raw, user) {
   const sn = normSerial(raw);
   if (!SERIAL_RE.test(sn)) throw new HttpError(400, `"${raw}" no parece un número de serie válido`);
-  if (!['pendiente', 'asignado', 'cargado', 'fallido'].includes(o.status)) throw new HttpError(409, `El pedido está "${o.status}"`);
+  const lateDelivered = o.status === 'entregado' && STAFF.includes(user.role);
+  if (!['pendiente', 'asignado', 'cargado', 'fallido'].includes(o.status) && !lateDelivered) throw new HttpError(409, `El pedido está "${o.status}"`);
   const needs = orderSerialNeeds(o.id);
   if (!needs.length) throw new HttpError(409, 'Este pedido no lleva productos con número de serie');
   let s = db.prepare('SELECT s.*, p.name pname FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial = ?').get(sn);
@@ -724,6 +725,15 @@ function assignSerial(o, raw, user) {
   const need = needs.find((r) => r.product_id === s.product_id);
   if (!need) throw new HttpError(409, `El S/N ${sn} es de "${s.pname}", que no está en este pedido`);
   if (!need.missing) throw new HttpError(409, `Este pedido ya tiene todas las series de "${s.pname}"`);
+  if (lateDelivered) {
+    // el pedido ya se entregó: la pieza sale como entregada (y deja de contar en almacén, abierto o con el repartidor)
+    if (s.holder_id) custodyLog(s.holder_id, s.product_id, 1, 'entregado', user.id, { serial: s.serial, orderId: o.id, reference: 'S/N asignado después de la entrega' });
+    db.prepare("UPDATE serials SET status='entregado', order_id=?, holder_id=NULL, held_at=NULL, open_pool=0, assigned_at=COALESCE(assigned_at, datetime('now')), delivered_at=COALESCE(?, datetime('now')), updated_at=datetime('now') WHERE id=?").run(o.id, o.delivered_at, s.id);
+    serialEvent(s.id, 'entregado', o.id, user.id, `Asignado al pedido ${o.tracking_code} (ya entregado)`);
+    // la hoja de Google se actualiza con el S/N
+    db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(o.id);
+    return { serial: { ...s, status: 'entregado', order_id: o.id }, already: false };
+  }
   db.prepare("UPDATE serials SET status='asignado', order_id=?, assigned_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(o.id, s.id);
   serialEvent(s.id, 'asignado', o.id, user.id, `Pedido ${o.tracking_code}`);
   return { serial: { ...s, status: 'asignado', order_id: o.id }, already: false };
@@ -759,7 +769,7 @@ app.get(
     if (req.query.q) { where.push('(s.serial LIKE ? OR o.tracking_code LIKE ? OR c.name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const from = `FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN orders o ON o.id = s.order_id LEFT JOIN customers c ON c.id = o.customer_id ${w}`;
-    const rows = db.prepare(`SELECT s.*, p.name product_name, p.sku, o.tracking_code, o.status order_status, c.name customer_name, (SELECT name FROM users WHERE id = s.holder_id) holder_name ${from} ORDER BY s.updated_at DESC, s.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    const rows = db.prepare(`SELECT s.*, p.name product_name, p.sku, o.tracking_code, o.status order_status, c.name customer_name, (SELECT name FROM users WHERE id = s.holder_id) holder_name, (SELECT name FROM warehouses WHERE id = s.warehouse_id) warehouse_name ${from} ORDER BY s.updated_at DESC, s.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     const total = db.prepare(`SELECT COUNT(*) n ${from}`).get(...args).n;
     const stats = db.prepare('SELECT status, COUNT(*) n FROM serials GROUP BY status').all();
     const products = db.prepare(

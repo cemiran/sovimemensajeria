@@ -965,7 +965,7 @@ async function orderDetail(id) {
         <div><h3>Contenido</h3><table><tbody>${o.items.map((i) => `<tr><td>${esc(i.name)}${i.serialized ? ` <span class="chip">${icon('tag')} S/N</span>` : ''}<br><small class="muted">${esc(i.sku)}</small></td><td class="r num">× ${i.qty}</td></tr>`).join('') || '<tr><td class="muted">Sin artículos</td></tr>'}</tbody></table></div>
         ${o.serial_needs?.length ? `<div><div class="row between"><h3 style="margin:0">Números de serie</h3>${o.serials_missing ? `<span class="chip warn">Faltan ${o.serials_missing}</span>` : '<span class="chip ok">Completos</span>'}</div>
           <div class="sn-list" style="margin:8px 0">${o.serials.map((x) => `<span class="chip sn-chip"><span class="mono" data-snview="${esc(x.serial)}">${esc(x.serial)}</span>${staff && x.status === 'asignado' ? `<button type="button" class="x" data-snrm="${x.id}" aria-label="Quitar ${esc(x.serial)}">×</button>` : ''}</span>`).join('') || '<small class="muted">Sin series asignadas</small>'}</div>
-          ${o.serials_missing && !['entregado', 'cancelado'].includes(o.status) ? `<button class="btn sm primary" id="snAssign">${icon('scan')} Escanear números de serie</button>` : ''}</div>` : ''}
+          ${o.serials_missing && o.status !== 'cancelado' && (staff || o.status !== 'entregado') ? `<div class="row" style="gap:6px;flex-wrap:wrap">${o.status !== 'entregado' ? `<button class="btn sm primary" id="snAssign">${icon('scan')} Escanear números de serie</button>` : ''}${staff ? `<button class="btn sm ${o.status === 'entregado' ? 'primary' : ''}" id="snManual">${icon('tag')} Asignar S/N manualmente</button>` : ''}</div>` : ''}</div>` : ''}
         <div class="label-print printable" id="lbl"><b>${esc(SETTINGS.company_name)}</b><svg id="bc"></svg><div>${esc(o.customer_name)}</div><small>${esc(o.address)}</small></div>
       </div>
       <div class="stack">
@@ -999,6 +999,7 @@ async function orderDetail(id) {
   try { JsBarcode($('#bc', m.el), o.tracking_code, { format: 'CODE128', height: 60, fontSize: 16, margin: 4 }); } catch {}
   $('#print', m.el).onclick = () => printEl($('#lbl', m.el));
   $('#snAssign', m.el)?.addEventListener('click', () => ensureSerials(o, () => { m.close(); orderDetail(o.id); }));
+  $('#snManual', m.el)?.addEventListener('click', () => { m.close(); assignSerialManual(o); });
   $$('[data-snview]', m.el).forEach((x) => (x.onclick = () => serialDetail(x.dataset.snview).catch((e) => toast(e.message, 'bad'))));
   $$('[data-snrm]', m.el).forEach((b) => (b.onclick = async () => {
     try { await api('DELETE', `/api/orders/${o.id}/serials/${b.dataset.snrm}`); toast('Serie liberada', 'ok'); m.close(); orderDetail(o.id); } catch (e) { toast(e.message, 'bad'); }
@@ -1736,6 +1737,36 @@ const SN_STATUS = { disponible: ['En almacén', 'ok'], asignado: ['Asignado a pe
 const snChip = (st) => `<span class="chip ${SN_STATUS[st]?.[1] || ''}">${SN_STATUS[st]?.[0] || esc(st)}</span>`;
 const SN_EVENT = { recibido: 'Recibido en almacén', alta: 'Registrado al asignar', asignado: 'Asignado al pedido', liberado: 'Liberado del pedido', entregado: 'Entregado al cliente', baja: 'Dado de baja', reingreso: 'Reingresado', devolucion: 'Devuelto por el cliente', repartidor: 'Entregado a repartidor', almacen: 'Devuelto al almacén por el repartidor', abierto: 'Abierto para cualquier repartidor' };
 
+// Asignar S/N a mano: escribir / escanear o elegir de los disponibles (también para pedidos ya entregados)
+async function assignSerialManual(o) {
+  const pids = (o.serial_needs || []).filter((n) => n.missing).map((n) => n.product_id);
+  const lists = await Promise.all(pids.map((pid) => GET(`/api/serials?status=disponible&product_id=${pid}&limit=500`).then((r) => r.rows).catch(() => [])));
+  const avail = lists.flat();
+  const where = (x) => (x.holder_name ? `Lo trae ${x.holder_name}` : x.open_pool ? 'Abierto (cualquier repartidor)' : x.warehouse_name || 'Almacén');
+  const m = modal(`Asignar S/N · ${o.tracking_code}`, `<div class="stack">
+    ${o.status === 'entregado' ? '<div class="info-bar">El pedido ya está entregado: el equipo que asignes queda como <b>entregado</b> a este cliente y se actualiza la hoja de Google.</div>' : ''}
+    <p style="margin:0">${(o.serial_needs || []).filter((n) => n.missing).map((n) => `${esc(n.name)}: falta${n.missing === 1 ? '' : 'n'} <b>${n.missing}</b>`).join(' · ')}</p>
+    <div class="row"><input id="msnIn" class="grow mono" placeholder="Escribe o escanea el S/N (ej. HWTCDE3E15BA)" autocomplete="off" style="text-transform:uppercase" /><button class="btn" id="msnScan">${icon('scan')}</button><button class="btn primary" id="msnGo">Asignar</button></div>
+    <h3 style="margin:6px 0 0">…o elige de los disponibles (${avail.length})</h3>
+    <input id="msnQ" placeholder="Buscar S/N, almacén o repartidor" />
+    <div class="table-wrap" style="max-height:300px"><table><tbody>${avail.map((x) => `<tr data-r="${esc((x.serial + ' ' + where(x)).toLowerCase())}"><td class="mono">${esc(x.serial)}</td><td><small>${esc(x.product_name)}</small></td><td><small class="muted">${esc(where(x))}</small></td><td class="r"><button class="btn sm" data-pick="${esc(x.serial)}">Usar</button></td></tr>`).join('') || '<tr><td class="muted">No hay equipos disponibles de este producto.</td></tr>'}</tbody></table></div></div>`,
+    { wide: true, footer: '<button class="btn" data-close>Cancelar</button>' });
+  const go = async (sn) => {
+    sn = String(sn || '').trim().toUpperCase();
+    if (!sn) return toast('Escribe el número de serie', 'bad');
+    try {
+      const r = await POST(`/api/orders/${o.id}/serials`, { serial: sn });
+      toast(`S/N ${r.serial} asignado a ${o.tracking_code}${r.missing ? ` · faltan ${r.missing}` : ''}`, 'ok');
+      m.close(); render(); orderDetail(o.id);
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  $('#msnGo', m.el).onclick = () => go($('#msnIn', m.el).value);
+  $('#msnIn', m.el).onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(e.target.value); } };
+  $('#msnScan', m.el).onclick = () => openScanner({ title: 'Escanear S/N', onCode: async (c) => { $('#msnIn', m.el).value = c; await go(c); } });
+  $('#msnQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-r]', m.el).forEach((tr) => (tr.hidden = !!q && !tr.dataset.r.includes(q))); };
+  $$('[data-pick]', m.el).forEach((b) => (b.onclick = async () => { if (await confirmDlg(`¿Asignar ${b.dataset.pick} al pedido ${o.tracking_code}?`)) go(b.dataset.pick); }));
+  setTimeout(() => $('#msnIn', m.el)?.focus(), 100);
+}
 // Escanear los S/N que le faltan a un pedido (despacho, mostrador o repartidor)
 function ensureSerials(order, onDone) {
   const draw = (needs, serials) => {
