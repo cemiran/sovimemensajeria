@@ -329,7 +329,7 @@ const moreDefaults = {
   phone_country: '52',
   require_photo: '1',
   require_signature: '1',
-  osrm_url: 'https://router.project-osrm.org',
+  osrm_url: 'https://routing.openstreetmap.de/routed-car',
   notif_enabled: '1',
   notif_matrix: JSON.stringify({
     registrado: { sms: 0, email: 1, whatsapp: 1 },

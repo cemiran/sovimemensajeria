@@ -283,12 +283,23 @@ async function unlocatedCustomers(officeId) {
   $('#unQ', m.el).oninput = (e) => { const q = e.target.value.toLowerCase().trim(); $$('tr[data-u]', m.el).forEach((tr) => (tr.hidden = !!q && !tr.dataset.t.includes(q))); };
   $$('tr[data-u]', m.el).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.u), () => { tr.remove(); })));
 }
+// Destino para Google Maps / Waze: el pin si es exacto (o confirmado); si es aproximado, la dirección escrita
+const navAddr = (s) => [s.address, s.customer_colonia && !String(s.address || '').toUpperCase().includes(String(s.customer_colonia).toUpperCase()) ? 'Col. ' + s.customer_colonia : '',
+  s.customer_city, /san luis/i.test(s.customer_city || '') ? 'Sonora' : 'Baja California', 'México'].filter(Boolean).join(', ');
+const exactPin = (s) => s.lat != null && !(typeof geoChk === 'function' && geoChk(s.geo_quality));
+const navDest = (s) => (exactPin(s) ? `${s.lat},${s.lng}` : navAddr(s));
+function navUrl(s, app) {
+  if (app === 'waze') return exactPin(s) ? `https://waze.com/ul?ll=${s.lat},${s.lng}&navigate=yes` : `https://waze.com/ul?q=${encodeURIComponent(navAddr(s))}&navigate=yes`;
+  return `https://www.google.com/maps/dir/?api=1&travelmode=driving&dir_action=navigate&destination=${encodeURIComponent(navDest(s))}`;
+}
+// app con la que navega este teléfono (se recuerda por dispositivo): google (recomendado), waze o app
+const navPref = () => { try { return localStorage.getItem('navApp') || 'google'; } catch { return 'google'; } };
 function gmapsUrl(stops) {
-  const pts = stops.filter((s) => s.lat != null);
+  const pts = stops.filter((s) => s.lat != null || s.address);
   if (!pts.length) return '#';
   const dest = pts[pts.length - 1];
-  const way = pts.slice(0, -1).slice(0, 9).map((s) => `${s.lat},${s.lng}`).join('|');
-  return `https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=${dest.lat},${dest.lng}${way ? '&waypoints=' + encodeURIComponent(way) : ''}`;
+  const way = pts.slice(0, -1).slice(0, 9).map(navDest).join('|');
+  return `https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=${encodeURIComponent(navDest(dest))}${way ? '&waypoints=' + encodeURIComponent(way) : ''}`;
 }
 function getPosition(timeout = 10000) {
   return new Promise((ok) => {
@@ -5006,7 +5017,7 @@ async function viewMyRoute(v) {
     <div class="tels">${phonesLine(next)}</div>
     ${geoChk(next.geo_quality) ? `<div style="margin-top:6px">${geoWarn(next.geo_quality)}<br><small class="muted">Al llegar al domicilio toca <b>📍 Estoy aquí</b> para dejar la ubicación correcta.</small> <button class="btn sm" data-here="${next.id}">📍 Estoy aquí</button></div>` : ''}
     ${next.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(next.cod_amount)}</div>` : ''}
-    <div class="row" style="margin-top:12px"><a class="btn primary lg grow" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
+    <div class="row" style="margin-top:12px"><a class="btn primary lg grow" data-nav="${next.id}" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
   </div>` : `<div class="card empty">${icon('check')}<p><b>¡Ruta terminada!</b><br>No quedan paradas por visitar.</p></div>`}
   <div class="card" style="margin:12px 0">
     <div class="row between"><b>${r.stops.length} paradas · ${fmtN(r.distance_km, 1)} km · ~${fmtN(r.est_minutes / 60, 1)} h</b>${badge(r.status)}</div>
@@ -5026,7 +5037,7 @@ async function viewMyRoute(v) {
       <small class="muted">${esc(s.tracking_code)} ${s.appointment_time ? `· <b>⏰ ${esc(s.appointment_time)}</b>` : s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
-        ${s.lat != null ? `<a class="btn sm" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
+        ${s.lat != null || s.address ? `<a class="btn sm" data-nav="${s.id}" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
         ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone))}">${icon('chat')}</a>` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
         ${geoChk(s.geo_quality) ? `<button class="btn sm" data-here="${s.id}" title="Estoy en el domicilio: guardar mi ubicación como la del cliente">📍 Estoy aquí</button>` : ''}<a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a><a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>` : ''}
     </div></div>`;
@@ -5052,6 +5063,23 @@ async function viewMyRoute(v) {
       if (/checklist/i.test(er.message)) location.hash = '#/check';
     }
   });
+  // Navegar: abre Google Maps (o Waze) directo; "Mapa de la app" usa el navegador interno
+  $('#topbar-nav-pref')?.remove();
+  $('.topbar .actions', v)?.insertAdjacentHTML('afterbegin', `<label class="row" id="topbar-nav-pref" style="gap:4px" title="Con qué app navegar en este teléfono"><small class="muted">Navegar con</small><select id="navSel" style="width:auto"><option value="google">Google Maps</option><option value="waze">Waze</option><option value="app">Mapa de la app</option></select></label>`);
+  if ($('#navSel')) { $('#navSel').value = navPref(); $('#navSel').onchange = (e) => { try { localStorage.setItem('navApp', e.target.value); } catch {} toast(`Navegarás con ${e.target.selectedOptions[0].text}`, 'ok'); }; }
+  $$('[data-nav]', v).forEach((a) => (a.onclick = (e) => {
+    const app = navPref();
+    if (app === 'app') return; // navegador interno
+    e.preventDefault();
+    const st = r.stops.find((x) => String(x.id) === a.dataset.nav);
+    // aviso "tu repartidor está cerca" (si ya va cargado), con tiempo estimado desde la ubicación actual
+    if (st.status === 'cargado') {
+      const p = GPS.last;
+      const mins = p && st.lat != null ? Math.max(3, Math.round((haversineM(p, st) * (Number(SETTINGS.road_factor) || 1.35)) / 1000 / (Number(SETTINGS.avg_speed_kmh) || 22) * 60)) : 15;
+      POST(`/api/orders/${st.id}/arriving`, { minutes: mins }).catch(() => {});
+    }
+    window.open(navUrl(st, app), '_blank', 'noopener');
+  }));
   // "Estoy aquí": el repartidor fija la ubicación del cliente con su GPS
   $$('[data-here]', v).forEach((b) => (b.onclick = async () => {
     const st = r.stops.find((x) => String(x.id) === b.dataset.here);
@@ -5104,7 +5132,7 @@ async function viewNavigate(v, id) {
   const stops = r?.stops || [];
   const open = stops.filter((s) => ['asignado', 'cargado'].includes(s.status));
   const s = stops.find((x) => String(x.id) === String(id)) || open[0];
-  if (!s || s.lat == null) { v.innerHTML = topbar('Navegación', '<a href="#/my" class="btn sm">Volver</a>') + `<div class="card empty">${s ? 'Este cliente no tiene ubicación en el mapa.' : 'No hay paradas pendientes.'}</div>`; return; }
+  if (!s || s.lat == null) { v.innerHTML = topbar('Navegación', '<a href="#/my" class="btn sm">Volver</a>') + `<div class="card empty">${s ? `Este cliente no tiene ubicación en el mapa.<br><br><a class="btn primary" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}">${icon('nav')} Ir con Google Maps por dirección</a> <a class="btn" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>` : 'No hay paradas pendientes.'}</div>`; return; }
   const after = open[open.indexOf(s) + 1];
   const dest = { lat: s.lat, lng: s.lng };
   v.innerHTML = `<div class="nav-wrap">
@@ -5124,8 +5152,8 @@ async function viewNavigate(v, id) {
         ${s.customer_phone_alt ? `<a class="btn lg" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional: ${esc(s.customer_phone_alt)}">${icon('phone')} 2</a>` : ''}
       </div>
       <div class="row" style="margin-top:8px">
-        <a class="btn sm grow" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=${dest.lat},${dest.lng}">Google Maps</a>
-        <a class="btn sm grow" target="_blank" rel="noopener" href="https://waze.com/ul?ll=${dest.lat},${dest.lng}&navigate=yes">Waze</a>
+        <a class="btn sm grow primary" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}" title="Con tráfico en tiempo real">${icon('nav')} Google Maps</a>
+        <a class="btn sm grow" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>
         <a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>
       <details class="nav-steps"><summary>Indicaciones paso a paso</summary><ol id="nSteps"><li class="muted">Calculando…</li></ol></details>
       ${after ? `<small class="muted">Después: ${esc(after.customer_name)} · ${esc(after.address)}</small>` : ''}
@@ -5146,7 +5174,7 @@ async function viewNavigate(v, id) {
   let notified = false;
   map.on('dragstart', () => (follow = false));
   $('#recenter').onclick = () => { follow = true; if (me) map.setView([me.lat, me.lng], Math.max(map.getZoom(), 16)); };
-  const osrm = (SETTINGS.osrm_url || '').replace(/\/+$/, '');
+  const osrm = (/router\.project-osrm\.org/.test(SETTINGS.osrm_url || '') || !SETTINGS.osrm_url ? 'https://routing.openstreetmap.de/routed-car' : SETTINGS.osrm_url).replace(/\/+$/, '');
   async function fetchRoute(p) {
     routeFrom = p; routeAt = Date.now();
     if (!osrm) { route = null; return; }
