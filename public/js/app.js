@@ -983,7 +983,7 @@ async function orderDetail(id) {
               ${e.photo_path ? `<a href="/uploads/${esc(e.photo_path)}" target="_blank"><img class="evid-img" src="/uploads/${esc(e.photo_path)}" alt="Foto de entrega" /></a>` : ''}
               ${e.signature_path ? `<img class="evid-img" src="/uploads/${esc(e.signature_path)}" alt="Firma" />` : ''}
             </div>
-            ${staff ? `<button class="btn sm" style="margin-top:8px" data-rcpt="${e.id}">${icon('sign')} Comprobante</button>` : ''}
+            ${staff ? `<div class="row" style="margin-top:8px;gap:6px"><button class="btn sm" data-rcpt="${e.id}">${icon('sign')} Comprobante</button><label class="btn sm">${icon('camera')} ${e.photo_path ? 'Cambiar foto' : 'Agregar foto'}<input type="file" accept="image/*" data-evph="${e.id}" data-has="${e.photo_path ? 1 : 0}" hidden /></label></div>` : ''}
           </div>`).join('') : '<p class="muted">Aún no hay evidencias</p>'}</div>
         ${staff ? `<div><div class="row between"><h3 style="margin:0">Comunicación con el cliente</h3>${sheetChip(o.sheet?.status)}</div>
           <div class="row" style="margin:8px 0"><button class="btn sm" id="cpLink">${icon('copy')} Copiar enlace de rastreo</button><a class="btn sm" target="_blank" href="${esc(o.public_link)}">${icon('ext')} Ver como cliente</a><button class="btn sm primary" id="ntf">${icon('send')} Enviar aviso</button></div>
@@ -1000,6 +1000,17 @@ async function orderDetail(id) {
   $('#print', m.el).onclick = () => printEl($('#lbl', m.el));
   $('#snAssign', m.el)?.addEventListener('click', () => ensureSerials(o, () => { m.close(); orderDetail(o.id); }));
   $('#snManual', m.el)?.addEventListener('click', () => { m.close(); assignSerialManual(o); });
+  // la oficina agrega la foto de la recepción (p. ej. la que mandó el repartidor)
+  $$('[data-evph]', m.el).forEach((inp) => (inp.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    if (inp.dataset.has === '1' && !(await confirmDlg('Esta evidencia ya tiene foto. ¿Reemplazarla por la nueva?'))) { inp.value = ''; return; }
+    try {
+      const photo = await compressImage(f, 1600, 0.8);
+      await POST(`/api/evidences/${inp.dataset.evph}/photo`, { photo });
+      toast('Foto agregada a la evidencia', 'ok'); m.close(); orderDetail(o.id);
+    } catch (er) { toast(er.message, 'bad'); }
+  }));
   $$('[data-snview]', m.el).forEach((x) => (x.onclick = () => serialDetail(x.dataset.snview).catch((e) => toast(e.message, 'bad'))));
   $$('[data-snrm]', m.el).forEach((b) => (b.onclick = async () => {
     try { await api('DELETE', `/api/orders/${o.id}/serials/${b.dataset.snrm}`); toast('Serie liberada', 'ok'); m.close(); orderDetail(o.id); } catch (e) { toast(e.message, 'bad'); }

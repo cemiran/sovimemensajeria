@@ -2577,6 +2577,19 @@ function registerEvidence(req, result) {
   }
   return { ok: true, distance_to_customer_m: dist, order: loadOrder(o.id) };
 }
+// La oficina agrega (o cambia) la foto de una evidencia: p. ej. la foto que mandó el repartidor por WhatsApp
+app.post('/api/evidences/:id/photo', auth(...STAFF), wrap((req, res) => {
+  const e = db.prepare('SELECT e.*, o.customer_id, o.tracking_code FROM evidences e JOIN orders o ON o.id = e.order_id WHERE e.id = ?').get(req.params.id);
+  if (!e) throw new HttpError(404, 'Evidencia no encontrada');
+  if (req.user.office && customerOffice(e.customer_id) !== req.user.office) throw new HttpError(403, 'Este pedido es de otra oficina');
+  const name = saveDataUrl(req.body?.photo, 'foto');
+  if (!name) throw new HttpError(400, 'Falta la foto');
+  const note = `Foto agregada por oficina (${req.user.name}, ${new Date().toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })})`;
+  db.prepare("UPDATE evidences SET photo_path=?, notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' · ' END || ?) WHERE id=?").run(name, note, e.id);
+  db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE evidence_id=? AND status<>'desactivado'").run(e.id);
+  audit(req, 'evidencia.foto', `${e.tracking_code}: ${e.photo_path ? 'foto reemplazada' : 'foto agregada'}`);
+  res.json({ ok: true, photo_path: name });
+}));
 app.post('/api/orders/:id/deliver', auth(), wrap((req, res) => res.json(registerEvidence(req, 'entregado'))));
 app.post('/api/orders/:id/fail', auth(), wrap((req, res) => res.json(registerEvidence(req, 'fallido'))));
 // El repartidor inició la navegación hacia esta parada: avisa al cliente una sola vez
