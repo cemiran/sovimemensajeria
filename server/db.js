@@ -238,6 +238,8 @@ CREATE INDEX IF NOT EXISTS idx_sheet_status ON sheet_sync(status, next_try_at);
 // Se crea después de la tabla serials (ver más abajo): serials.holder_id = repartidor que trae el equipo; NULL = en almacén.
 // ---- Control por número de serie (cada equipo por su S/N) ----
 addCols('products', [['serialized', 'INTEGER NOT NULL DEFAULT 0']]);
+// estado real del SMS en el teléfono (SMS Gateway): Pending, Processed, Sent, Delivered, Failed
+addCols('messages', [['gw_state', 'TEXT'], ['gw_checked_at', 'TEXT']]);
 db.exec(`
 CREATE TABLE IF NOT EXISTS serials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

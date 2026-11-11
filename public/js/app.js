@@ -1041,7 +1041,7 @@ async function orderDetail(id) {
           </div>`).join('') : '<p class="muted">Aún no hay evidencias</p>'}</div>
         ${staff ? `<div><div class="row between"><h3 style="margin:0">Comunicación con el cliente</h3>${sheetChip(o.sheet?.status)}</div>
           <div class="row" style="margin:8px 0"><button class="btn sm" id="cpLink">${icon('copy')} Copiar enlace de rastreo</button><a class="btn sm" target="_blank" href="${esc(o.public_link)}">${icon('ext')} Ver como cliente</a><button class="btn sm primary" id="ntf">${icon('send')} Enviar aviso</button></div>
-          ${o.messages?.length ? `<div class="msg-mini">${o.messages.slice(0, 8).map((x) => `<div>${icon(x.channel === 'email' ? 'mail' : x.channel === 'whatsapp' ? 'chat' : 'phone')}<span class="grow">${EVENT_LABEL[x.event] || esc(x.event)} <small class="muted">· ${CH_LABEL[x.channel]} · ${fmtDT(x.created_at)}</small></span>${msgChip(x.status)}</div>`).join('')}</div>` : '<p class="muted"><small>Sin mensajes enviados.</small></p>'}</div>` : ''}
+          ${o.messages?.length ? `<div class="msg-mini">${o.messages.slice(0, 8).map((x) => `<div>${icon(x.channel === 'email' ? 'mail' : x.channel === 'whatsapp' ? 'chat' : 'phone')}<span class="grow">${EVENT_LABEL[x.event] || esc(x.event)} <small class="muted">· ${CH_LABEL[x.channel]} · ${fmtDT(x.created_at)}</small></span>${msgChip(x.status, x.gw_state)}</div>`).join('')}</div>` : '<p class="muted"><small>Sin mensajes enviados.</small></p>'}</div>` : ''}
       </div>
     </div>`, {
     wide: true,
@@ -4503,7 +4503,8 @@ async function viewSettings(v) {
 const EVENT_LABEL = { registrado: 'Pedido registrado', en_camino: 'En camino', proximo: 'Repartidor cerca', entregado: 'Entregado', fallido: 'No entregado' };
 const CH_LABEL = { sms: 'SMS', whatsapp: 'WhatsApp', email: 'Correo' };
 const MSG_STATUS = { pendiente: ['En cola', 'warn'], enviado: ['Enviado', 'ok'], simulado: ['Simulado', ''], error: ['Error', 'off'] };
-const msgChip = (st) => `<span class="chip ${MSG_STATUS[st]?.[1] || ''}">${MSG_STATUS[st]?.[0] || esc(st)}</span>`;
+const GW_STATE = { Pending: ['En el teléfono, por salir', 'warn'], Processed: ['En el teléfono, por salir', 'warn'], Sent: ['Enviado por el teléfono', 'ok'], Delivered: ['Entregado al cliente ✓', 'ok'], Failed: ['El teléfono no lo envió', 'off'] };
+const msgChip = (st, gw) => (gw && st === 'enviado' && GW_STATE[gw] ? `<span class="chip ${GW_STATE[gw][1]}" title="Estado real del SMS en el teléfono">${GW_STATE[gw][0]}</span>` : `<span class="chip ${MSG_STATUS[st]?.[1] || ''}">${MSG_STATUS[st]?.[0] || esc(st)}</span>`);
 const SHEET_STATUS = { pendiente: ['Sheets: en cola', 'warn'], enviado: ['Sheets ✓', 'ok'], error: ['Sheets: error', 'off'], desactivado: ['Sheets desactivado', ''] };
 const sheetChip = (st) => (st ? `<span class="chip ${SHEET_STATUS[st]?.[1] || ''}">${SHEET_STATUS[st]?.[0] || esc(st)}</span>` : '');
 function waLink(phone, text = '') {
@@ -4791,7 +4792,7 @@ async function viewMessages(v) {
     $('#msRows').insertAdjacentHTML('beforeend', r.rows.map((x, i) => `<tr class="click" data-i="${start + i}"><td><small>${fmtDT(x.created_at)}</small></td>
       <td><b class="mono">${esc(x.tracking_code || '—')}</b><br><small class="muted">${esc(x.customer_name || '')}</small></td><td>${EVENT_LABEL[x.event] || esc(x.event)}</td>
       <td>${icon(x.channel === 'email' ? 'mail' : x.channel === 'whatsapp' ? 'chat' : 'phone')} ${CH_LABEL[x.channel]}</td><td><small>${esc(x.recipient)}</small></td>
-      <td>${msgChip(x.status)}${x.error ? `<br><small style="color:var(--bad)">${esc(x.error.slice(0, 60))}</small>` : ''}</td>
+      <td>${msgChip(x.status, x.gw_state)}${x.error ? `<br><small style="color:var(--bad)">${esc(x.error.slice(0, 60))}</small>` : ''}</td>
       <td class="r">${['error', 'simulado'].includes(x.status) ? `<button class="btn sm" data-retry="${x.id}">Reintentar</button>` : ''}</td></tr>`).join('') || (start ? '' : '<tr><td colspan="7" class="empty">Aún no hay mensajes</td></tr>'));
     $('#msMore').innerHTML = `<small class="muted">${offset} de ${r.total}</small>${offset < r.total ? '<button class="btn sm" id="msNext">Ver más</button>' : ''}`;
     $('#msNext')?.addEventListener('click', () => load(false));

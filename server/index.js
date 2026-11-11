@@ -2607,7 +2607,7 @@ app.get(
     if (!o) throw new HttpError(404, 'No encontrado');
     if (!canSee(req.user, o)) throw new HttpError(403, 'Sin permiso');
     if (STAFF.includes(req.user.role)) {
-      o.messages = db.prepare('SELECT id, event, channel, recipient, status, error, created_at, sent_at FROM messages WHERE order_id=? ORDER BY id DESC').all(o.id);
+      o.messages = db.prepare('SELECT id, event, channel, recipient, status, error, created_at, sent_at, gw_state FROM messages WHERE order_id=? ORDER BY id DESC').all(o.id);
       o.sheet = db.prepare('SELECT status, error, sent_at FROM sheet_sync WHERE order_id=? ORDER BY id DESC LIMIT 1').get(o.id) || null;
       o.public_link = notify.trackLink(getSettings(), o.public_token);
     }

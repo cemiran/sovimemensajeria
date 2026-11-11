@@ -367,16 +367,35 @@ function doPost(e) {
 // ---------- Procesador de la cola ----------
 let busy = false;
 const retryAt = (n) => `datetime('now', '+${Math.min(60, 2 ** n)} minutes')`;
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// avisos que pierden sentido si se mandan tarde
+const STALE_H = { en_camino: 4, proximo: 2 };
 async function processQueue() {
   if (busy) return;
   busy = true;
   try {
     const s = getSettings();
-    const msgs = db.prepare("SELECT * FROM messages WHERE status='pendiente' AND next_try_at<=datetime('now') ORDER BY id LIMIT 25").all();
+    // los más urgentes primero: "está por llegar", luego entregado/no entregado, luego "va en camino"
+    const msgs = db.prepare(`SELECT * FROM messages WHERE status='pendiente' AND next_try_at<=datetime('now')
+      ORDER BY CASE event WHEN 'prueba' THEN 0 WHEN 'proximo' THEN 1 WHEN 'entregado' THEN 2 WHEN 'fallido' THEN 2 WHEN 'registrado' THEN 4 ELSE 3 END, id LIMIT 40`).all();
+    const smsLimit = Math.max(1, Number(s.sms_limit_30min) || 28);
+    const smsGapMs = Math.max(0, Number(s.sms_gap_seconds ?? 3)) * 1000;
+    let smsRecent = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND sent_at >= datetime('now','-30 minutes')").get().n;
     for (const m of msgs) {
+      const ageH = (Date.now() - new Date(m.created_at.replace(' ', 'T') + 'Z').getTime()) / 36e5;
+      if (STALE_H[m.event] && ageH > STALE_H[m.event]) {
+        db.prepare("UPDATE messages SET status='error', error=? WHERE id=?").run(`Vencido: llevaba más de ${STALE_H[m.event]} h en espera y el aviso ya no aplica`, m.id);
+        continue;
+      }
+      if (m.channel === 'sms' && s.sms_provider === 'android') {
+        // tope del teléfono: se espera a que se libere (sin contar intento)
+        if (smsRecent >= smsLimit) continue;
+        smsRecent++;
+      }
       try {
         const r = await deliver(s, m);
-        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now') WHERE id=?").run(
+        if (m.channel === 'sms' && smsGapMs && !r.simulated) await pause(smsGapMs);
+        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now'), gw_state=NULL, gw_checked_at=NULL WHERE id=?").run(
           r.simulated ? 'simulado' : 'enviado', r.ref || null, m.id
         );
       } catch (e) {
@@ -410,8 +429,44 @@ async function processQueue() {
     busy = false;
   }
 }
+// Estado real de los SMS en el teléfono (SMS Gateway): si el teléfono no pudo enviarlo (p. ej. límite de Android),
+// el mensaje vuelve a la cola y se reintenta solo
+let checking = false;
+async function checkSmsStates() {
+  const s = getSettings();
+  if (checking || s.sms_provider !== 'android' || !s.sms_android_user || !s.sms_android_pass) return;
+  checking = true;
+  try {
+    const base = s.sms_android_mode === 'local' ? String(s.sms_android_url || '').replace(/\/+$/, '') : 'https://api.sms-gate.app';
+    const list = db.prepare(`SELECT * FROM messages WHERE channel='sms' AND status='enviado' AND provider_ref IS NOT NULL
+      AND sent_at >= datetime('now','-12 hours') AND (gw_state IS NULL OR gw_state IN ('Pending','Processed','Sent'))
+      AND (gw_checked_at IS NULL OR gw_checked_at <= datetime('now','-90 seconds')) ORDER BY id LIMIT 60`).all();
+    for (const m of list) {
+      try {
+        const r = await fetch(`${base}/3rdparty/v1/messages/${encodeURIComponent(m.provider_ref)}`, { headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass) }, signal: AbortSignal.timeout(15000) });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const st = j.state || null;
+        db.prepare("UPDATE messages SET gw_state=?, gw_checked_at=datetime('now') WHERE id=?").run(st, m.id);
+        if (st === 'Failed') {
+          const err = (j.recipients || []).map((x) => x.error).filter(Boolean)[0] || 'El teléfono no pudo enviar el SMS';
+          const limit = /LIMIT_EXCEEDED/i.test(err);
+          const ageH = (Date.now() - new Date(m.created_at.replace(' ', 'T') + 'Z').getTime()) / 36e5;
+          const stale = STALE_H[m.event] && ageH > STALE_H[m.event];
+          const again = !stale && m.attempts < 8;
+          db.prepare(`UPDATE messages SET status=?, error=?, next_try_at=datetime('now', ?) WHERE id=?`).run(
+            again ? 'pendiente' : 'error', `Teléfono: ${limit ? 'límite de envío de Android alcanzado' : err}`.slice(0, 300), limit ? '+10 minutes' : '+3 minutes', m.id);
+        }
+      } catch {}
+    }
+  } finally {
+    checking = false;
+  }
+}
 function start() {
   setInterval(processQueue, 10000).unref();
+  setInterval(checkSmsStates, 120000).unref();
+  setTimeout(checkSmsStates, 20000).unref();
   setTimeout(processQueue, 2000).unref();
 }
 
