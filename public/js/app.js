@@ -4571,9 +4571,31 @@ function openReceipt(e) {
     wide: true,
     footer: `${e.public_link ? `<button class="btn" id="cpL">${icon('copy')} Copiar enlace</button><a class="btn" target="_blank" href="${esc(e.public_link)}">${icon('ext')} Ver como cliente</a>` : ''}
       ${e.customer_phone && e.public_link ? `<a class="btn" target="_blank" href="${esc(waLink(e.customer_phone, `Hola, este es el comprobante de entrega de tu paquete ${e.tracking_code}: ${e.public_link}`))}">${icon('chat')} Enviar por WhatsApp</a>` : ''}
+      ${e.serials_text && !driverMode() ? `<button class="btn" id="fixSN" title="Corregir un número de serie capturado por error">${icon('edit')} Corregir S/N</button>` : ''}
       <button class="btn primary" id="prR">${icon('print')} Imprimir</button>`,
   });
   $('#cpL', m.el)?.addEventListener('click', () => copyText(e.public_link));
+  // corregir S/N mal capturado: el correcto queda en el pedido, el comprobante y la hoja de Google
+  $('#fixSN', m.el)?.addEventListener('click', () => {
+    const list = String(e.serials_text).split(',').map((x) => x.trim()).filter(Boolean);
+    const d = modal('Corregir número de serie', `<form id="fxF" class="stack">
+      <p class="muted" style="margin:0">Escribe el S/N correcto del equipo que se entregó. Si no existe en el sistema se corrige el texto; si está en el inventario, pasa a este pedido y el equivocado regresa al inventario.</p>
+      ${list.map((sn, i) => `<label class="f"><span>Capturado: <b class="mono">${esc(sn)}</b></span><input name="n${i}" data-old="${esc(sn)}" class="mono" value="${esc(sn)}" autocomplete="off" style="text-transform:uppercase" /></label>`).join('')}
+    </form>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="fxGo">Guardar corrección</button>' });
+    $('#fxGo', d.el).onclick = async () => {
+      const ch = $$('[data-old]', d.el).map((x) => ({ old_serial: x.dataset.old, new_serial: x.value.trim().toUpperCase() })).filter((x) => x.new_serial && x.new_serial !== x.old_serial);
+      if (!ch.length) return toast('No cambiaste ningún número', 'bad');
+      if (!(await confirmDlg(`¿Corregir ${ch.map((x) => `${x.old_serial} → ${x.new_serial}`).join(', ')} en el pedido ${e.tracking_code}?`))) return;
+      try {
+        let r;
+        for (const x of ch) r = await POST(`/api/orders/${e.order_id}/serials/fix`, x);
+        e.serials_text = r.serials_text;
+        $('#rcpt', m.el).outerHTML = receiptHTML(e);
+        toast(`S/N corregido${r.how === 'intercambiado' ? ' (el capturado regresó al inventario)' : ''}. La hoja de Google se actualiza sola.`, 'ok');
+        d.close();
+      } catch (er) { toast(er.message, 'bad'); }
+    };
+  });
   $('#prR', m.el).onclick = () => printEl($('#rcpt', m.el));
 }
 

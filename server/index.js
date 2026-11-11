@@ -1662,6 +1662,44 @@ app.delete(
   })
 );
 
+// Corregir un S/N mal capturado en un pedido (también ya entregado):
+// - si el S/N correcto no existe en el sistema, se corrige el texto (error de dedo)
+// - si existe y está libre (almacén, repartidor o abierto), pasa a este pedido y el equivocado ocupa su lugar en el inventario
+app.post('/api/orders/:id/serials/fix', auth(...STAFF), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+  const oldS = normSerial(req.body?.old_serial), newS = normSerial(req.body?.new_serial);
+  if (!newS || newS.length < 5) throw new HttpError(400, 'Escribe el número de serie correcto');
+  if (newS === oldS) throw new HttpError(400, 'Es el mismo número de serie');
+  const old = db.prepare('SELECT * FROM serials WHERE serial=? AND order_id=?').get(oldS, o.id);
+  if (!old) throw new HttpError(404, `${oldS} no está en este pedido`);
+  const ex = db.prepare('SELECT s.*, (SELECT tracking_code FROM orders WHERE id=s.order_id) ped FROM serials s WHERE serial=?').get(newS);
+  let how;
+  tx(() => {
+    if (!ex) {
+      db.prepare("UPDATE serials SET serial=?, updated_at=datetime('now') WHERE id=?").run(newS, old.id);
+      serialEvent(old.id, 'corregido', o.id, req.user.id, `S/N corregido: ${oldS} → ${newS} (error de captura)`);
+      how = 'corregido';
+    } else {
+      if (ex.order_id === o.id) throw new HttpError(409, `${newS} ya está en este pedido`);
+      if (ex.status === 'entregado' || ex.order_id) throw new HttpError(409, `${newS} está ${ex.status} en el pedido ${ex.ped || '—'}`);
+      if (ex.product_id !== old.product_id) throw new HttpError(409, `${newS} es de otro artículo`);
+      // el correcto toma el lugar del equivocado en el pedido; el equivocado vuelve a donde estaba el correcto
+      db.prepare("UPDATE serials SET status=?, order_id=?, assigned_at=?, delivered_at=?, holder_id=NULL, held_at=NULL, open_pool=0, updated_at=datetime('now') WHERE id=?")
+        .run(old.status, o.id, old.assigned_at, old.delivered_at, ex.id);
+      db.prepare("UPDATE serials SET status='disponible', order_id=NULL, assigned_at=NULL, delivered_at=NULL, holder_id=?, held_at=?, open_pool=?, warehouse_id=?, updated_at=datetime('now') WHERE id=?")
+        .run(ex.holder_id, ex.held_at, ex.open_pool, ex.warehouse_id, old.id);
+      serialEvent(ex.id, old.status, o.id, req.user.id, `Corrección de captura: era ${oldS}`);
+      serialEvent(old.id, 'liberado', o.id, req.user.id, `Corrección de captura: el correcto es ${newS}; vuelve al inventario`);
+      how = 'intercambiado';
+    }
+    // la hoja de Google se vuelve a enviar con el S/N correcto
+    db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(o.id);
+  });
+  audit(req, 'series.correccion', `${o.tracking_code}: ${oldS} → ${newS} (${how})`);
+  res.json({ ok: true, how, serials: serialsOfOrder(o.id), serials_text: db.prepare("SELECT GROUP_CONCAT(serial, ', ') t FROM serials WHERE order_id=?").get(o.id).t });
+}));
 app.post(
   '/api/inventory/movements',
   auth(...STAFF),
