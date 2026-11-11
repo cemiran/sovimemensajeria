@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { db, tx, getSettings, DATA_DIR, UPLOAD_DIR } = require('./db');
-const { haversine, optimizeRoute, splitAmongDrivers } = require('./routing');
+const { haversine, optimizeRoute } = require('./routing');
 const notify = require('./notify');
 
 // ---------- Configuración ----------
@@ -938,6 +938,7 @@ app.post('/api/accounts/:id/orders', auth(...STAFF), wrap((req, res) => {
 app.put('/api/orders/:id/account', auth(...STAFF), wrap((req, res) => {
   const o = db.prepare('SELECT id, tracking_code FROM orders WHERE id=?').get(req.params.id);
   if (!o) throw new HttpError(404, 'No encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
   const aid = req.body?.account_id ? Number(req.body.account_id) : null;
   if (aid && !db.prepare('SELECT 1 FROM accounts WHERE id=?').get(aid)) throw new HttpError(400, 'Mayorista no encontrado');
   db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(aid, o.id);
@@ -2455,6 +2456,7 @@ app.post(
   wrap((req, res) => {
     const o = loadOrder(req.params.id);
     if (!o) throw new HttpError(404, 'No encontrado');
+    if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
     if (['entregado', 'cancelado'].includes(o.status)) throw new HttpError(409, 'No se puede cancelar');
     tx(() => {
       for (const it of o.items) moveStock(it.product_id, 'devolucion', it.qty, `Cancelación ${o.tracking_code}`, req.user.id);
@@ -2509,7 +2511,7 @@ app.post(
       // de cada cliente se toman sus pedidos que todavía pueden pasar al nuevo estado
       ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN (${BULK_FROM[status].map(() => '?').join(',')})`).all(...cids, ...BULK_FROM[status]).map((r) => r.id));
     }
-    ids = [...new Set(ids)].slice(0, 3000);
+    ids = officeOrders(req, [...new Set(ids)].slice(0, 3000));
     if (!ids.length) throw new HttpError(400, 'La selección no tiene pedidos que puedan cambiar a ese estado');
     const changed = [];
     const skipped = [];
@@ -2548,6 +2550,7 @@ app.post(
 app.put('/api/orders/:id/schedule', auth(...STAFF), wrap((req, res) => {
   const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
   if (!o) throw new HttpError(404, 'No encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
   if (['entregado', 'cancelado'].includes(o.status)) throw new HttpError(409, `El pedido ya está ${o.status}`);
   const b = req.body || {};
   const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : o.scheduled_date;
@@ -2570,6 +2573,7 @@ app.post(
   wrap((req, res) => {
     const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
     if (!o) throw new HttpError(404, 'No encontrado');
+    if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
     if (!['fallido', 'pendiente', 'asignado'].includes(o.status)) throw new HttpError(409, 'Estado no permite reprogramar');
     db.prepare("UPDATE orders SET status='pendiente', route_id=NULL, stop_seq=NULL, eta=NULL, driver_id=NULL, scheduled_date=? WHERE id=?").run(
       req.body.date || today(), o.id
@@ -2837,8 +2841,10 @@ app.get(
     if (req.user.role === 'repartidor') {
       where.push('r.driver_id = ?');
       args.push(req.user.id);
-    } else if (Number(req.query.driver_id)) { where.push('r.driver_id = ?'); args.push(Number(req.query.driver_id)); }
-    else if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
+    } else {
+      if (Number(req.query.driver_id)) { where.push('r.driver_id = ?'); args.push(Number(req.query.driver_id)); }
+      if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
+    }
     const rows = db
       .prepare(
         `SELECT r.*, u.name driver_name,
@@ -2860,6 +2866,7 @@ app.get(
     const r = db.prepare('SELECT r.*, u.name driver_name, u.last_lat, u.last_lng, u.last_seen FROM routes r LEFT JOIN users u ON u.id=r.driver_id WHERE r.id=?').get(req.params.id);
     if (!r) throw new HttpError(404, 'No encontrada');
     if (req.user.role === 'repartidor' && r.driver_id !== req.user.id) throw new HttpError(403, 'Sin permiso');
+    officeRoute(req, r);
     r.stops = db.prepare(`${ORDER_SELECT} WHERE o.route_id=? ORDER BY o.stop_seq`).all(r.id);
     res.json(r);
   })
@@ -2873,8 +2880,11 @@ app.post(
     const s = getSettings();
     const drv = db.prepare("SELECT name FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(driver_id);
     if (!drv) throw new HttpError(400, 'Repartidor inválido');
+    officeDriver(req, driver_id);
+    const oids = officeOrders(req, order_ids.map(Number));
+    if (!oids.length) throw new HttpError(403, 'Los pedidos son de otra oficina');
     const d = date || today();
-    const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body, driver_id), orderIds: order_ids.map(Number), settings: s, startTime: start_time });
+    const out = persistRoute({ name: name || `Ruta ${drv.name} ${d}`, driverId: driver_id, date: d, depot: depotOf(s, req.body, driver_id), orderIds: oids, settings: s, startTime: start_time });
     res.status(201).json(out);
   })
 );
@@ -2885,7 +2895,7 @@ app.get(
   wrap((req, res) => {
     const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
     const only = req.query.driver_id ? Number(req.query.driver_id) : null;
-    const drivers = db.prepare(`SELECT id, name, vehicle, phone FROM users WHERE (role='repartidor' OR can_deliver=1) ${only ? 'AND id=?' : 'AND active=1'} ORDER BY name`).all(...(only ? [only] : []));
+    const drivers = db.prepare(`SELECT id, name, vehicle, phone FROM users u WHERE (role='repartidor' OR can_deliver=1) ${only ? 'AND id=?' : 'AND active=1'} ${inOffice(req, 'u')} ORDER BY name`).all(...(only ? [only] : []));
     const custody = new Map(custodyOf(only).map((d) => [d.id, d.items]));
     const out = drivers.map((d) => {
       const orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.stop_seq, o.eta, o.scheduled_date, o.notes, o.cod_amount,
@@ -2908,6 +2918,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     const b = req.body || {};
+    officeDriver(req, b.driver_id);
     selfDriver(req, b.driver_id);
     const drv = db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
     if (!drv) throw new HttpError(400, 'Elige el repartidor');
@@ -2923,6 +2934,15 @@ app.post(
     res.json(assignOrdersTo(req, drv, ids, date));
   })
 );
+// Personal de una oficina: solo repartidores, pedidos y rutas de su oficina (el admin ve todo)
+const userOffice = (id) => db.prepare(`SELECT ${OFFICE_OF('u')} o FROM users u WHERE u.id = ?`).get(Number(id))?.o ?? null;
+function officeDriver(req, id) { if (req.user.office && userOffice(id) !== req.user.office) throw new HttpError(403, 'Ese repartidor es de otra oficina'); }
+function officeRoute(req, r) { if (req.user.office && r.driver_id && userOffice(r.driver_id) !== req.user.office) throw new HttpError(403, 'Esta ruta es de otra oficina'); }
+function officeOrders(req, ids) {
+  if (!req.user.office || !ids.length) return ids;
+  const ok = new Set(db.prepare(`SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (${ids.map(() => '?').join(',')}) ${inOffice(req, 'c')}`).all(...ids).map((r) => r.id));
+  return ids.filter((i) => ok.has(Number(i)));
+}
 // El despachador (o admin) puede asignarse pedidos a sí mismo: se le activa "También reparte" para entregar en modo repartidor
 function selfDriver(req, id) {
   if (Number(id) !== req.user.id || req.user.role === 'repartidor') return;
@@ -2934,8 +2954,10 @@ function assignOrdersTo(req, drv, ids, date) {
     const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
     const skipped = [];
     const take = [];
+    const mine = new Set(officeOrders(req, ids));
     for (const o of rows) {
-      if (!['pendiente', 'asignado'].includes(o.status)) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
+      if (!mine.has(o.id)) skipped.push({ tracking_code: o.tracking_code, reason: 'es de otra oficina' });
+      else if (!['pendiente', 'asignado'].includes(o.status)) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
       else if (o.driver_id === drv.id && o.route_id && o.scheduled_date === date) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
       else take.push(o);
     }
@@ -2973,6 +2995,7 @@ app.post(
   auth(...STAFF),
   wrap((req, res) => {
     const b = req.body || {};
+    officeDriver(req, b.driver_id);
     selfDriver(req, b.driver_id);
     const drv = db.prepare("SELECT id, name, active, capacity FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(Number(b.driver_id));
     if (!drv) throw new HttpError(400, 'Elige el repartidor');
@@ -2992,7 +3015,7 @@ app.post(
       const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
       ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN ('pendiente','asignado')`).all(...cids).map((r) => r.id));
     }
-    ids = [...new Set(ids)].slice(0, 3000);
+    ids = officeOrders(req, [...new Set(ids)].slice(0, 3000));
     const list = ids.length ? db.prepare(`SELECT o.id, o.status, c.lat, c.lng FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (${ids.map(() => '?').join(',')}) AND o.status IN ('pendiente','asignado')`).all(...ids) : [];
     if (!list.length) throw new HttpError(400, 'No hay pedidos abiertos para programar en la selección');
     const perDay = Math.max(1, Math.trunc(Number(b.per_day)) || Math.ceil(list.length / days.length));
@@ -3034,23 +3057,41 @@ app.post(
     const offDrivers = db.prepare(`SELECT u.id FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.active=1 ${inOffice(req, 'u')}`).all().map((r) => r.id);
     if (!driverIds.length) driverIds = offDrivers;
     else if (req.user.office) driverIds = driverIds.filter((id) => offDrivers.includes(id));
-    const drivers = driverIds.map((id) => db.prepare('SELECT id, name, capacity FROM users WHERE id=?').get(id)).filter(Boolean);
+    void depot;
+    const drivers = driverIds.map((id) => db.prepare("SELECT id, name, capacity, active FROM users WHERE id=? AND active=1").get(id)).filter(Boolean);
     const pend = db
       .prepare(
-        `SELECT o.id, o.priority, c.lat, c.lng, c.window_start, c.window_end FROM orders o JOIN customers c ON c.id=o.customer_id
+        `SELECT o.id, o.priority, c.lat, c.lng, c.city customer_city, ${OFFICE_OF('c')} off FROM orders o JOIN customers c ON c.id=o.customer_id
          WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ? ${inOffice(req, 'c')}`
       )
       .all(date);
     if (!pend.length) throw new HttpError(400, 'No hay pedidos pendientes por rutear');
-    const { assignments, overflow } = splitAmongDrivers(depot, pend, drivers);
+    // Misma lógica que en Pedidos: cada oficina con sus repartidores; los pedidos en orden de ciudad y cercanía
+    // desde la oficina, en tramos seguidos (una zona compacta por repartidor, según su capacidad);
+    // se agregan a la ruta del día de cada uno y la ruta se optimiza (camino más corto).
+    const byOff = new Map();
+    for (const o of pend) { if (!byOff.has(o.off)) byOff.set(o.off, []); byOff.get(o.off).push(o); }
     const created = [];
-    for (const a of assignments) {
-      if (!a.stops.length) continue;
-      const r = persistRoute({
-        name: `Ruta ${a.driver.name} ${date}`, driverId: a.driver.id, date, depot,
-        orderIds: a.stops.map((x) => x.id), settings: s, startTime: req.body.start_time,
-      });
-      created.push({ driver: a.driver.name, ...r, sequence: undefined });
+    const overflow = [];
+    for (const [off, list] of byOff) {
+      const team = drivers.filter((d) => userOffice(d.id) === off);
+      const ordered = geoSort(list).filter((o) => o.lat != null);
+      overflow.push(...list.filter((o) => o.lat == null));
+      if (!team.length) { overflow.push(...ordered); continue; }
+      const cap = (d) => Math.max(1, Number(d.capacity) || 30);
+      const capSum = team.reduce((a, d) => a + cap(d), 0);
+      let k = 0;
+      for (const d of team) {
+        const share = Math.min(cap(d), Math.ceil((ordered.length * cap(d)) / capSum));
+        const chunk = ordered.slice(k, k + share);
+        k += chunk.length;
+        if (!chunk.length) continue;
+        const r = assignOrdersTo(req, d, chunk.map((o) => o.id), date);
+        if (!r.route_id) continue;
+        const rt = db.prepare('SELECT distance_km, original_distance_km, est_minutes FROM routes WHERE id=?').get(r.route_id);
+        created.push({ driver: d.name, route_id: r.route_id, stops: r.assigned, ...rt });
+      }
+      overflow.push(...ordered.slice(k));
     }
     res.status(201).json({ created, overflow: overflow.map((o) => o.id) });
   })
@@ -3062,6 +3103,7 @@ app.post(
     const r = db.prepare('SELECT * FROM routes WHERE id=?').get(req.params.id);
     if (!r) throw new HttpError(404, 'No encontrada');
     if (req.user.role === 'repartidor' && r.driver_id !== req.user.id) throw new HttpError(403, 'Sin permiso');
+    officeRoute(req, r);
     const s = getSettings();
     // Re-optimiza las paradas pendientes desde la posición actual (si viene) o desde el almacén
     const pending = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id);
@@ -3084,7 +3126,10 @@ app.put(
   wrap((req, res) => {
     const r = db.prepare('SELECT * FROM routes WHERE id=?').get(req.params.id);
     if (!r) throw new HttpError(404, 'No encontrada');
-    const { driver_id, add_order_ids = [], remove_order_ids = [] } = req.body;
+    officeRoute(req, r);
+    const { driver_id, remove_order_ids = [] } = req.body;
+    if (driver_id) officeDriver(req, driver_id);
+    const add_order_ids = officeOrders(req, (req.body.add_order_ids || []).map(Number));
     if (driver_id && driver_id !== r.driver_id) {
       db.prepare('UPDATE routes SET driver_id=? WHERE id=?').run(driver_id, r.id);
       db.prepare('UPDATE orders SET driver_id=? WHERE route_id=?').run(driver_id, r.id);
@@ -3105,6 +3150,7 @@ app.delete(
   wrap((req, res) => {
     const r = db.prepare('SELECT * FROM routes WHERE id=?').get(req.params.id);
     if (!r) throw new HttpError(404, 'No encontrada');
+    officeRoute(req, r);
     const doneCnt = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(r.id).c;
     if (doneCnt) throw new HttpError(409, 'La ruta ya tiene entregas registradas');
     tx(() => {

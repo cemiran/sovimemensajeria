@@ -953,26 +953,7 @@ async function viewOrders(v) {
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
-  // seleccionar toda una ciudad
-  $$('[data-citysel]', v).forEach((cb) => (cb.onchange = () => {
-    $$(`[data-sel][data-city="${CSS.escape(cb.dataset.citysel)}"]`, v).filter((x) => !x.disabled).forEach((x) => (x.checked = cb.checked));
-    $('[data-sel]', v)?.dispatchEvent(new Event('change'));
-  }));
-  // seleccionar los N más cercanos a lo ya marcado (o desde el primero de la lista)
-  $('#nearGo')?.addEventListener('click', () => {
-    const n = Math.max(1, Number($('#nearN').value) || 0);
-    const all = $$('[data-sel]', v).filter((x) => !x.disabled && x.dataset.lat);
-    let sel = all.filter((x) => x.checked);
-    let extra = n;
-    if (!sel.length) { const first = all[0]; if (!first) return toast('No hay pedidos con ubicación para seleccionar', 'bad'); first.checked = true; sel = [first]; extra = n - 1; }
-    const pts = sel.map((x) => [Number(x.dataset.lat), Number(x.dataset.lng)]);
-    const kx = Math.cos((pts[0][0] * Math.PI) / 180);
-    const dist = (x) => Math.min(...pts.map(([la, ln]) => ((Number(x.dataset.lng) - ln) * kx) ** 2 + (Number(x.dataset.lat) - la) ** 2));
-    const add = all.filter((x) => !x.checked).sort((a, b) => dist(a) - dist(b)).slice(0, extra);
-    add.forEach((x) => (x.checked = true));
-    $('[data-sel]', v)?.dispatchEvent(new Event('change'));
-    toast(`${$$('[data-sel]', v).filter((x) => x.checked).length} pedidos seleccionados (los más cercanos entre sí)`, 'ok');
-  });
+  geoPickWire(v);
   $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}&office_id=${off}&city=${encodeURIComponent(city)}`; };
   // rangos rápidos de fechas
   $$('[data-rng]', v).forEach((b) => (b.onclick = () => {
@@ -1312,7 +1293,10 @@ async function viewCustomers(v) {
 async function viewRoutes(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const date = p.get('date') || today();
-  const [routes, pend, drivers] = await Promise.all([GET(`/api/routes?date=${date}`), GET(`/api/orders?status=pendiente&unrouted=1&limit=500`), GET('/api/users?role=repartidor')]);
+  const aCity = p.get('city') || '', aOff = p.get('office_id') || '';
+  const [routes, pend, drivers, pick, cities, offList] = await Promise.all([GET(`/api/routes?date=${date}`), GET(`/api/orders?status=pendiente&unrouted=1&limit=500`), GET('/api/users?role=repartidor'),
+    GET(`/api/orders?status=pendiente,fallido&unrouted=1&sort=geo&limit=200000&city=${encodeURIComponent(aCity)}&office_id=${aOff}`),
+    GET(`/api/dashboard/breakdown?office_id=${aOff}`).then((r) => r.city_list).catch(() => []), GET('/api/warehouses').catch(() => [])]);
   const pending = pend.rows.filter((o) => o.scheduled_date <= date);
   const totKm = routes.reduce((a, r) => a + (r.distance_km || 0), 0);
   const totOrig = routes.reduce((a, r) => a + (r.original_distance_km || 0), 0);
@@ -1339,8 +1323,23 @@ async function viewRoutes(v) {
         <div class="progress"><i style="width:${r.stops ? (r.delivered / r.stops) * 100 : 0}%;background:var(--ok)"></i><i style="width:${r.stops ? (r.failed / r.stops) * 100 : 0}%;background:var(--bad)"></i></div>
         <div class="row between" style="margin-top:8px"><small class="muted">${done}/${r.stops} visitadas · ${r.loaded} en vehículo</small><button class="btn sm" data-route="${r.id}">Ver detalle</button></div></div>`;
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
+  </div>
+  <div class="card" id="asgCard" style="margin-top:14px">
+    <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">${icon('truck')} Asignar pedidos por ciudad y ubicación</h3><small class="muted">${pick.total} pedido(s) sin ruta (pendientes o fallidos, de cualquier fecha)</small></div>
+    <form class="row" id="afilt" style="margin-bottom:8px;flex-wrap:wrap">
+      ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:200px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === aOff ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
+      <select name="city" style="max-width:200px"><option value="">Todas las ciudades</option>${cities.map((c) => `<option ${c.toLowerCase() === aCity.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <button class="btn">Filtrar</button>
+      <span class="bulk-sep"></span>
+      <small class="muted">Marca un pedido y agrega los más cercanos:</small><input type="number" id="nearN" min="1" value="20" style="width:80px" /><button type="button" class="btn sm" id="nearGo">${icon('live')} Seleccionar N más cercanos</button>
+    </form>
+    <small class="muted">Marca una ciudad completa, pedidos sueltos o los más cercanos y elige el repartidor en la barra de abajo. La ruta se ordena sola por el camino más corto; los marcados se resaltan en azul en el mapa.</small>
+    <div class="table-wrap" style="max-height:520px;margin-top:8px"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos" /></th><th>#</th><th>Guía</th><th>Cliente</th><th>Colonia</th><th>Dirección</th><th>Fecha</th><th>Estado</th></tr></thead><tbody>
+    ${pick.rows.map((o, ix) => `${o.city_group && (ix === 0 || pick.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row" style="background:var(--bg-soft,#f3f6fa)"><td><input type="checkbox" data-citysel="${esc(o.city_group)}" title="Seleccionar toda la ciudad" /></td><td colspan="7"><b>${icon('live')} ${esc(o.city_group)}</b> <small class="muted">· ${pick.rows.filter((x) => x.city_group === o.city_group).length} pedidos en orden de cercanía desde la oficina</small></td></tr>` : ''}<tr class="click" data-oid="${o.id}"><td><input type="checkbox" data-sel="${o.id}" data-city="${esc(o.city_group || '')}" data-lat="${o.lat ?? ''}" data-lng="${o.lng ?? ''}" /></td><td class="num muted">${o.geo_seq ?? '<span title="Sin ubicación en el mapa">—</span>'}</td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}</td><td><small>${esc(o.customer_colonia || '')}</small></td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay pedidos sin ruta</td></tr>'}
+    </tbody></table></div>
   </div>`;
-  $('#rdate').onchange = (e) => (location.hash = '#/routes?date=' + e.target.value);
+  $('#rdate').onchange = (e) => (location.hash = `#/routes?date=${e.target.value}&city=${encodeURIComponent(aCity)}&office_id=${aOff}`);
+  $('#afilt').onsubmit = (e) => { e.preventDefault(); location.hash = `#/routes?date=${date}&${new URLSearchParams(new FormData(e.target))}`; };
   $('#xlsAll').onclick = () => exportAssignedExcel(date);
   const map = makeMap($('#rmap'));
   const all = [depotLatLng()];
@@ -1356,25 +1355,39 @@ async function viewRoutes(v) {
   }
   mapSelection(v, map, pinsSel, drivers, date);
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
+  // Panel "Asignar por ciudad y ubicación": los marcados se ven en azul en el mapa, con su orden de cercanía
+  const pickLayer = L.layerGroup().addTo(map);
+  const pickById = new Map(pick.rows.map((r) => [r.id, r]));
+  const syncPick = () => {
+    pickLayer.clearLayers();
+    const pts = $$('#asgCard [data-sel]', v).filter((x) => x.checked && x.dataset.lat).map((x) => {
+      const o = pickById.get(Number(x.dataset.sel));
+      L.marker([o.lat, o.lng], { icon: pinIcon(String(o.geo_seq ?? '•'), '#2563eb'), zIndexOffset: 500 }).addTo(pickLayer).bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}<br>${esc(o.tracking_code)}`);
+      return [o.lat, o.lng];
+    });
+    if (pts.length) map.fitBounds(pts, { padding: [40, 40], maxZoom: 15 });
+  };
+  bulkAssign(v, 'orders');
+  geoPickWire($('#asgCard', v), syncPick);
+  $$('#asgCard [data-sel]', v).forEach((c) => c.addEventListener('change', syncPick));
+  $('#selAll', v)?.addEventListener('change', syncPick);
+  $$('#asgCard tr[data-oid]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.oid)));
   $$('[data-route]', v).forEach((b) => (b.onclick = () => routeDetail(b.dataset.route)));
 
   $('#auto').onclick = () => {
     if (!pending.length) return toast('No hay pedidos pendientes', 'bad');
     const m = modal('Auto-planificar rutas', `
-      <p class="muted" style="margin-top:0">Se repartirán <b>${pending.length}</b> pedidos pendientes por zonas (barrido angular desde el almacén, respetando la capacidad de cada vehículo) y se optimizará la secuencia de cada ruta (vecino más cercano + 2-opt, prioridad urgente primero y ventanas horarias).</p>
-      <div class="grid g2"><label class="f">Salen del almacén<select id="swh"></select></label>
-      <label class="f">Hora de salida<input type="time" id="stime" value="${esc(SETTINGS.start_time || '09:00')}" /></label></div>
+      <p class="muted" style="margin-top:0">Se repartirán <b>${pending.length}</b> pedidos pendientes con la misma lógica de Pedidos: cada oficina con sus propios repartidores, por <b>ciudad y cercanía</b> desde la oficina (una zona compacta por repartidor, según su capacidad). Se agregan a la ruta del día de cada repartidor y se optimiza el camino (vecino más cercano + 2-opt, urgentes primero y ventanas horarias).</p>
       <h3 style="margin-top:14px">Repartidores disponibles</h3>
       ${drivers.filter((d) => d.active).map((d) => `<label class="row" style="padding:6px 0"><input type="checkbox" value="${d.id}" checked /> <span class="grow">${esc(d.name)} <small class="muted">${esc(d.vehicle || '')}</small></span><small class="muted">cap. ${d.capacity}</small></label>`).join('')}`,
       { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="go">Generar rutas</button>' });
-    fillWarehouseSelect($('#swh', m.el), { located: true });
     $('#go', m.el).onclick = async () => {
       const ids = $$('input[type=checkbox]:checked', m.el).map((x) => Number(x.value));
       if (!ids.length) return toast('Elige al menos un repartidor', 'bad');
       try {
-        const r = await POST('/api/routes/auto', { date, driver_ids: ids, start_time: $('#stime', m.el).value, warehouse_id: $('#swh', m.el).value || null });
+        const r = await POST('/api/routes/auto', { date, driver_ids: ids });
         const saved = r.created.reduce((a, x) => a + (x.original_distance_km - x.distance_km), 0);
-        toast(`${r.created.length} rutas creadas · ${fmtN(saved, 1)} km ahorrados${r.overflow.length ? ` · ${r.overflow.length} sin asignar (capacidad o sin GPS)` : ''}`, 'ok');
+        toast(`${r.created.length} ruta(s) · ${r.created.reduce((a, x) => a + x.stops, 0)} pedidos asignados · ${fmtN(saved, 1)} km ahorrados${r.overflow.length ? ` · ${r.overflow.length} sin asignar (capacidad, sin ubicación o sin repartidor en su oficina)` : ''}`, 'ok');
         m.close(); render();
       } catch (e) { toast(e.message, 'bad'); }
     };
@@ -1931,6 +1944,29 @@ function receiveSerials(products, preselect) {
 
 // ================= Asignación masiva a repartidor =================
 // Barra que aparece al marcar pedidos o clientes: elige repartidor y fecha, y asigna todo de un jalón.
+// Selección por ciudad (casilla del encabezado) y "N más cercanos" en listas de pedidos agrupadas por ciudad
+function geoPickWire(v, onPick) {
+  const changed = () => { $('[data-sel]', v)?.dispatchEvent(new Event('change')); onPick?.(); };
+  $$('[data-citysel]', v).forEach((cb) => (cb.onchange = () => {
+    $$(`[data-sel][data-city="${CSS.escape(cb.dataset.citysel)}"]`, v).filter((x) => !x.disabled).forEach((x) => (x.checked = cb.checked));
+    changed();
+  }));
+  // los N más cercanos a lo ya marcado (o desde el primero de la lista)
+  $('#nearGo', v)?.addEventListener('click', () => {
+    const n = Math.max(1, Number($('#nearN', v).value) || 0);
+    const all = $$('[data-sel]', v).filter((x) => !x.disabled && x.dataset.lat);
+    let sel = all.filter((x) => x.checked);
+    let extra = n;
+    if (!sel.length) { const first = all[0]; if (!first) return toast('No hay pedidos con ubicación para seleccionar', 'bad'); first.checked = true; sel = [first]; extra = n - 1; }
+    const pts = sel.map((x) => [Number(x.dataset.lat), Number(x.dataset.lng)]);
+    const kx = Math.cos((pts[0][0] * Math.PI) / 180);
+    const dist = (x) => Math.min(...pts.map(([la, ln]) => ((Number(x.dataset.lng) - ln) * kx) ** 2 + (Number(x.dataset.lat) - la) ** 2));
+    all.filter((x) => !x.checked).sort((a, b) => dist(a) - dist(b)).slice(0, extra).forEach((x) => (x.checked = true));
+    changed();
+    toast(`${$$('[data-sel]', v).filter((x) => x.checked).length} pedidos seleccionados (los más cercanos entre sí)`, 'ok');
+  });
+}
+
 async function bulkAssign(v, kind) {
   const boxes = () => $$(`[data-sel]`, v).filter((c) => !c.disabled);
   const picked = () => boxes().filter((c) => c.checked).map((c) => Number(c.dataset.sel));
