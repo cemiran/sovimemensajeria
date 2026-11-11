@@ -2408,6 +2408,8 @@ app.post(
     if (status === 'entregado' && req.user.role !== 'admin') throw new HttpError(403, 'Solo el administrador puede marcar entregas manuales');
     const reason = String(b.reason || '').trim().slice(0, 200);
     const receiver = String(b.receiver_name || '').trim().slice(0, 120);
+    // foto de la recepción (opcional) para entregas o intentos registrados por la oficina
+    const manualPhoto = ['entregado', 'fallido'].includes(status) && b.photo ? saveDataUrl(b.photo, 'foto') : null;
     const note = String(b.note || '').trim().slice(0, 300);
     if (status === 'fallido' && !reason) throw new HttpError(400, 'Indica el motivo del intento fallido');
     if (status === 'entregado' && !receiver) throw new HttpError(400, 'Indica quién recibió');
@@ -2437,9 +2439,9 @@ app.post(
           releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado`);
           db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL WHERE id=?").run(o.id);
         } else {
-          const ev = db.prepare(`INSERT INTO evidences (order_id, driver_id, result, receiver_name, reason, notes, kind) VALUES (?,?,?,?,?,?, 'manual')`)
+          const ev = db.prepare(`INSERT INTO evidences (order_id, driver_id, result, receiver_name, reason, notes, kind, photo_path) VALUES (?,?,?,?,?,?, 'manual', ?)`)
             .run(o.id, o.driver_id || null, status, status === 'entregado' ? receiver : null, status === 'fallido' ? reason : null,
-              `Registro manual por ${who}${note ? ' · ' + note : ''}`);
+              `Registro manual por ${who}${note ? ' · ' + note : ''}${manualPhoto ? ' · con foto' : ''}`, manualPhoto);
           db.prepare("UPDATE orders SET status=?, attempts=attempts+1, delivered_at=datetime('now') WHERE id=?").run(status, o.id);
           if (status === 'entregado') { custodyOnDelivery(o.id, o.driver_id, req.user.id); deliverOrderSerials(o.id, req.user.id, receiver); }
           notify.queueSheet(Number(ev.lastInsertRowid), o.id);

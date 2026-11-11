@@ -1969,21 +1969,30 @@ function bulkStatus(status, kind, ids, onDone) {
   const T = {
     pendiente: ['Regresar a pendiente', `Los pedidos de ${what} salen de su ruta y quedan pendientes para volver a asignarse.`],
     fallido: ['Registrar intento fallido', `Se registra un intento no exitoso para ${what}.`],
-    entregado: ['Registrar entrega manual', `Se marcan como entregados ${what} <b>sin foto ni firma</b>. Úsalo solo cuando la entrega ocurrió y no se pudo registrar en la app; queda en la bitácora con tu nombre.`],
+    entregado: ['Registrar entrega manual', `Se marcan como entregados ${what}. Úsalo cuando la entrega ocurrió y no se registró en la app (puedes adjuntar la foto que te mandó el repartidor); queda en la bitácora con tu nombre.`],
     cancelado: ['Cancelar pedidos', `Se cancelan los pedidos de ${what}. Las piezas regresan al inventario y se liberan los números de serie.`],
   }[status];
   const m = modal(T[0], `<form id="bsF" class="stack"><p style="margin:0">${T[1]}</p>
     ${status === 'pendiente' ? `<label class="f"><span>Nueva fecha de entrega <small class="muted">(opcional)</small></span><input type="date" name="date" /></label>` : ''}
     ${status === 'fallido' ? `<label class="f">Motivo *<select name="reason" required>${FAIL_REASONS.map((r) => `<option>${esc(r)}</option>`).join('')}</select></label>` : ''}
     ${status === 'entregado' ? `<label class="f">¿Quién recibió? *<input name="receiver_name" required placeholder="Nombre de quien recibió" /></label>` : ''}
-    ${['fallido', 'entregado'].includes(status) ? `<label class="f">Nota<input name="note" maxlength="300" placeholder="Detalle para la bitácora" /></label>
+    ${['fallido', 'entregado'].includes(status) ? `<div><label class="btn block">${icon('camera')} Adjuntar foto de evidencia <small class="muted">(opcional)</small><input type="file" accept="image/*" id="bsPhoto" hidden /></label><img id="bsPrev" class="photo-prev" hidden alt="Foto" /></div>
+      <label class="f">Nota<input name="note" maxlength="300" placeholder="Detalle para la bitácora" /></label>
       <label class="row"><input type="checkbox" name="notify" /> Avisar a los clientes (WhatsApp / SMS / correo según la configuración)</label>` : ''}</form>`,
     { footer: `<button class="btn" data-close>Volver</button><button class="btn ${status === 'cancelado' ? 'bad' : 'primary'}" id="bsGo">${T[0]}</button>` });
+  let bsPhoto = null;
+  $('#bsPhoto', m.el)?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    bsPhoto = await compressImage(file, 1600, 0.8);
+    $('#bsPrev', m.el).src = bsPhoto; $('#bsPrev', m.el).hidden = false;
+  });
   $('#bsGo', m.el).onclick = async (e) => {
     const f = $('#bsF', m.el);
     if (!f.reportValidity()) return;
     const btn = e.currentTarget;
     const fd = Object.fromEntries(new FormData(f));
+    if (bsPhoto) fd.photo = bsPhoto;
     btn.disabled = true;
     try {
       const r = await POST('/api/orders/bulk-status', { status, ...fd, notify: !!f.notify?.checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: ids });
