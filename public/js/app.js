@@ -1363,8 +1363,9 @@ async function viewRoutes(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const date = p.get('date') || today();
   const aCity = p.get('city') || '', aOff = p.get('office_id') || '';
+  const aFrom = p.get('pfrom') || '', aTo = p.get('pto') || '';
   const [routes, pend, drivers, pick, cities, offList] = await Promise.all([GET(`/api/routes?date=${date}`), GET(`/api/orders?status=pendiente&unrouted=1&limit=500`), GET('/api/users?role=repartidor'),
-    GET(`/api/orders?status=pendiente,fallido&unrouted=1&sort=geo&limit=200000&city=${encodeURIComponent(aCity)}&office_id=${aOff}`),
+    GET(`/api/orders?status=pendiente,fallido&unrouted=1&sort=geo&limit=200000&city=${encodeURIComponent(aCity)}&office_id=${aOff}${aFrom ? `&date=${aFrom}&date_to=${aTo || aFrom}` : ''}`),
     GET(`/api/dashboard/breakdown?office_id=${aOff}`).then((r) => r.city_list).catch(() => []), GET('/api/warehouses').catch(() => [])]);
   const pending = pend.rows.filter((o) => o.scheduled_date <= date);
   const totKm = routes.reduce((a, r) => a + (r.distance_km || 0), 0);
@@ -1394,10 +1395,12 @@ async function viewRoutes(v) {
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
   </div>
   <div class="card" id="asgCard" style="margin-top:14px">
-    <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">${icon('truck')} Asignar pedidos por ciudad y ubicación</h3><small class="muted">${pick.total} pedido(s) sin ruta (pendientes o fallidos, de cualquier fecha)</small></div>
+    <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">${icon('truck')} Asignar pedidos por ciudad y ubicación</h3><small class="muted">${pick.total} pedido(s) sin ruta (pendientes o fallidos${aFrom ? `, programados ${aFrom === (aTo || aFrom) ? 'el ' + aFrom : `del ${aFrom} al ${aTo}`}` : ', de cualquier fecha'})</small></div>
     <form class="row" id="afilt" style="margin-bottom:8px;flex-wrap:wrap">
       ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:200px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === aOff ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
       <select name="city" style="max-width:200px"><option value="">Todas las ciudades</option>${cities.map((c) => `<option ${c.toLowerCase() === aCity.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <label class="row" style="gap:4px" title="Fecha de entrega programada de los pedidos"><small class="muted">Programados del</small><input type="date" name="pfrom" value="${esc(aFrom)}" style="max-width:150px" /><small class="muted">al</small><input type="date" name="pto" value="${esc(aTo || aFrom)}" style="max-width:150px" /></label>
+      <button type="button" class="btn sm ghost" id="aDay" title="Solo los programados para la fecha de la planificación">Del día</button><button type="button" class="btn sm ghost" id="aAll">Todas las fechas</button>
       <button class="btn">Filtrar</button>
       <span class="bulk-sep"></span>
       <small class="muted">Marca un pedido y agrega los más cercanos:</small><input type="number" id="nearN" min="1" value="20" style="width:80px" /><button type="button" class="btn sm" id="nearGo">${icon('live')} Seleccionar N más cercanos</button>
@@ -1407,8 +1410,10 @@ async function viewRoutes(v) {
     ${pick.rows.map((o, ix) => `${o.city_group && (ix === 0 || pick.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row" style="background:var(--bg-soft,#f3f6fa)"><td><input type="checkbox" data-citysel="${esc(o.city_group)}" title="Seleccionar toda la ciudad" /></td><td colspan="7"><b>${icon('live')} ${esc(o.city_group)}</b> <small class="muted">· ${pick.rows.filter((x) => x.city_group === o.city_group).length} pedidos, por colonia y cercanía desde la oficina</small></td></tr>` : ''}${o.col_group && (ix === 0 || pick.rows[ix - 1].col_group !== o.col_group || pick.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row col-row"><td><input type="checkbox" data-colsel="${esc(o.col_group)}" data-colcity="${esc(o.city_group)}" title="Seleccionar toda la colonia" /></td><td colspan="7" style="padding-left:22px">${icon('building')} <b>${esc(o.col_group)}</b> <small class="muted">· ${pick.rows.filter((x) => x.city_group === o.city_group && x.col_group === o.col_group).length} pedido(s)</small></td></tr>` : ''}<tr class="click" data-oid="${o.id}"><td><input type="checkbox" data-sel="${o.id}" data-city="${esc(o.city_group || '')}" data-col="${esc(o.col_group || '')}" data-lat="${o.lat ?? ''}" data-lng="${o.lng ?? ''}" /></td><td class="num muted">${o.geo_seq ?? '<span title="Sin ubicación en el mapa">—</span>'}</td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}</td><td><small>${esc(o.customer_colonia || '')}</small></td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay pedidos sin ruta</td></tr>'}
     </tbody></table></div>
   </div>`;
-  $('#rdate').onchange = (e) => (location.hash = `#/routes?date=${e.target.value}&city=${encodeURIComponent(aCity)}&office_id=${aOff}`);
+  $('#rdate').onchange = (e) => (location.hash = `#/routes?date=${e.target.value}&city=${encodeURIComponent(aCity)}&office_id=${aOff}&pfrom=${aFrom}&pto=${aTo}`);
   $('#afilt').onsubmit = (e) => { e.preventDefault(); location.hash = `#/routes?date=${date}&${new URLSearchParams(new FormData(e.target))}`; };
+  $('#aDay').onclick = () => { const f = $('#afilt'); f.pfrom.value = date; f.pto.value = date; f.requestSubmit(); };
+  $('#aAll').onclick = () => { const f = $('#afilt'); f.pfrom.value = ''; f.pto.value = ''; f.requestSubmit(); };
   $('#xlsAll').onclick = () => exportAssignedExcel(date);
   const map = makeMap($('#rmap'));
   const all = [depotLatLng()];
@@ -1491,6 +1496,7 @@ async function routeDetail(id) {
           <div class="kpi"><div class="label">Duración est.</div><div class="value" style="font-size:1.3rem">${fmtN(r.est_minutes / 60, 1)} h</div><div class="sub">${r.stops.length} paradas</div></div>
           <div class="kpi"><div class="label">Fuera de ventana</div><div class="value" style="font-size:1.3rem;color:${late ? 'var(--bad)' : 'var(--ok)'}">${late}</div><div class="sub">paradas</div></div>
         </div>
+        <div class="row" style="margin-top:10px;gap:6px;align-items:flex-end"><label class="f grow" style="margin:0">Fecha de la ruta<input type="date" id="rdate2" value="${esc(r.date)}" /></label><button class="btn" id="rdateGo" title="Mueve la ruta completa a otra fecha (si aún no tiene entregas)">📅 Cambiar fecha</button></div>
         <label class="f" style="margin-top:10px">Reasignar repartidor<select id="rdrv">${drivers.map((d) => `<option value="${d.id}" ${d.id === r.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
       </div>
       <div class="table-wrap" style="max-height:520px"><table><thead><tr><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
@@ -1505,6 +1511,13 @@ async function routeDetail(id) {
   const map = makeMap($('#rdmap', m.el));
   drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null, onEdit: () => { m.el.remove(); routeDetail(r.id); } });
   if (r.last_lat) L.marker([r.last_lat, r.last_lng], { icon: truckIcon() }).addTo(map).bindPopup('Última posición ' + fmtDT(r.last_seen));
+  $('#rdateGo', m.el).onclick = async () => {
+    const d = $('#rdate2', m.el).value;
+    if (!d || d === r.date) return toast('Elige otra fecha', 'bad');
+    if (!(await confirmDlg(`¿Mover la ruta completa al ${new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}? Si el repartidor ya tiene ruta ese día, se juntan y se reordena.`))) return;
+    try { const o = await POST(`/api/routes/${r.id}/date`, { date: d }); toast(`Ruta movida al ${d}: ${o.assigned} pedido(s)`, 'ok'); m.close(); render(); }
+    catch (er) { toast(er.message, 'bad'); }
+  };
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
   $('#ropt', m.el).onclick = async () => { const o = await POST(`/api/routes/${r.id}/optimize`); toast(`Re-optimizada: ${o.distance_km} km`, 'ok'); m.el.remove(); routeDetail(r.id); };
@@ -2067,11 +2080,26 @@ async function bulkAssign(v, kind) {
         <input type="number" id="bkPer" min="1" placeholder="Por día" title="Pedidos por día (vacío = repartir parejo)" value="${prev.pd || ''}" style="width:90px" />
         <label class="row" style="gap:4px"><input type="checkbox" id="bkSun" ${prev.sun ? 'checked' : ''} /> Sin domingos</label></span>
       <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button>
+      <button class="btn" id="bkSched" title="Cambia la fecha de entrega de lo marcado a la fecha elegida. Si ya tienen repartidor, pasan a su ruta de ese día">📅 Programar fecha</button>
       <span class="bulk-sep"></span>
       <select id="bkSt"><option value="">Cambiar estado…</option><option value="pendiente">Pendiente (quitar de ruta / reprogramar)</option><option value="fallido">Fallido (intento no exitoso)</option>${store.user.role === 'admin' ? '<option value="entregado">Entregado (registro manual)</option>' : ''}<option value="cancelado">Cancelado</option></select>
       <button class="btn" id="bkStGo">Aplicar</button>
       <button class="btn ghost" id="bkClr">Quitar selección</button>`;
     $('#bkStGo', bar).onclick = () => bulkStatus($('#bkSt', bar).value, kind, picked());
+    $('#bkSched', bar).onclick = async (e) => {
+      const btn = e.currentTarget;
+      const d = $('#bkDate', bar).value;
+      if (!d) return toast('Elige la fecha', 'bad');
+      const n = picked().length;
+      if (!(await confirmDlg(`¿Programar ${n} ${kind === 'customers' ? 'cliente(s) (sus pedidos abiertos)' : 'pedido(s)'} para el ${new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}? Los que no tienen repartidor solo cambian de fecha; los que ya tienen pasan a su ruta de ese día.`))) return;
+      btn.disabled = true;
+      try {
+        const r = await POST('/api/orders/bulk-schedule', { date: d, [kind === 'customers' ? 'customer_ids' : 'order_ids']: picked() });
+        toast(`${r.moved} pedido(s) programados para el ${d}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}`, r.skipped.length ? '' : 'ok');
+        if (r.skipped.length) modal('Pedidos que no se movieron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
+        else render();
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    };
     if (prev.d) $('#bkDrv', bar).value = prev.d;
     $('#bkMulti', bar).onchange = (e) => { $('#bkRange', bar).hidden = !e.target.checked; };
     $('#bkClr', bar).onclick = () => { boxes().forEach((c) => (c.checked = false)); draw(); };

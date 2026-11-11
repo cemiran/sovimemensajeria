@@ -3156,6 +3156,59 @@ function assignOrdersTo(req, drv, ids, date) {
     return { assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0 };
   }
 }
+// Programar fecha en bloque: sin repartidor solo cambia la fecha; con repartidor pasan a su ruta de ese día
+app.post('/api/orders/bulk-schedule', auth(...STAFF), wrap((req, res) => {
+  const b = req.body || {};
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
+  if (!date) throw new HttpError(400, 'Elige la fecha');
+  let ids = (Array.isArray(b.order_ids) ? b.order_ids : []).map(Number).filter(Boolean);
+  if (Array.isArray(b.customer_ids) && b.customer_ids.length) {
+    const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
+    ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN ('pendiente','asignado','fallido')`).all(...cids).map((r) => r.id));
+  }
+  ids = officeOrders(req, [...new Set(ids)].slice(0, 3000));
+  if (!ids.length) throw new HttpError(400, 'No hay pedidos para programar');
+  const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.driver_id, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+  const skipped = [];
+  let moved = 0;
+  const byDriver = new Map();
+  tx(() => {
+    for (const o of rows) {
+      if (['pendiente', 'fallido'].includes(o.status) && !o.driver_id) {
+        db.prepare("UPDATE orders SET scheduled_date=?, status='pendiente' WHERE id=?").run(date, o.id);
+        moved++;
+      } else if (o.status === 'asignado' && o.driver_id) {
+        if (!byDriver.has(o.driver_id)) byDriver.set(o.driver_id, { drv: { id: o.driver_id, name: o.dname }, ids: [] });
+        byDriver.get(o.driver_id).ids.push(o.id);
+      } else skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'un repartidor'}` : `está ${o.status}` });
+    }
+  });
+  for (const { drv, ids: dids } of byDriver.values()) {
+    const r = assignOrdersTo(req, drv, dids, date);
+    moved += r.assigned;
+    skipped.push(...r.skipped);
+  }
+  audit(req, 'pedidos.programar', `${moved} pedido(s) programados para el ${date}`);
+  res.json({ moved, skipped, date });
+}));
+// Cambiar la fecha de una ruta completa (aún sin entregas): sus pedidos pasan a la ruta de ese día del mismo repartidor
+app.post('/api/routes/:id/date', auth(...STAFF), wrap((req, res) => {
+  const r = db.prepare('SELECT r.*, u.name dname FROM routes r LEFT JOIN users u ON u.id = r.driver_id WHERE r.id=?').get(req.params.id);
+  if (!r) throw new HttpError(404, 'No encontrada');
+  officeRoute(req, r);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date || '') ? req.body.date : null;
+  if (!date) throw new HttpError(400, 'Elige la fecha');
+  if (date === r.date) throw new HttpError(400, 'La ruta ya es de esa fecha');
+  const st = db.prepare('SELECT status, COUNT(*) n FROM orders WHERE route_id=? GROUP BY status').all(r.id);
+  const n = (k) => st.find((x) => x.status === k)?.n || 0;
+  if (n('entregado') || n('fallido')) throw new HttpError(409, 'La ruta ya tiene entregas registradas: mueve solo los pedidos pendientes desde Pedidos');
+  if (n('cargado')) throw new HttpError(409, `${n('cargado')} pedido(s) ya están cargados en la unidad: regrésalos primero`);
+  const ids = db.prepare("SELECT id FROM orders WHERE route_id=? AND status='asignado'").all(r.id).map((x) => x.id);
+  if (!ids.length) throw new HttpError(400, 'La ruta no tiene pedidos');
+  const out = assignOrdersTo(req, { id: r.driver_id, name: r.dname }, ids, date);
+  audit(req, 'rutas.fecha', `${r.name || 'Ruta ' + r.id}: ${r.date} → ${date} (${out.assigned} pedidos)`);
+  res.json(out);
+}));
 // Programar varios pedidos en un rango de días para un repartidor: se reparten por cercanía, N por día
 app.post(
   '/api/routes/assign-range',
