@@ -710,6 +710,17 @@ function assignSerial(o, raw, user) {
     const where = { asignado: `ya está asignado al pedido ${ord?.tracking_code || ''}`, entregado: `ya fue entregado (pedido ${ord?.tracking_code || ''})`, baja: 'está dado de baja' }[s.status];
     throw new HttpError(409, `El S/N ${sn} ${where}`);
   }
+  // El repartidor toma del inventario disponible de su oficina, del abierto o del que él trae
+  if (user.role === 'repartidor') {
+    if (s.holder_id && s.holder_id !== user.id) {
+      const h = db.prepare('SELECT name FROM users WHERE id=?').get(s.holder_id);
+      throw new HttpError(409, `El S/N ${sn} lo trae ${h?.name || 'otro repartidor'}`);
+    }
+    if (!s.holder_id && !s.open_pool && s.warehouse_id && user.office && s.warehouse_id !== user.office) {
+      const w = db.prepare('SELECT name FROM warehouses WHERE id=?').get(s.warehouse_id);
+      throw new HttpError(409, `El S/N ${sn} está en el almacén ${w?.name || 'de otra oficina'}, no en el de tu oficina`);
+    }
+  }
   const need = needs.find((r) => r.product_id === s.product_id);
   if (!need) throw new HttpError(409, `El S/N ${sn} es de "${s.pname}", que no está en este pedido`);
   if (!need.missing) throw new HttpError(409, `Este pedido ya tiene todas las series de "${s.pname}"`);

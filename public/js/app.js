@@ -4910,10 +4910,27 @@ async function viewDeliver(v, id, mode) {
     $('#photoPrev').src = photo;
     $('#photoPrev').hidden = false;
   };
-  $('#verify')?.addEventListener('click', () => openScanner({ title: 'Verificar paquete', onCode: async (c) => {
-    if (c !== o.tracking_code) throw new Error('El código no coincide con este pedido');
+  // Verificar: la guía del paquete o el S/N del módem (si es un S/N disponible, se asigna a este pedido)
+  $('#verify')?.addEventListener('click', () => openScanner({ title: 'Verificar paquete', hint: 'Escanea la guía o el número de serie del módem', onCode: async (c) => {
+    const code = String(c).trim();
+    if (code.toUpperCase() === String(o.tracking_code).toUpperCase()) {
+      verified = true;
+      $('#verifyRow').innerHTML = '<span>✅ Paquete verificado por escaneo</span>';
+      return 'guía';
+    }
+    const sn = code.replace(/^S\/?N[:\s]*/i, '').toUpperCase();
+    if ((o.serials || []).some((x) => String(x.serial).toUpperCase() === sn)) {
+      verified = true;
+      $('#verifyRow').innerHTML = `<span>✅ Verificado · S/N <b class="mono">${esc(sn)}</b></span>`;
+      return 'S/N del pedido';
+    }
+    if (!(o.serial_needs || []).some((r) => r.missing)) throw new Error('El código no coincide con este pedido');
+    const r = await POST(`/api/orders/${o.id}/serials`, { serial: sn });
+    o.serials = r.serials;
+    o.serial_needs = (o.serial_needs || []).map((x) => ({ ...x, missing: 0 }));
     verified = true;
-    $('#verifyRow').innerHTML = '<span>✅ Paquete verificado por escaneo</span>';
+    $('#verifyRow').innerHTML = `<span>✅ S/N <b class="mono">${esc(r.serial)}</b> asignado a este pedido</span>`;
+    return `${r.product} asignado`;
   } }));
   $('#submit').onclick = async () => {
     const btn = $('#submit');
