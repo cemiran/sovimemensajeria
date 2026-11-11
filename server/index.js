@@ -3216,10 +3216,12 @@ app.delete(
     officeRoute(req, r);
     const doneCnt = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(r.id).c;
     if (doneCnt) throw new HttpError(409, 'La ruta ya tiene entregas registradas');
+    const n = db.prepare('SELECT COUNT(*) c FROM orders WHERE route_id=?').get(r.id).c;
     tx(() => {
       db.prepare("UPDATE orders SET route_id=NULL, stop_seq=NULL, eta=NULL, driver_id=NULL, status='pendiente' WHERE route_id=?").run(r.id);
       db.prepare('DELETE FROM routes WHERE id=?').run(r.id);
     });
+    audit(req, 'rutas.eliminar', `${r.name || 'Ruta ' + r.id} eliminada: ${n} pedido(s) vuelven a pendiente`);
     res.json({ ok: true });
   })
 );
