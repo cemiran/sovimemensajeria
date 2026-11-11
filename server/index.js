@@ -2509,10 +2509,11 @@ app.get(
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
     if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
-    if (req.query.colonia) {
-      // misma colonia aunque esté escrita distinto ("2A SECCION", "Fracc.", mayúsculas o acentos)
-      const k = colKey(req.query.colonia);
-      const ids = db.prepare(`SELECT DISTINCT colonia FROM customers WHERE colonia IS NOT NULL`).all().map((r) => r.colonia).filter((x) => colKey(x) === k);
+    const colQ = [].concat(req.query.colonia || []).map(String).filter((x) => x.trim());
+    if (colQ.length) {
+      // una o varias colonias; la misma colonia aunque esté escrita distinto ("2A SECCION", "Fracc.", mayúsculas o acentos)
+      const keys = new Set(colQ.map(colKey));
+      const ids = db.prepare(`SELECT DISTINCT colonia FROM customers WHERE colonia IS NOT NULL`).all().map((r) => r.colonia).filter((x) => keys.has(colKey(x)));
       if (ids.length) { where.push(`c.colonia IN (${ids.map(() => '?').join(',')})`); args.push(...ids); } else where.push('0');
     }
     if (account_id === 'none') where.push('o.account_id IS NULL');

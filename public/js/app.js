@@ -932,11 +932,12 @@ async function viewOrders(v) {
   const acc = p.get('account_id') || '';
   const off = p.get('office_id') || '';
   const city = p.get('city') || '';
-  const colonia = p.get('colonia') || '';
+  const colonias = p.getAll('colonia').filter(Boolean);
+  const colSet = new Set(colonias.map((x) => x.toLowerCase()));
   const sort = p.get('sort') || 'geo';
   const cityList = GET(`/api/dashboard/breakdown?office_id=${off}`).then((r) => r.city_list).catch(() => []);
   const colList = GET(`/api/orders/colonias?office_id=${off}&city=${encodeURIComponent(city)}`).catch(() => []);
-  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=200000&status=${st}&date=${date}&date_to=${dateTo}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}&colonia=${encodeURIComponent(colonia)}&sort=${sort}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
+  const [data, accs, offList] = await Promise.all([GET(`/api/orders?limit=200000&status=${st}&date=${date}&date_to=${dateTo}&q=${encodeURIComponent(q)}&account_id=${acc}&office_id=${off}&city=${encodeURIComponent(city)}${colonias.map((x) => '&colonia=' + encodeURIComponent(x)).join('')}&sort=${sort}`), GET('/api/accounts').catch(() => ({ rows: [] })), GET('/api/warehouses').catch(() => [])]);
   v.innerHTML = topbar('Pedidos', `<button class="btn" id="scanFind">${icon('scan')} Escanear S/N o guía</button><button class="btn" id="asgX">${icon('upload')} Asignar por Excel</button><button class="btn primary" id="newOrder">${icon('plus')} Nuevo pedido</button>`) + `
   <div class="card">
     <form class="row" id="filt" style="margin-bottom:12px">
@@ -948,7 +949,11 @@ async function viewOrders(v) {
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
       ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
       <select name="city" style="max-width:190px"><option value="">Todas las ciudades</option>${(await cityList).map((c) => `<option ${c.toLowerCase() === city.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-      <select name="colonia" style="max-width:230px" title="Colonia o fraccionamiento"><option value="">Todas las colonias</option>${(await colList).map((c) => `<option value="${esc(c.name)}" ${colonia && c.name.toLowerCase() === colonia.toLowerCase() ? 'selected' : ''}>${esc(c.name)}${city ? '' : ` · ${esc(c.city || '')}`} (${c.n})</option>`).join('')}</select>
+      ${await (async () => { const cl = await colList; const extra = colonias.filter((x) => !cl.some((c) => c.name.toLowerCase() === x.toLowerCase())).map((x) => ({ name: x, n: '' }));
+        return `<details class="multi-sel" id="colSel"><summary class="btn" title="Colonia o fraccionamiento">${icon('building')} ${colonias.length ? (colonias.length === 1 ? esc(colonias[0]) : `${colonias.length} colonias`) : 'Todas las colonias'}</summary>
+        <div class="multi-pop"><input type="search" id="colQ" placeholder="Buscar colonia…" />
+          <div class="multi-list">${[...extra, ...cl].map((c) => `<label data-t="${esc((c.name + ' ' + (c.city || '')).toLowerCase())}"><input type="checkbox" name="colonia" value="${esc(c.name)}" ${colSet.has(c.name.toLowerCase()) ? 'checked' : ''} /> <span class="grow">${esc(c.name)}${city || !c.city ? '' : ` <small class="muted">· ${esc(c.city)}</small>`}</span> <small class="muted">${c.n}</small></label>`).join('') || '<small class="muted">Sin colonias</small>'}</div>
+          <div class="row" style="gap:6px;margin-top:8px"><button type="button" class="btn sm ghost" id="colNone">Limpiar</button><span class="grow"></span><button class="btn sm primary">Aplicar</button></div></div></details>`; })()}
       <select name="sort" style="max-width:220px" title="Orden de la lista"><option value="geo" ${sort === 'geo' ? 'selected' : ''}>Por ciudad, colonia y cercanía</option><option value="fecha" ${sort !== 'geo' ? 'selected' : ''}>Por fecha</option></select>
       <button class="btn">Filtrar</button><button type="button" class="btn ghost" id="allDates">Todas las fechas</button>
       <small class="muted" style="margin-left:auto">${data.total} pedidos</small>
@@ -959,10 +964,22 @@ async function viewOrders(v) {
     </tbody></table></div>
   </div>`;
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
-  ['city', 'office_id'].forEach((n) => $(`#filt [name=${n}]`)?.addEventListener('change', () => { const c = $('#filt [name=colonia]'); if (c) c.value = ''; $('#filt').requestSubmit(); }));
-  $('#filt [name=colonia]')?.addEventListener('change', () => $('#filt').requestSubmit());
+  ['city', 'office_id'].forEach((n) => $(`#filt [name=${n}]`)?.addEventListener('change', () => { $$('#filt [name=colonia]').forEach((c) => (c.checked = false)); $('#filt').requestSubmit(); }));
+  // varias colonias: buscar, marcar y Aplicar
+  $('#colQ')?.addEventListener('input', (e) => { const t = e.target.value.toLowerCase().trim(); $$('#colSel .multi-list label').forEach((l) => (l.hidden = !!t && !l.dataset.t.includes(t))); });
+  $('#colNone')?.addEventListener('click', () => { $$('#filt [name=colonia]').forEach((c) => (c.checked = false)); $('#filt').requestSubmit(); });
+  document.addEventListener('click', (e) => { const d = $('#colSel'); if (d?.open && !d.contains(e.target)) d.open = false; });
   geoPickWire(v);
-  $$('[data-colfilt]', v).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const f = $('#filt'); if (f.colonia) { if (![...f.colonia.options].some((o) => o.value === b.dataset.colfilt)) f.colonia.add(new Option(b.dataset.colfilt, b.dataset.colfilt)); f.colonia.value = b.dataset.colfilt; } f.requestSubmit(); }));
+  // "Filtrar" en el encabezado de una colonia: solo esa colonia
+  $$('[data-colfilt]', v).forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    const f = $('#filt');
+    const want = b.dataset.colfilt.toLowerCase();
+    let hit = false;
+    $$('[name=colonia]', f).forEach((c) => { c.checked = c.value.toLowerCase() === want; hit ||= c.checked; });
+    if (!hit) f.insertAdjacentHTML('beforeend', `<input type="hidden" name="colonia" value="${esc(b.dataset.colfilt)}" />`);
+    f.requestSubmit();
+  }));
   $('#allDates').onclick = () => { location.hash = `#/orders?date=&status=${st}&office_id=${off}&city=${encodeURIComponent(city)}`; };
   // rangos rápidos de fechas
   $$('[data-rng]', v).forEach((b) => (b.onclick = () => {

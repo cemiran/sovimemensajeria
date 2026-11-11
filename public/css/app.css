@@ -735,3 +735,10 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .doc-row { justify-content: space-between; padding: 4px 0; border-top: 1px solid var(--border); flex-wrap: wrap; gap: 6px; }
 
 .col-row td { background: var(--bg, #fff); border-top: 1px dashed var(--border, #e3e8ee); font-size: 13px; }
+.multi-sel { position: relative; }
+.multi-sel > summary { list-style: none; cursor: pointer; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.multi-sel > summary::-webkit-details-marker { display: none; }
+.multi-pop { position: absolute; z-index: 1200; top: calc(100% + 4px); left: 0; width: 320px; max-width: 86vw; background: var(--card, #fff); border: 1px solid var(--border, #e3e8ee); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.15); padding: 10px; }
+.multi-list { max-height: 300px; overflow: auto; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.multi-list label { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-radius: 6px; cursor: pointer; }
+.multi-list label:hover { background: var(--bg-soft, #f3f6fa); }
