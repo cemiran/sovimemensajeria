@@ -3009,6 +3009,8 @@ app.get(
     res.json({ rows, total, stats });
   })
 );
+// teléfonos que envían SMS y cuántos lleva cada uno hoy
+app.get('/api/messages/devices', auth(...STAFF), wrap(async (req, res) => res.json(await notify.smsDeviceStats())));
 app.post(
   '/api/messages/:id/retry',
   auth(...STAFF),

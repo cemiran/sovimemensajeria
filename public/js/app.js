@@ -4938,6 +4938,14 @@ async function viewMessages(v) {
     const r = await GET('/api/messages?' + new URLSearchParams({ ...msgState, limit: 40, offset }));
     const st = Object.fromEntries(r.stats.map((x) => [x.status, x.n]));
     $('#msgStats').innerHTML = [['enviado', 'Enviados (24 h)'], ['simulado', 'Simulados (24 h)'], ['pendiente', 'En cola'], ['error', 'Con error']].map(([k, l]) => `<div class="card kpi"><div class="label">${l}</div><div class="value" style="${k === 'error' && st[k] ? 'color:var(--bad)' : ''}">${st[k] || 0}</div></div>`).join('');
+    GET('/api/messages/devices').then((ds) => {
+      if (!ds.length || !$('#msgStats')) return;
+      $('#msgDev')?.remove();
+      $('#msgStats').insertAdjacentHTML('afterend', `<div class="card" id="msgDev" style="margin-top:12px"><div class="row between"><h3 style="margin:0">${icon('phone')} Teléfonos que envían SMS</h3><small class="muted">tope ${ds[0].cap} por línea al día · se reparte entre los conectados</small></div>
+        <div class="grid g3" style="margin-top:8px">${ds.map((d) => `<div><div class="row between"><b>${esc(d.name || d.id)}</b><span class="chip ${d.online ? 'ok' : 'off'}">${d.online ? 'Conectado' : 'Sin conexión'}</span></div>
+          <div class="progress" style="margin:6px 0"><i style="width:${Math.min(100, (d.today / d.cap) * 100)}%;background:${d.today >= d.cap ? 'var(--bad)' : d.today >= d.cap * 0.8 ? 'var(--warn)' : 'var(--ok)'}"></i></div>
+          <small class="muted">${d.today} de ${d.cap} SMS hoy${d.lastSeen ? ' · visto ' + fmtDT(d.lastSeen) : ''}</small></div>`).join('')}</div></div>`);
+    }).catch(() => {});
     $('#msgBanner').innerHTML = !st.enviado && st.simulado ? `<div class="info-bar">${icon('info')} Los canales están en <b>modo simulación</b>: los mensajes se registran pero no salen. ${store.user.role === 'admin' ? '<a href="#/settings?tab=notif">Configura SMS, WhatsApp y correo</a>.' : 'Pide al administrador que configure los proveedores.'}</div>` : '';
     const start = rows.length;
     rows.push(...r.rows);

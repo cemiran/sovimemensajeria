@@ -129,7 +129,28 @@ const basic = (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64');
 
 // SMS desde un teléfono Android propio con la app "SMS Gateway for Android" (sms-gate.app):
 // modo nube (api.sms-gate.app, el teléfono solo necesita internet) o modo local (IP del teléfono en la misma red).
-async function sendAndroidSMS(s, to, body) {
+const smsBase = (s) => (s.sms_android_mode === 'local' ? String(s.sms_android_url || '').replace(/\/+$/, '') : 'https://api.sms-gate.app');
+// Teléfonos conectados a la cuenta de SMS Gateway (se consulta cada 2 min)
+let devCache = { at: 0, list: [] };
+async function smsDevices(s) {
+  if (s.sms_provider !== 'android' || !s.sms_android_user || !s.sms_android_pass) return [];
+  if (Date.now() - devCache.at < 120000) return devCache.list;
+  try {
+    const r = await fetch(`${smsBase(s)}/3rdparty/v1/devices`, { headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass) }, signal: AbortSignal.timeout(10000) });
+    if (r.ok) devCache = { at: Date.now(), list: (await r.json()).map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen })) };
+  } catch {}
+  return devCache.list;
+}
+// uso de hoy de cada teléfono (para la pantalla de Mensajes)
+async function smsDeviceStats() {
+  const s = getSettings();
+  const cap = Number(s.sms_daily_cap_per_device) || 300;
+  const devs = await smsDevices(s);
+  return devs.map((d) => ({ ...d, cap,
+    today: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_device=? AND date(sent_at,'localtime') = date('now','localtime')").get(d.id).n,
+    online: !d.lastSeen || Date.now() - Date.parse(d.lastSeen) < 30 * 60000 }));
+}
+async function sendAndroidSMS(s, to, body, deviceId) {
   // México: el "1" después del 52 solo lo usa WhatsApp; para SMS se marca +52 + 10 dígitos
   if (/^\+521\d{10}$/.test(to)) to = '+52' + to.slice(-10);
   if (!s.sms_android_user || !s.sms_android_pass) throw new Error('Faltan usuario y contraseña de SMS Gateway (pantalla principal de la app)');
@@ -137,19 +158,22 @@ async function sendAndroidSMS(s, to, body) {
     ? String(s.sms_android_url || '').replace(/\/+$/, '')
     : 'https://api.sms-gate.app';
   if (!/^https?:\/\/\S+$/.test(base)) throw new Error('Escribe la dirección local del teléfono, p. ej. http://192.168.1.50:8080');
-  const r = await fetch(`${base}/3rdparty/v1/messages`, {
+  const post = (dev) => fetch(`${base}/3rdparty/v1/messages`, {
     method: 'POST',
     headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ phoneNumbers: [to], textMessage: { text: body } }),
+    body: JSON.stringify({ phoneNumbers: [to], textMessage: { text: body }, ...(dev ? { deviceId: dev } : {}) }),
     signal: AbortSignal.timeout(20000),
   });
+  let r = await post(deviceId);
+  // si SMS Gateway no acepta el teléfono elegido, se manda sin elegir (lo reparte la propia cuenta)
+  if (deviceId && r.status >= 400 && r.status < 500 && r.status !== 401) r = await post(null);
   const j = await r.json().catch(() => ({}));
   if (r.status === 401) throw new Error('Usuario o contraseña de SMS Gateway incorrectos');
   if (!r.ok) throw new Error(j.message || j.error || `SMS Gateway respondió HTTP ${r.status}`);
   return { ref: j.id };
 }
-async function sendSMS(s, to, body) {
-  if (s.sms_provider === 'android') return sendAndroidSMS(s, to, body);
+async function sendSMS(s, to, body, deviceId) {
+  if (s.sms_provider === 'android') return sendAndroidSMS(s, to, body, deviceId);
   if (s.sms_provider !== 'twilio') return { simulated: true };
   if (!s.twilio_sid || !s.twilio_token || !s.twilio_from) throw new Error('Faltan datos de Twilio (SID, token o número)');
   const j = await postForm(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(s.twilio_sid)}/Messages.json`,
@@ -225,7 +249,7 @@ async function deliver(s, m, { direct = false } = {}) {
     if (to !== m.recipient) m = { ...m, recipient: to, body: `[PRUEBA · era para ${m.recipient}]
 ${m.body}` };
   }
-  if (m.channel === 'sms') return sendSMS(s, m.recipient, m.body);
+  if (m.channel === 'sms') return sendSMS(s, m.recipient, m.body, m.device);
   if (m.channel === 'whatsapp') return sendWhatsApp(s, m.recipient, m.body);
   return sendEmail(s, m.recipient, m.subject || s.company_name, m.body);
 }
@@ -384,6 +408,20 @@ async function processQueue() {
     const smsLimit = Math.max(1, limitHit ? Math.min(25, Number(s.sms_limit_30min) || 28) : Number(s.sms_limit_30min) || 28);
     const smsGapMs = Math.max(0, Number(s.sms_gap_seconds ?? 3)) * 1000;
     let smsRecent = db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND sent_at >= datetime('now','-30 minutes')").get().n;
+    // Varios teléfonos: cada SMS sale por el que lleva menos hoy, sin pasar su tope diario (300) ni su ritmo por media hora.
+    // Se reservan los últimos 15 del día de cada línea para los urgentes.
+    const cap = Math.max(1, Number(s.sms_daily_cap_per_device) || 300);
+    const devs = msgs.some((m) => m.channel === 'sms') ? await smsDevices(s) : [];
+    if (devs.length === 1) db.prepare("UPDATE messages SET gw_device=? WHERE channel='sms' AND gw_device IS NULL AND provider_ref IS NOT NULL AND sent_at >= datetime('now','-1 day')").run(devs[0].id);
+    const fresh = devs.filter((d) => !d.lastSeen || Date.now() - Date.parse(d.lastSeen) < 30 * 60000);
+    const pool = (fresh.length ? fresh : devs).map((d) => {
+      const q = (sql) => db.prepare(sql).get(d.id).n;
+      const hit = q("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_device=? AND gw_state='Failed' AND error LIKE 'Teléfono: límite%' AND sent_at >= datetime('now','-30 minutes')");
+      return { ...d, lim: hit ? Math.min(25, Number(s.sms_limit_30min) || 28) : Number(s.sms_limit_30min) || 28,
+        today: q("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_device=? AND date(sent_at,'localtime') = date('now','localtime')"),
+        recent: q("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_device=? AND sent_at >= datetime('now','-30 minutes')") };
+    });
+    const pickDevice = (urgent) => pool.filter((d) => d.today < (urgent ? cap : cap - 15) && (urgent || d.recent < d.lim)).sort((a, b) => a.today - b.today)[0] || null;
     for (const m of msgs) {
       const ageH = (Date.now() - new Date(m.created_at.replace(' ', 'T') + 'Z').getTime()) / 36e5;
       if (STALE_H[m.event] && ageH > STALE_H[m.event]) {
@@ -394,14 +432,20 @@ async function processQueue() {
         // tope del teléfono: los avisos masivos ("va en camino") esperan a que se libere;
         // los urgentes ("está por llegar", entregado, no entregado, prueba) salen siempre
         const urgent = ['proximo', 'entregado', 'fallido', 'prueba'].includes(m.event);
-        if (!urgent && smsRecent >= smsLimit) continue;
-        smsRecent++;
+        if (pool.length) {
+          const d = pickDevice(urgent);
+          if (!d) continue; // todas las líneas en su tope: espera (los "va en camino" se vencen a las 4 h)
+          m.device = d.id; d.today++; d.recent++;
+        } else {
+          if (!urgent && smsRecent >= smsLimit) continue;
+          smsRecent++;
+        }
       }
       try {
         const r = await deliver(s, m);
         if (m.channel === 'sms' && smsGapMs && !r.simulated) await pause(smsGapMs);
-        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now'), gw_state=NULL, gw_checked_at=NULL WHERE id=?").run(
-          r.simulated ? 'simulado' : 'enviado', r.ref || null, m.id
+        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now'), gw_state=NULL, gw_checked_at=NULL, gw_device=? WHERE id=?").run(
+          r.simulated ? 'simulado' : 'enviado', r.ref || null, m.device || null, m.id
         );
       } catch (e) {
         const n = m.attempts + 1;
@@ -499,4 +543,4 @@ async function pushResumen(rows) {
   for (const row of rows) { await postSheet(s, { sheet: 'Resumen', headers: RESUMEN_HEADERS, row }); n++; }
   return { sent: n };
 }
-module.exports = { EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
+module.exports = { smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
