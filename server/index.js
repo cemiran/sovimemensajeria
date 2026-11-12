@@ -4236,6 +4236,40 @@ app.get('/t/:token', (req, res) => res.sendFile(path.join(__dirname, '..', 'publ
 
 // ---------- Archivos estáticos ----------
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
+// Mosaicos del mapa (OpenStreetMap) con caché en disco: rápidos, y respetando la política de uso de OSM
+// (User-Agent propio y caché). Se renuevan cada 30 días.
+const TILE_DIR = path.join(require('./db').DATA_DIR, 'tiles');
+const tileWait = new Map();
+app.get('/tiles/:z/:x/:y.png', async (req, res) => {
+  const z = Number(req.params.z), x = Number(req.params.x), y = Number(req.params.y);
+  const max = 2 ** z;
+  if (![z, x, y].every(Number.isInteger) || z < 0 || z > 19 || x < 0 || y < 0 || x >= max || y >= max) return res.status(400).end();
+  const file = path.join(TILE_DIR, String(z), String(x), `${y}.png`);
+  try {
+    const st = fs.statSync(file);
+    if (Date.now() - st.mtimeMs < 30 * 864e5) { res.set('Cache-Control', 'public, max-age=604800'); return res.type('png').sendFile(file); }
+  } catch {}
+  const key = `${z}/${x}/${y}`;
+  try {
+    if (!tileWait.has(key)) tileWait.set(key, (async () => {
+      const r = await fetch(`https://tile.openstreetmap.org/${z}/${x}/${y}.png`, {
+        headers: { 'User-Agent': `SovimeMensajeria/1.0 (+${notify.baseUrl(getSettings())})`, Referer: notify.baseUrl(getSettings()) + '/' },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!r.ok) throw new Error('OSM ' + r.status);
+      const buf = Buffer.from(await r.arrayBuffer());
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, buf);
+      return buf;
+    })().finally(() => setTimeout(() => tileWait.delete(key), 1000)));
+    const buf = await tileWait.get(key);
+    res.set('Cache-Control', 'public, max-age=604800').type('png').send(buf);
+  } catch {
+    // sin conexión con OSM: si hay una copia vieja, se sirve
+    if (fs.existsSync(file)) return res.type('png').sendFile(file);
+    res.status(502).end();
+  }
+});
 app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0 })); // revalida con ETag: los cambios llegan al instante
 app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 

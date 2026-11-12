@@ -1,5 +1,5 @@
 // Service worker: shell offline + red primero para la API.
-const CACHE = 'um-v5';
+const CACHE = 'um-v6';
 const SHELL = ['/', '/index.html', '/css/app.css', '/js/app.js', '/manifest.json', '/icon.svg', '/img/logo.png', '/img/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -13,7 +13,7 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  if (url.pathname.startsWith('/api/')) return; // la app maneja la cola offline
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/tiles/')) return; // API: cola offline; mapas: caché del navegador
   if (url.origin === location.origin || url.hostname.includes('unpkg.com') || url.hostname.includes('jsdelivr') || url.hostname.includes('cdnjs') || url.hostname.includes('fonts.g')) {
     e.respondWith(
       fetch(e.request)

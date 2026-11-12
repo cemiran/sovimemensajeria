@@ -90,13 +90,14 @@
 })();
 
 function baseTiles(map) {
-  // OpenStreetMap exige que se identifique el sitio (Referer); si aun así rechaza, se cambia a CARTO (mismos datos de OSM)
-  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '© OpenStreetMap' });
+  // Mosaicos servidos por nuestro servidor (caché de OpenStreetMap). Si nuestro servidor no responde, directo de OSM.
+  const own = L.tileLayer('/tiles/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
   let fails = 0;
-  osm.on('tileerror', () => {
-    if (++fails !== 3) return;
-    map.removeLayer(osm);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap · © CARTO' }).addTo(map);
+  own.on('tileload', () => { fails = 0; });
+  own.on('tileerror', () => {
+    if (++fails !== 8) return;
+    map.removeLayer(own);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '© OpenStreetMap' }).addTo(map);
   });
-  return osm.addTo(map);
+  return own.addTo(map);
 }
