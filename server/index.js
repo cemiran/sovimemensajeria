@@ -3723,7 +3723,7 @@ app.get(
 );
 
 // ---------- Configuración ----------
-const PUBLIC_INTEGRATION = new Set(['public_url', 'notif_enabled', 'phone_country']);
+const PUBLIC_INTEGRATION = new Set(['public_url', 'notif_enabled', 'phone_country', 'notif_driver_phone_date']);
 app.get('/api/settings', auth(), (req, res) => {
   const s = getSettings();
   if (req.user.office) {

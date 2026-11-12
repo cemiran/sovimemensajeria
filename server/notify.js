@@ -18,7 +18,7 @@ const INTEGRATION_KEYS = [
   'sms_provider', 'twilio_sid', 'twilio_token', 'twilio_from', 'twilio_wa_from',
   'sms_android_mode', 'sms_android_url', 'sms_android_user', 'sms_android_pass', 'sms_android_name', 'sms_daily_cap_per_device',
   ...[2, 3].flatMap((i) => [`sms${i}_enabled`, `sms${i}_name`, `sms${i}_mode`, `sms${i}_url`, `sms${i}_user`, `sms${i}_pass`]),
-  'wa_provider', 'wa_token', 'wa_phone_id', 'wa_daily_cap', 'wa1_name', 'wa2_name', 'wa3_name', 'wa2_enabled', 'wa3_enabled',
+  'notif_driver_phone_date', 'wa_provider', 'wa_token', 'wa_phone_id', 'wa_daily_cap', 'wa1_name', 'wa2_name', 'wa3_name', 'wa2_enabled', 'wa3_enabled',
   'email_provider', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass', 'smtp_from',
   'sheets_enabled', 'sheets_url', 'sheets_secret',
 ];
@@ -92,6 +92,8 @@ function queueEvent(event, orderId, extra = {}, { force = false, channels = null
     if (!d) return 0;
     const { o, s, vars } = d;
     if (s.notif_enabled !== '1' && !force) return 0;
+    // ese día los SMS y WhatsApp los manda el repartidor desde su teléfono (el correo sigue saliendo)
+    const driverDay = !force && s.notif_driver_phone_date && s.notif_driver_phone_date === new Date().toLocaleDateString('en-CA');
     // "Repartidor cerca" solo una vez por pedido
     if (event === 'proximo' && !force && db.prepare("SELECT 1 FROM messages WHERE order_id=? AND event='proximo' LIMIT 1").get(o.id)) return 0;
     const mx = matrix(s)[event] || {};
@@ -103,6 +105,7 @@ function queueEvent(event, orderId, extra = {}, { force = false, channels = null
     for (const ch of channels || CHANNELS) {
       if (!channels && !Number(mx[ch])) continue;
       if (!Number(o['notify_' + ch])) continue;
+      if (driverDay && ch !== 'email') continue;
       // SMS y WhatsApp: solo al TELÉFONO MÓVIL del cliente (nunca al adicional ni a la línea Telnor, que es fija)
       const last10 = (x) => String(x || '').replace(/\D/g, '').slice(-10);
       if (ch !== 'email' && last10(o.cphone) && last10(o.cphone) === last10(o.ctelnor)) continue;
