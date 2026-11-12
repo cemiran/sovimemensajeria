@@ -4713,8 +4713,8 @@ function smsLink(phone, text = '') {
   const d = String(phone || '').replace(/\D/g, '').slice(-10);
   return `sms:+${SETTINGS.phone_country || '52'}${d}?&body=${encodeURIComponent(text)}`;
 }
-const arrivingText = (s) => `Hola ${firstName(s.customer_name || '')}, soy ${firstName(store.user.name)} de ${SETTINGS.company_name || 'Sovime Mensajería'}. Estamos llegando a su domicilio ahora con su paquete ${s.tracking_code}.`;
-const smsBtn = (s, cls = 'sm') => (s.customer_phone ? `<a class="btn ${cls}" href="${esc(smsLink(s.customer_phone, arrivingText(s)))}" aria-label="Enviar SMS" title="SMS desde tu celular: «Estamos llegando a su domicilio ahora»">${icon('mail')} SMS</a>` : '');
+const arrivingText = (s) => `Hola ${firstName(s.customer_name || '')}, soy ${firstName(store.user.name)} de ${SETTINGS.company_name || 'Sovime Mensajería'}. Estamos llegando a su domicilio ahora con su Modem Telnor ${s.tracking_code}.`;
+const smsBtn = (s, cls = 'sm') => (s.customer_phone ? `<a class="btn ${cls}" href="${esc(smsLink(s.customer_phone, arrivingText(s)))}" aria-label="Enviar SMS" title="SMS desde tu celular: «Estamos llegando a su domicilio ahora con su Modem Telnor»">${icon('mail')} SMS</a>` : '');
 function waLink(phone, text = '') {
   const d = String(phone || '').replace(/\D/g, '');
   const n = d.length === 10 ? (SETTINGS.phone_country || '52') + d : d;
