@@ -3304,6 +3304,26 @@ app.post('/api/orders/bulk-schedule', auth(...STAFF), wrap((req, res) => {
   audit(req, 'pedidos.programar', `${moved} pedido(s) programados para el ${date}`);
   res.json({ moved, skipped, date });
 }));
+// Cerrar la ruta tal como está (p. ej. el repartidor ya no sigue hoy)
+app.post('/api/routes/:id/close', auth(...STAFF), wrap((req, res) => {
+  const r = db.prepare('SELECT r.*, u.name dname FROM routes r LEFT JOIN users u ON u.id = r.driver_id WHERE r.id=?').get(req.params.id);
+  if (!r) throw new HttpError(404, 'No encontrada');
+  officeRoute(req, r);
+  if (r.status === 'completada') throw new HttpError(409, 'La ruta ya está cerrada');
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date || '') ? req.body.date : null;
+  const reason = String(req.body?.reason || '').trim().slice(0, 200);
+  const open = db.prepare("SELECT id, tracking_code, status FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id);
+  const done = db.prepare("SELECT SUM(status='entregado') d, SUM(status='fallido') f FROM orders WHERE route_id=?").get(r.id);
+  tx(() => {
+    for (const o of open)
+      db.prepare(`UPDATE orders SET status='pendiente', route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL,
+        scheduled_date=COALESCE(?, scheduled_date), notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`)
+        .run(date, ` | Ruta cerrada ${today()} (${r.dname || 'repartidor'})${reason ? ': ' + reason : ''}`, o.id);
+    db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')), started_at=COALESCE(started_at, datetime('now')) WHERE id=?").run(r.id);
+  });
+  audit(req, 'rutas.cerrar', `${r.name || 'Ruta ' + r.id}: ${done.d || 0} entregados, ${done.f || 0} no entregados; ${open.length} pendientes regresan${date ? ' para el ' + date : ''}${reason ? ' · ' + reason : ''}`);
+  res.json({ delivered: done.d || 0, failed: done.f || 0, returned: open.length, loaded: open.filter((o) => o.status === 'cargado').length, date });
+}));
 // Cambiar la fecha de una ruta completa (aún sin entregas): sus pedidos pasan a la ruta de ese día del mismo repartidor
 app.post('/api/routes/:id/date', auth(...STAFF), wrap((req, res) => {
   const r = db.prepare('SELECT r.*, u.name dname FROM routes r LEFT JOIN users u ON u.id = r.driver_id WHERE r.id=?').get(req.params.id);

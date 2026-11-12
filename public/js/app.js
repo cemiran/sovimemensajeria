@@ -1658,7 +1658,7 @@ async function routeDetail(id) {
       </tbody></table></div>
     </div>`, {
     wide: true,
-    footer: `<button class="btn bad" id="rdel">Eliminar ruta</button><button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
+    footer: `${r.status !== 'completada' && r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? `<button class="btn bad" id="rclose" title="El repartidor ya no sigue: se cierra como está y lo que falta regresa a pendientes">${icon('x')} Cerrar ruta</button>` : ''}${r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? '' : '<button class="btn bad" id="rdel">Eliminar ruta</button>'}<button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
@@ -1674,7 +1674,29 @@ async function routeDetail(id) {
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
   $('#ropt', m.el).onclick = async () => { const o = await POST(`/api/routes/${r.id}/optimize`); toast(`Re-optimizada: ${o.distance_km} km`, 'ok'); m.el.remove(); routeDetail(r.id); };
-  $('#rdel', m.el).onclick = async () => { if (!(await confirmDlg('¿Eliminar la ruta? Los pedidos regresarán a pendientes.'))) return; try { await api('DELETE', '/api/routes/' + r.id); toast('Ruta eliminada', 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } };
+  $('#rclose', m.el)?.addEventListener('click', () => {
+    const left = r.stops.filter((x) => ['asignado', 'cargado'].includes(x.status));
+    const del = r.stops.filter((x) => x.status === 'entregado').length, fail = r.stops.filter((x) => x.status === 'fallido').length;
+    const loaded = left.filter((x) => x.status === 'cargado').length;
+    const tom = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toLocaleDateString('en-CA'); })();
+    const d = modal('Cerrar ruta del día', `<form id="rcF" class="stack">
+      <p style="margin:0">Se cierra la ruta de <b>${esc(r.driver_name || 'el repartidor')}</b> tal como está:</p>
+      <ul style="margin:0"><li><b>${del}</b> entregados y <b>${fail}</b> no entregados quedan registrados.</li>
+        <li><b>${left.length}</b> parada(s) sin visitar regresan a <b>pendientes</b>, sin repartidor, para volver a asignarlas.</li></ul>
+      ${loaded ? `<div class="offline-bar">${loaded} paquete(s) ya estaban cargados en la unidad: recógelos o regístralos de vuelta en el almacén.</div>` : ''}
+      <label class="f">Reprogramar las pendientes para<input type="date" name="date" value="${tom}" /></label>
+      <label class="f">Motivo (opcional)<input name="reason" placeholder="Ej. el repartidor se retiró por enfermedad" /></label>
+    </form>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn bad" id="rcGo">Cerrar ruta</button>' });
+    $('#rcGo', d.el).onclick = async () => {
+      const f = $('#rcF', d.el);
+      try {
+        const x = await POST(`/api/routes/${r.id}/close`, { date: f.date.value, reason: f.reason.value });
+        toast(`Ruta cerrada: ${x.delivered} entregados · ${x.returned} regresan a pendientes${x.date ? ' para el ' + x.date : ''}`, 'ok');
+        d.close(); m.close(); render();
+      } catch (er) { toast(er.message, 'bad'); }
+    };
+  });
+  $('#rdel', m.el)?.addEventListener('click', async () => { if (!(await confirmDlg('¿Eliminar la ruta? Los pedidos regresarán a pendientes.'))) return; try { await api('DELETE', '/api/routes/' + r.id); toast('Ruta eliminada', 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } });
   $$('[data-rm]', m.el).forEach((b) => (b.onclick = async () => { await PUT('/api/routes/' + r.id, { remove_order_ids: [Number(b.dataset.rm)] }); m.el.remove(); routeDetail(r.id); }));
 }
 
