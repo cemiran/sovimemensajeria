@@ -4707,6 +4707,14 @@ const GW_STATE = { Pending: ['En el teléfono, por salir', 'warn'], Processed: [
 const msgChip = (st, gw) => (gw && st === 'enviado' && GW_STATE[gw] ? `<span class="chip ${GW_STATE[gw][1]}" title="Estado real del SMS en el teléfono">${GW_STATE[gw][0]}</span>` : `<span class="chip ${MSG_STATUS[st]?.[1] || ''}">${MSG_STATUS[st]?.[0] || esc(st)}</span>`);
 const SHEET_STATUS = { pendiente: ['Sheets: en cola', 'warn'], enviado: ['Sheets ✓', 'ok'], error: ['Sheets: error', 'off'], desactivado: ['Sheets desactivado', ''] };
 const sheetChip = (st) => (st ? `<span class="chip ${SHEET_STATUS[st]?.[1] || ''}">${SHEET_STATUS[st]?.[0] || esc(st)}</span>` : '');
+// SMS desde el celular del repartidor (su propio plan): abre la app de Mensajes con el texto listo.
+// "sms:NUM?&body=" funciona en iPhone y Android.
+function smsLink(phone, text = '') {
+  const d = String(phone || '').replace(/\D/g, '').slice(-10);
+  return `sms:+${SETTINGS.phone_country || '52'}${d}?&body=${encodeURIComponent(text)}`;
+}
+const arrivingText = (s) => `Hola ${firstName(s.customer_name || '')}, soy ${firstName(store.user.name)} de ${SETTINGS.company_name || 'Sovime Mensajería'}. Estamos llegando a su domicilio ahora con su paquete ${s.tracking_code}.`;
+const smsBtn = (s, cls = 'sm') => (s.customer_phone ? `<a class="btn ${cls}" href="${esc(smsLink(s.customer_phone, arrivingText(s)))}" aria-label="Enviar SMS" title="SMS desde tu celular: «Estamos llegando a su domicilio ahora»">${icon('mail')} SMS</a>` : '');
 function waLink(phone, text = '') {
   const d = String(phone || '').replace(/\D/g, '');
   const n = d.length === 10 ? (SETTINGS.phone_country || '52') + d : d;
@@ -5107,6 +5115,7 @@ async function viewMyRoute(v) {
     ${geoChk(next.geo_quality) ? `<div style="margin-top:6px">${geoWarn(next.geo_quality)}<br><small class="muted">Al llegar al domicilio toca <b>📍 Estoy aquí</b> para dejar la ubicación correcta.</small> <button class="btn sm" data-here="${next.id}">📍 Estoy aquí</button></div>` : ''}
     ${next.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(next.cod_amount)}</div>` : ''}
     <div class="row" style="margin-top:12px"><a class="btn primary lg grow" data-nav="${next.id}" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
+    ${next.customer_phone ? `<div class="row" style="margin-top:8px;gap:6px"><a class="btn grow" href="tel:${esc(next.customer_phone)}">${icon('phone')} Llamar</a>${smsBtn(next, 'grow')}<a class="btn grow" target="_blank" rel="noopener" href="${esc(waLink(next.customer_phone, arrivingText(next)))}">${icon('chat')} WhatsApp</a></div>` : ''}
   </div>` : `<div class="card empty">${icon('check')}<p><b>¡Ruta terminada!</b><br>No quedan paradas por visitar.</p></div>`}
   <div class="card" style="margin:12px 0">
     <div class="row between"><b>${r.stops.length} paradas · ${fmtN(r.distance_km, 1)} km · ~${fmtN(r.est_minutes / 60, 1)} h</b>${badge(r.status)}</div>
@@ -5127,7 +5136,7 @@ async function viewMyRoute(v) {
       ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
         ${s.lat != null || s.address ? `<a class="btn sm" data-nav="${s.id}" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
-        ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone))}">${icon('chat')}</a>` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
+        ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone, arrivingText(s)))}">${icon('chat')}</a>${smsBtn(s)}` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
         ${geoChk(s.geo_quality) ? `<button class="btn sm" data-here="${s.id}" title="Estoy en el domicilio: guardar mi ubicación como la del cliente">📍 Estoy aquí</button>` : ''}<a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a><a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>` : ''}
     </div></div>`;
   }).join('')}</div>`;
@@ -5237,7 +5246,7 @@ async function viewNavigate(v, id) {
       <div class="arrive" id="arrive" hidden>${icon('live')} Llegaste al domicilio</div>
       <div class="row" style="margin-top:10px">
         <a class="btn ok lg grow" href="#/deliver/${s.id}">${icon('check')} Entregar</a>
-        ${s.customer_phone ? `<a class="btn lg" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn lg" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone, `Hola, soy ${firstName(store.user.name)} de ${SETTINGS.company_name}. Voy en camino con tu paquete ${s.tracking_code}.`))}" aria-label="WhatsApp">${icon('chat')}</a>` : ''}
+        ${s.customer_phone ? `<a class="btn lg" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn lg" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone, `Hola, soy ${firstName(store.user.name)} de ${SETTINGS.company_name}. Voy en camino con tu paquete ${s.tracking_code}.`))}" aria-label="WhatsApp">${icon('chat')}</a>${smsBtn(s, 'lg')}` : ''}
         ${s.customer_phone_alt ? `<a class="btn lg" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional: ${esc(s.customer_phone_alt)}">${icon('phone')} 2</a>` : ''}
       </div>
       <div class="row" style="margin-top:8px">
