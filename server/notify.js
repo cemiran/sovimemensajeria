@@ -11,13 +11,14 @@ const EVENTS = {
   fallido: 'No entregado',
 };
 const CHANNELS = ['sms', 'whatsapp', 'email'];
-const SECRET_KEYS = ['twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass'];
+const SECRET_KEYS = ['twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass', 'sms2_pass', 'sms3_pass'];
 const INTEGRATION_KEYS = [
   'public_url', 'phone_country', 'notif_enabled', 'notif_matrix', 'notif_test_to', 'notif_test_email',
   ...Object.keys(EVENTS).map((e) => 'tpl_' + e),
   'sms_provider', 'twilio_sid', 'twilio_token', 'twilio_from', 'twilio_wa_from',
-  'sms_android_mode', 'sms_android_url', 'sms_android_user', 'sms_android_pass',
-  'wa_provider', 'wa_token', 'wa_phone_id',
+  'sms_android_mode', 'sms_android_url', 'sms_android_user', 'sms_android_pass', 'sms_android_name', 'sms_daily_cap_per_device',
+  ...[2, 3].flatMap((i) => [`sms${i}_enabled`, `sms${i}_name`, `sms${i}_mode`, `sms${i}_url`, `sms${i}_user`, `sms${i}_pass`]),
+  'wa_provider', 'wa_token', 'wa_phone_id', 'wa_daily_cap', 'wa1_name', 'wa2_name', 'wa3_name', 'wa2_enabled', 'wa3_enabled',
   'email_provider', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass', 'smtp_from',
   'sheets_enabled', 'sheets_url', 'sheets_secret',
 ];
@@ -129,38 +130,52 @@ const basic = (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64');
 
 // SMS desde un teléfono Android propio con la app "SMS Gateway for Android" (sms-gate.app):
 // modo nube (api.sms-gate.app, el teléfono solo necesita internet) o modo local (IP del teléfono en la misma red).
-const smsBase = (s) => (s.sms_android_mode === 'local' ? String(s.sms_android_url || '').replace(/\/+$/, '') : 'https://api.sms-gate.app');
-// Teléfonos conectados a la cuenta de SMS Gateway (se consulta cada 2 min)
-let devCache = { at: 0, list: [] };
+// Líneas de SMS: cada una es una cuenta de SMS Gateway (uno o varios teléfonos). La 1 es la configuración de siempre.
+function smsAccounts(s) {
+  const out = [];
+  if (s.sms_android_user && s.sms_android_pass) out.push({ ch: 1, name: s.sms_android_name || 'Línea 1', mode: s.sms_android_mode, url: s.sms_android_url, user: s.sms_android_user, pass: s.sms_android_pass });
+  for (const i of [2, 3]) if (s[`sms${i}_enabled`] === '1' && s[`sms${i}_user`] && s[`sms${i}_pass`])
+    out.push({ ch: i, name: s[`sms${i}_name`] || `Línea ${i}`, mode: s[`sms${i}_mode`], url: s[`sms${i}_url`], user: s[`sms${i}_user`], pass: s[`sms${i}_pass`] });
+  return out;
+}
+const smsBase = (a) => (a.mode === 'local' ? String(a.url || '').replace(/\/+$/, '') : 'https://api.sms-gate.app');
+// Teléfonos conectados a cada cuenta (se consulta cada 2 min)
+const devCache = new Map();
 async function smsDevices(s) {
-  if (s.sms_provider !== 'android' || !s.sms_android_user || !s.sms_android_pass) return [];
-  if (Date.now() - devCache.at < 120000) return devCache.list;
-  try {
-    const r = await fetch(`${smsBase(s)}/3rdparty/v1/devices`, { headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass) }, signal: AbortSignal.timeout(10000) });
-    if (r.ok) devCache = { at: Date.now(), list: (await r.json()).map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen })) };
-  } catch {}
-  return devCache.list;
+  if (s.sms_provider !== 'android') return [];
+  const all = [];
+  for (const a of smsAccounts(s)) {
+    const key = `${a.ch}|${a.user}`;
+    let c = devCache.get(key);
+    if (!c || Date.now() - c.at > 120000) {
+      try {
+        const r = await fetch(`${smsBase(a)}/3rdparty/v1/devices`, { headers: { Authorization: basic(a.user, a.pass) }, signal: AbortSignal.timeout(10000) });
+        if (r.ok) { c = { at: Date.now(), list: (await r.json()).map((d) => ({ id: d.id, name: d.name, lastSeen: d.lastSeen })) }; devCache.set(key, c); }
+      } catch {}
+    }
+    for (const d of c?.list || []) all.push({ ...d, ch: a.ch, line: a.name, acc: a });
+  }
+  return all;
 }
 // uso de hoy de cada teléfono (para la pantalla de Mensajes)
 async function smsDeviceStats() {
   const s = getSettings();
   const cap = Number(s.sms_daily_cap_per_device) || 300;
   const devs = await smsDevices(s);
-  return devs.map((d) => ({ ...d, cap,
+  return devs.map(({ acc, ...d }) => ({ ...d, cap,
     today: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND gw_device=? AND date(sent_at,'localtime') = date('now','localtime')").get(d.id).n,
     online: !d.lastSeen || Date.now() - Date.parse(d.lastSeen) < 30 * 60000 }));
 }
-async function sendAndroidSMS(s, to, body, deviceId) {
+async function sendAndroidSMS(s, to, body, deviceId, acc) {
+  acc ||= smsAccounts(s)[0] || { mode: s.sms_android_mode, url: s.sms_android_url, user: s.sms_android_user, pass: s.sms_android_pass };
   // México: el "1" después del 52 solo lo usa WhatsApp; para SMS se marca +52 + 10 dígitos
   if (/^\+521\d{10}$/.test(to)) to = '+52' + to.slice(-10);
-  if (!s.sms_android_user || !s.sms_android_pass) throw new Error('Faltan usuario y contraseña de SMS Gateway (pantalla principal de la app)');
-  const base = s.sms_android_mode === 'local'
-    ? String(s.sms_android_url || '').replace(/\/+$/, '')
-    : 'https://api.sms-gate.app';
+  if (!acc.user || !acc.pass) throw new Error('Faltan usuario y contraseña de SMS Gateway (pantalla principal de la app)');
+  const base = smsBase(acc);
   if (!/^https?:\/\/\S+$/.test(base)) throw new Error('Escribe la dirección local del teléfono, p. ej. http://192.168.1.50:8080');
   const post = (dev) => fetch(`${base}/3rdparty/v1/messages`, {
     method: 'POST',
-    headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass), 'Content-Type': 'application/json' },
+    headers: { Authorization: basic(acc.user, acc.pass), 'Content-Type': 'application/json' },
     body: JSON.stringify({ phoneNumbers: [to], textMessage: { text: body }, ...(dev ? { deviceId: dev } : {}) }),
     signal: AbortSignal.timeout(20000),
   });
@@ -172,8 +187,8 @@ async function sendAndroidSMS(s, to, body, deviceId) {
   if (!r.ok) throw new Error(j.message || j.error || `SMS Gateway respondió HTTP ${r.status}`);
   return { ref: j.id };
 }
-async function sendSMS(s, to, body, deviceId) {
-  if (s.sms_provider === 'android') return sendAndroidSMS(s, to, body, deviceId);
+async function sendSMS(s, to, body, deviceId, acc) {
+  if (s.sms_provider === 'android') return sendAndroidSMS(s, to, body, deviceId, acc);
   if (s.sms_provider !== 'twilio') return { simulated: true };
   if (!s.twilio_sid || !s.twilio_token || !s.twilio_from) throw new Error('Faltan datos de Twilio (SID, token o número)');
   const j = await postForm(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(s.twilio_sid)}/Messages.json`,
@@ -181,7 +196,16 @@ async function sendSMS(s, to, body, deviceId) {
   return { ref: j.sid };
 }
 async function sendWhatsApp(s, to, body) {
-  if (s.wa_provider === 'qr') return require('./wa').sendText(to, body);
+  if (s.wa_provider === 'qr') {
+    const wa = require('./wa');
+    const cap = Math.max(1, Number(s.wa_daily_cap) || 200);
+    const on = wa.SLOTS.filter((i) => (i === 1 || s[`wa${i}_enabled`] === '1') && wa.status(i).status === 'conectado')
+      .map((i) => ({ i, today: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='whatsapp' AND gw_channel=? AND date(sent_at,'localtime') = date('now','localtime')").get('wa' + i).n }));
+    if (!on.length) throw new Error('Ningún número de WhatsApp está conectado: vincúlalo escaneando el QR en Configuración');
+    const pick = on.filter((x) => x.today < cap).sort((a, b) => a.today - b.today)[0];
+    if (!pick) throw new Error(`Los números de WhatsApp llegaron a su tope de ${cap} mensajes hoy`);
+    return { ...(await wa.sendText(to, body, pick.i)), gwch: 'wa' + pick.i };
+  }
   if (s.wa_provider === 'twilio') {
     if (!s.twilio_sid || !s.twilio_token || !s.twilio_wa_from) throw new Error('Faltan datos de Twilio WhatsApp');
     const from = s.twilio_wa_from.startsWith('whatsapp:') ? s.twilio_wa_from : 'whatsapp:' + s.twilio_wa_from;
@@ -249,7 +273,7 @@ async function deliver(s, m, { direct = false } = {}) {
     if (to !== m.recipient) m = { ...m, recipient: to, body: `[PRUEBA · era para ${m.recipient}]
 ${m.body}` };
   }
-  if (m.channel === 'sms') return sendSMS(s, m.recipient, m.body, m.device);
+  if (m.channel === 'sms') return sendSMS(s, m.recipient, m.body, m.device, m.acc);
   if (m.channel === 'whatsapp') return sendWhatsApp(s, m.recipient, m.body);
   return sendEmail(s, m.recipient, m.subject || s.company_name, m.body);
 }
@@ -435,7 +459,7 @@ async function processQueue() {
         if (pool.length) {
           const d = pickDevice(urgent);
           if (!d) continue; // todas las líneas en su tope: espera (los "va en camino" se vencen a las 4 h)
-          m.device = d.id; d.today++; d.recent++;
+          m.device = d.id; m.acc = d.acc; m.gwch = 'sms' + d.ch; d.today++; d.recent++;
         } else {
           if (!urgent && smsRecent >= smsLimit) continue;
           smsRecent++;
@@ -444,8 +468,8 @@ async function processQueue() {
       try {
         const r = await deliver(s, m);
         if (m.channel === 'sms' && smsGapMs && !r.simulated) await pause(smsGapMs);
-        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now'), gw_state=NULL, gw_checked_at=NULL, gw_device=? WHERE id=?").run(
-          r.simulated ? 'simulado' : 'enviado', r.ref || null, m.device || null, m.id
+        db.prepare("UPDATE messages SET status=?, provider_ref=?, attempts=attempts+1, error=NULL, sent_at=datetime('now'), gw_state=NULL, gw_checked_at=NULL, gw_device=?, gw_channel=? WHERE id=?").run(
+          r.simulated ? 'simulado' : 'enviado', r.ref || null, m.device || null, r.gwch || m.gwch || null, m.id
         );
       } catch (e) {
         const n = m.attempts + 1;
@@ -483,16 +507,17 @@ async function processQueue() {
 let checking = false;
 async function checkSmsStates() {
   const s = getSettings();
-  if (checking || s.sms_provider !== 'android' || !s.sms_android_user || !s.sms_android_pass) return;
+  const accs = smsAccounts(s);
+  if (checking || s.sms_provider !== 'android' || !accs.length) return;
   checking = true;
   try {
-    const base = s.sms_android_mode === 'local' ? String(s.sms_android_url || '').replace(/\/+$/, '') : 'https://api.sms-gate.app';
     const list = db.prepare(`SELECT * FROM messages WHERE channel='sms' AND status='enviado' AND provider_ref IS NOT NULL
       AND sent_at >= datetime('now','-12 hours') AND (gw_state IS NULL OR gw_state IN ('Pending','Processed','Sent'))
       AND (gw_checked_at IS NULL OR gw_checked_at <= datetime('now','-90 seconds')) ORDER BY id LIMIT 60`).all();
     for (const m of list) {
       try {
-        const r = await fetch(`${base}/3rdparty/v1/messages/${encodeURIComponent(m.provider_ref)}`, { headers: { Authorization: basic(s.sms_android_user, s.sms_android_pass) }, signal: AbortSignal.timeout(15000) });
+        const a = accs.find((x) => 'sms' + x.ch === m.gw_channel) || accs[0];
+        const r = await fetch(`${smsBase(a)}/3rdparty/v1/messages/${encodeURIComponent(m.provider_ref)}`, { headers: { Authorization: basic(a.user, a.pass) }, signal: AbortSignal.timeout(15000) });
         if (!r.ok) continue;
         const j = await r.json();
         const st = j.state || null;

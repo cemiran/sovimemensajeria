@@ -3700,24 +3700,25 @@ function integrationView() {
 app.get('/api/integrations', auth('admin'), (req, res) => res.json(integrationView()));
 // WhatsApp vinculado por QR
 const wa = require('./wa');
-app.get('/api/whatsapp/status', auth('admin'), (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json(wa.status()); });
+const waSlot = (req) => Number(req.query.slot || req.body?.slot) || 1;
+app.get('/api/whatsapp/status', auth('admin'), (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json(wa.status(waSlot(req))); });
 app.post(
   '/api/whatsapp/connect',
   auth('admin'),
   wrap(async (req, res) => {
     if (getSettings().practice_mode === '1') throw new HttpError(403, 'En la copia de práctica no se vincula WhatsApp');
-    await wa.start();
-    audit(req, 'whatsapp.vincular', 'Solicitó QR / conexión');
-    res.json(wa.status());
+    await wa.start(waSlot(req));
+    audit(req, 'whatsapp.vincular', `Línea ${waSlot(req)}: solicitó QR / conexión`);
+    res.json(wa.status(waSlot(req)));
   })
 );
 app.post(
   '/api/whatsapp/logout',
   auth('admin'),
   wrap(async (req, res) => {
-    await wa.logout();
-    audit(req, 'whatsapp.desvincular', '');
-    res.json(wa.status());
+    await wa.logout(waSlot(req));
+    audit(req, 'whatsapp.desvincular', `Línea ${waSlot(req)}`);
+    res.json(wa.status(waSlot(req)));
   })
 );
 // QR para abrir enlaces de instalación en el teléfono (solo enlaces conocidos)

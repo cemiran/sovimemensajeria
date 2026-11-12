@@ -4526,10 +4526,21 @@ async function viewSettings(v) {
           <label class="f">Proveedor<select name="sms_provider"><option value="simulacion">Simulación (no envía)</option><option value="android">Mi teléfono Android (SMS Gateway)</option><option value="twilio">Twilio</option></select></label>
           <div data-show="sms_provider=android" class="stack">
             <div class="qr-row"><img id="smsQr" alt="QR para descargar SMS Gateway" /><small>1. Escanea con el <b>teléfono Android</b> que enviará los SMS para descargar e instalar <b>SMS Gateway for Android</b> (código abierto).<br>2. Ábrela, concede permiso de SMS y activa <b>Cloud server</b>.<br>3. Copia aquí el <b>usuario</b> y la <b>contraseña</b> que muestra la app.</small></div>
+            <label class="f">Tope de SMS por teléfono al día<input name="sms_daily_cap_per_device" inputmode="numeric" value="${esc(it.sms_daily_cap_per_device || '300')}" /></label>
+            <fieldset class="ch-line"><legend>Línea 1</legend>
+            <label class="f">Nombre<input name="sms_android_name" value="${esc(it.sms_android_name || '')}" placeholder="Ej. MAXON FreedomPop" /></label>
             <label class="f">Modo<select name="sms_android_mode"><option value="cloud">Nube (el teléfono solo necesita internet)</option><option value="local">Red local (IP del teléfono)</option></select></label>
             <label class="f" data-show="sms_android_mode=local">Dirección del teléfono<input name="sms_android_url" value="${esc(it.sms_android_url)}" placeholder="http://192.168.1.50:8080" /></label>
             <div class="grid g2"><label class="f">Usuario<input name="sms_android_user" value="${esc(it.sms_android_user)}" autocomplete="off" /></label>
-            <label class="f">Contraseña<input name="sms_android_pass" type="password" value="${esc(it.sms_android_pass)}" autocomplete="new-password" /></label></div>
+            <label class="f">Contraseña<input name="sms_android_pass" type="password" value="${esc(it.sms_android_pass)}" autocomplete="new-password" /></label></div></fieldset>
+            ${[2, 3].map((i) => `<fieldset class="ch-line"><legend><label class="row" style="gap:6px"><input type="checkbox" name="sms${i}_enabled" ${it[`sms${i}_enabled`] === '1' ? 'checked' : ''} /> Línea ${i}</label></legend>
+              <div data-line="sms${i}" class="stack">
+              <label class="f">Nombre<input name="sms${i}_name" value="${esc(it[`sms${i}_name`] || '')}" placeholder="Ej. Telcel 664…" /></label>
+              <label class="f">Modo<select name="sms${i}_mode"><option value="cloud">Nube</option><option value="local">Red local</option></select></label>
+              <label class="f" data-show="sms${i}_mode=local">Dirección del teléfono<input name="sms${i}_url" value="${esc(it[`sms${i}_url`] || '')}" placeholder="http://192.168.1.51:8080" /></label>
+              <div class="grid g2"><label class="f">Usuario<input name="sms${i}_user" value="${esc(it[`sms${i}_user`] || '')}" autocomplete="off" /></label>
+              <label class="f">Contraseña<input name="sms${i}_pass" type="password" value="${esc(it[`sms${i}_pass`] || '')}" autocomplete="new-password" /></label></div></div></fieldset>`).join('')}
+            <small class="muted">Cada línea es un teléfono (o una cuenta) de SMS Gateway con su chip. El servidor reparte los SMS entre los teléfonos conectados, el que lleva menos primero, sin pasar el tope. También puedes agregar teléfonos a la Línea 1 entrando en SMS Gateway con el mismo usuario y contraseña.</small>
             <small class="muted">Los SMS salen del chip del teléfono con la tarifa de tu plan. Mantenlo cargando y con la app abierta en segundo plano.</small></div>
           <div data-show="sms_provider=twilio" class="stack">
             <label class="f">Account SID<input name="twilio_sid" value="${esc(it.twilio_sid)}" autocomplete="off" /></label>
@@ -4538,7 +4549,11 @@ async function viewSettings(v) {
           <div class="row"><input class="grow" placeholder="Tel. de prueba" data-to="sms" /><button type="button" class="btn sm" data-test="sms">Probar</button></div></div>
         <div class="card stack"><h2>${icon('chat')} WhatsApp</h2>
           <label class="f">Proveedor<select name="wa_provider"><option value="simulacion">Simulación (no envía)</option><option value="qr">Mi número de WhatsApp (QR)</option><option value="meta">WhatsApp Cloud API (Meta)</option><option value="twilio">Twilio WhatsApp</option></select></label>
-          <div data-show="wa_provider=qr" class="stack"><div id="waBox" class="wa-box"></div>
+          <div data-show="wa_provider=qr" class="stack">
+            <label class="f">Tope de mensajes por número al día<input name="wa_daily_cap" inputmode="numeric" value="${esc(it.wa_daily_cap || '200')}" /></label>
+            ${[1, 2, 3].map((i) => `<fieldset class="ch-line"><legend>${i === 1 ? 'Número 1' : `<label class="row" style="gap:6px"><input type="checkbox" name="wa${i}_enabled" ${it[`wa${i}_enabled`] === '1' ? 'checked' : ''} /> Número ${i}</label>`}</legend>
+              <div data-line="wa${i}" class="stack"><label class="f">Nombre<input name="wa${i}_name" value="${esc(it[`wa${i}_name`] || '')}" placeholder="Ej. WhatsApp oficina Tijuana" /></label>
+              <div class="wa-box" data-wabox="${i}"></div></div></fieldset>`).join('')}
             <small class="warn-note">${icon('info')} Conexión no oficial (como WhatsApp Web). Usa un número dedicado al negocio y envía solo avisos que el cliente espera: WhatsApp puede restringir números que mandan mensajes masivos.</small></div>
           <div data-show="wa_provider=meta" class="stack">
             <label class="f">Token de acceso<input name="wa_token" type="password" value="${esc(it.wa_token)}" autocomplete="new-password" /></label>
@@ -4565,11 +4580,13 @@ async function viewSettings(v) {
     f.sms_android_mode.value = it.sms_android_mode || 'cloud';
     GET('/api/qr/smsgate').then((r) => { const im = $('#smsQr'); if (im) im.src = r.qr; }).catch(() => {});
     let waTimer = null;
-    const waDraw = async (action) => {
-      const box = $('#waBox');
-      if (!box) return clearInterval(waTimer);
+    const waDraw = (action, slot) => (slot ? [Number(slot)] : [1, 2, 3]).forEach((i) => waDraw1(i, slot ? action : null));
+    const waDraw1 = async (slot, action) => {
+      const box = $(`[data-wabox="${slot}"]`);
+      if (!$('[data-wabox]')) return clearInterval(waTimer);
+      if (!box || box.closest('[data-line]')?.hidden) return;
       let st;
-      try { st = action ? await POST('/api/whatsapp/' + action) : await GET('/api/whatsapp/status'); } catch (e) { toast(e.message, 'bad'); return; }
+      try { st = action ? await POST(`/api/whatsapp/${action}?slot=${slot}`, { slot }) : await GET(`/api/whatsapp/status?slot=${slot}`); } catch (e) { toast(e.message, 'bad'); return; }
       const label = { conectado: ['Conectado', 'ok'], esperando_qr: ['Esperando escaneo', 'warn'], conectando: ['Conectando…', 'warn'], desconectado: ['Sin vincular', 'off'] }[st.status] || [st.status, ''];
       box.innerHTML = `<div class="row between"><b>Estado</b><span class="chip ${label[1]}">${label[0]}</span></div>
         ${st.status === 'conectado' ? `<div class="wa-me">${icon('chat')}<div><b>${esc(st.me?.number || '')}</b><br><small class="muted">${esc(st.me?.name || '')}${st.since ? ' · vinculado ' + fmtDT(st.since.replace('T', ' ').slice(0, 19)) : ''}</small></div></div>
@@ -4580,11 +4597,15 @@ async function viewSettings(v) {
         ${st.error && st.status !== 'conectado' ? `<small style="color:var(--bad)">${esc(st.error)}</small>` : ''}`;
       $$('[data-wa]', box).forEach((b) => (b.onclick = async () => {
         if (b.dataset.wa === 'logout' && !(await confirmDlg('¿Desvincular este número? Los avisos por WhatsApp dejarán de salir hasta que vuelvas a escanear el QR.'))) return;
-        b.disabled = true; waDraw(b.dataset.wa);
+        b.disabled = true; waDraw(b.dataset.wa, slot);
       }));
     };
     waDraw();
-    waTimer = setInterval(() => { if (!$('#waBox')) return clearInterval(waTimer); if (f.wa_provider.value === 'qr') waDraw(); }, 2500);
+    waTimer = setInterval(() => { if (!$('[data-wabox]')) return clearInterval(waTimer); if (f.wa_provider.value === 'qr') waDraw(); }, 2500);
+    // líneas 2 y 3: se muestran solo si están activadas
+    const lines = () => { $$('[data-line]', f).forEach((d) => { const k = d.dataset.line; const cb = f[k.replace(/^(sms|wa)(\d)$/, '$1$2_enabled')]; d.hidden = cb ? !cb.checked : false; }); };
+    lines(); f.addEventListener('change', lines);
+    for (const i of [2, 3]) if (f[`sms${i}_mode`]) f[`sms${i}_mode`].value = it[`sms${i}_mode`] || 'cloud';
     const showHide = () => $$('[data-show]', f).forEach((d) => { const [k, val] = d.dataset.show.split('='); d.hidden = f[k].value !== val; });
     showHide();
     f.addEventListener('change', showHide);
@@ -4596,6 +4617,7 @@ async function viewSettings(v) {
       const body = Object.fromEntries(new FormData(f));
       body.notif_enabled = f.notif_enabled.checked ? '1' : '0';
       body.smtp_secure = f.smtp_secure.checked ? '1' : '0';
+      for (const k of ['sms2_enabled', 'sms3_enabled', 'wa2_enabled', 'wa3_enabled']) if (f[k]) body[k] = f[k].checked ? '1' : '0';
       const m2 = {};
       $$('[data-mx]', f).forEach((c) => { const [ev, ch] = c.dataset.mx.split('.'); (m2[ev] ||= {})[ch] = c.checked ? 1 : 0; });
       body.notif_matrix = m2;
