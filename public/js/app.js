@@ -1682,15 +1682,18 @@ async function routeDetail(id) {
     const d = modal('Cerrar ruta del día', `<form id="rcF" class="stack">
       <p style="margin:0">Se cierra la ruta de <b>${esc(r.driver_name || 'el repartidor')}</b> tal como está:</p>
       <ul style="margin:0"><li><b>${del}</b> entregados y <b>${fail}</b> no entregados quedan registrados.</li>
-        <li><b>${left.length}</b> parada(s) sin visitar regresan a <b>pendientes</b>, sin repartidor, para volver a asignarlas.</li></ul>
+        <li><b>${left.length}</b> parada(s) sin visitar regresan a <b>pendientes</b>, sin repartidor.</li></ul>
       ${loaded ? `<div class="offline-bar">${loaded} paquete(s) ya estaban cargados en la unidad: recógelos o regístralos de vuelta en el almacén.</div>` : ''}
-      <label class="f">Reprogramar las pendientes para<input type="date" name="date" value="${tom}" /></label>
+      <fieldset class="ch-line"><legend>¿Qué hacer con las ${left.length} sin visitar?</legend>
+        <label class="row" style="gap:8px"><input type="radio" name="mode" value="re" checked /> <span class="grow">Reprogramar para</span><input type="date" name="date" value="${tom}" style="width:auto" /></label>
+        <label class="row" style="gap:8px"><input type="radio" name="mode" value="keep" /> <span>Cerrar sin reprogramar <small class="muted">(quedan pendientes con su fecha actual, para asignarlas después)</small></span></label>
+      </fieldset>
       <label class="f">Motivo (opcional)<input name="reason" placeholder="Ej. el repartidor se retiró por enfermedad" /></label>
     </form>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn bad" id="rcGo">Cerrar ruta</button>' });
     $('#rcGo', d.el).onclick = async () => {
       const f = $('#rcF', d.el);
       try {
-        const x = await POST(`/api/routes/${r.id}/close`, { date: f.date.value, reason: f.reason.value });
+        const x = await POST(`/api/routes/${r.id}/close`, { date: f.mode.value === 're' ? f.date.value : null, reason: f.reason.value });
         toast(`Ruta cerrada: ${x.delivered} entregados · ${x.returned} regresan a pendientes${x.date ? ' para el ' + x.date : ''}`, 'ok');
         d.close(); m.close(); render();
       } catch (er) { toast(er.message, 'bad'); }
