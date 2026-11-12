@@ -4551,7 +4551,7 @@ async function viewSettings(v) {
     box.innerHTML = `<form id="nf" class="stack">
       <div class="card stack">
         <label class="switch"><input type="checkbox" name="notif_enabled" ${it.notif_enabled === '1' ? 'checked' : ''} /><span></span><div><b>Avisos automáticos activados</b><br><small class="muted">Se envían al registrar el pedido, al cargarlo en la camioneta, cuando el repartidor va en camino, al entregar y si no se pudo entregar.</small></div></label>
-        <label class="switch"><input type="checkbox" name="drv_phone_today" ${it.notif_driver_phone_date === today() ? 'checked' : ''} /><span></span><div><b>Hoy: SMS y WhatsApp desde el teléfono del repartidor</b><br><small class="muted">Solo por hoy, el servidor no manda SMS ni WhatsApp automáticos; la app del repartidor le propone mandarlos desde su celular al ir a cada parada y al registrar la entrega. El correo sigue saliendo. Mañana vuelve solo a lo normal.</small></div></label>
+        <label class="switch"><input type="checkbox" name="drv_phone_today" ${it.notif_driver_phone_date === 'siempre' || it.notif_driver_phone_date === today() ? 'checked' : ''} /><span></span><div><b>SMS y WhatsApp desde el teléfono del repartidor</b><br><small class="muted">El servidor no manda SMS ni WhatsApp automáticos; la app del repartidor le propone mandarlos desde su celular, con el texto escrito, al ir a cada parada y al registrar la entrega. El correo sigue saliendo.</small></div></label>
         <div class="grid g2"><label class="f">URL pública de la app<input name="public_url" value="${esc(it.public_url)}" placeholder="${esc(location.origin)}" />
           <small class="muted">Se usa en los enlaces de rastreo y comprobante que recibe el cliente. Debe ser accesible desde internet (https).</small></label>
           <label class="f">Código de país para teléfonos<input name="phone_country" value="${esc(it.phone_country)}" inputmode="numeric" /><small class="muted">52 = México. Los teléfonos de 10 dígitos se completan con este código.</small></label></div>
@@ -4662,7 +4662,7 @@ async function viewSettings(v) {
       e.preventDefault();
       const body = Object.fromEntries(new FormData(f));
       body.notif_enabled = f.notif_enabled.checked ? '1' : '0';
-      body.notif_driver_phone_date = f.drv_phone_today.checked ? today() : '';
+      body.notif_driver_phone_date = f.drv_phone_today.checked ? 'siempre' : '';
       delete body.drv_phone_today;
       body.smtp_secure = f.smtp_secure.checked ? '1' : '0';
       for (const k of ['sms2_enabled', 'sms3_enabled', 'wa2_enabled', 'wa3_enabled']) if (f[k]) body[k] = f[k].checked ? '1' : '0';
@@ -4738,7 +4738,7 @@ function smsLink(phone, text = '') {
 }
 const arrivingText = (s) => `Hola ${firstName(s.customer_name || '')}, soy ${firstName(store.user.name)} de ${SETTINGS.company_name || 'Sovime Mensajería'}. Estamos llegando a su domicilio ahora con su Modem Telnor ${s.tracking_code}.`;
 // Día de "avisos desde el teléfono del repartidor": la app le propone mandar el aviso desde su celular
-const driverPhoneDay = () => SETTINGS.notif_driver_phone_date && SETTINGS.notif_driver_phone_date === today();
+const driverPhoneDay = () => SETTINGS.notif_driver_phone_date === 'siempre' || (!!SETTINGS.notif_driver_phone_date && SETTINGS.notif_driver_phone_date === today());
 function notifyFromPhone(s, kind, extra = '') {
   const phone = s.customer_phone;
   if (!driverPhoneDay() || !phone) return Promise.resolve();
@@ -4748,7 +4748,7 @@ function notifyFromPhone(s, kind, extra = '') {
     : `${who} Pasamos a entregar su Modem Telnor ${s.tracking_code} y no fue posible${extra ? ' (' + extra + ')' : ''}. Responda este mensaje para reprogramar la entrega.`;
   return new Promise((done) => {
     const m = modal(kind === 'arriving' ? 'Avisa al cliente que vas llegando' : kind === 'delivered' ? 'Avisa al cliente que ya se entregó' : 'Avisa al cliente que no se pudo entregar', `
-      <p class="muted" style="margin-top:0">Hoy los avisos salen <b>desde tu teléfono</b>. Elige cómo mandarlo; el texto ya va escrito.</p>
+      <p class="muted" style="margin-top:0">Los avisos salen <b>desde tu teléfono</b>. Elige cómo mandarlo; el texto ya va escrito.</p>
       <div class="card" style="padding:10px 12px;font-size:14px">${esc(text)}</div>
       <div class="row" style="gap:8px;margin-top:12px"><a class="btn primary lg grow" target="_blank" rel="noopener" href="${esc(waLink(phone, text))}">${icon('chat')} WhatsApp</a>
         <a class="btn lg grow" href="${esc(smsLink(phone, text))}">${icon('mail')} SMS</a></div>`,

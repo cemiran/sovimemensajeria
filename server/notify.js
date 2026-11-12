@@ -93,7 +93,8 @@ function queueEvent(event, orderId, extra = {}, { force = false, channels = null
     const { o, s, vars } = d;
     if (s.notif_enabled !== '1' && !force) return 0;
     // ese día los SMS y WhatsApp los manda el repartidor desde su teléfono (el correo sigue saliendo)
-    const driverDay = !force && s.notif_driver_phone_date && s.notif_driver_phone_date === new Date().toLocaleDateString('en-CA');
+    // "siempre" = de forma permanente; una fecha = solo ese día
+    const driverDay = !force && (s.notif_driver_phone_date === 'siempre' || (s.notif_driver_phone_date && s.notif_driver_phone_date === new Date().toLocaleDateString('en-CA')));
     // "Repartidor cerca" solo una vez por pedido
     if (event === 'proximo' && !force && db.prepare("SELECT 1 FROM messages WHERE order_id=? AND event='proximo' LIMIT 1").get(o.id)) return 0;
     const mx = matrix(s)[event] || {};
