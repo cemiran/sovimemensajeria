@@ -200,6 +200,7 @@ app.get(
       where.push('u.active = ?');
       args.push(Number(active));
     }
+    where.push('u.deleted_at IS NULL');
     if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
     if (q) {
       where.push('(u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)');
@@ -370,7 +371,23 @@ app.delete(
       db.prepare('SELECT COUNT(*) n FROM routes WHERE driver_id=?').get(u.id).n +
       db.prepare('SELECT COUNT(*) n FROM evidences WHERE driver_id=?').get(u.id).n +
       db.prepare('SELECT COUNT(*) n FROM inventory_movements WHERE user_id=?').get(u.id).n;
-    if (used) throw new HttpError(409, 'Este usuario tiene historial (pedidos, rutas o movimientos). Desactívalo en lugar de eliminarlo.');
+    if (used) {
+      // con historial: no se puede borrar el renglón (pedidos, entregas y rutas lo citan), se elimina la cuenta
+      const held = db.prepare("SELECT COUNT(*) n FROM serials WHERE holder_id=? AND status IN ('disponible','asignado')").get(u.id).n
+        + (db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE user_id=?').get(u.id).n || 0);
+      if (held) throw new HttpError(409, `${u.name} todavía tiene ${held} equipo(s) en su custodia: regrésalos al almacén o pásalos a otro repartidor antes de eliminarlo.`);
+      const open = db.prepare("SELECT COUNT(*) n FROM orders WHERE driver_id=? AND status IN ('asignado','cargado')").get(u.id).n;
+      if (open) throw new HttpError(409, `${u.name} tiene ${open} pedido(s) asignados o cargados: reasígnalos o cierra su ruta antes de eliminarlo.`);
+      tx(() => {
+        db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE driver_id=? AND status IN ('planificada','en_curso')").run(u.id);
+        db.prepare('UPDATE warehouses SET supervisor_id=NULL WHERE supervisor_id=?').run(u.id);
+        // el correo queda libre para volver a usarse; ya no puede entrar
+        db.prepare("UPDATE users SET active=0, can_deliver=0, deleted_at=datetime('now'), token_version=token_version+1, email=? WHERE id=?").run(`eliminado-${u.id}-${u.email}`, u.id);
+        db.prepare('DELETE FROM driver_locations WHERE driver_id=?').run(u.id);
+      });
+      audit(req, 'usuario.baja', `${u.email} (con historial: se conserva su nombre en pedidos y entregas)`);
+      return res.json({ ok: true, kept_history: true });
+    }
     tx(() => {
       db.prepare('DELETE FROM driver_locations WHERE driver_id=?').run(u.id);
       db.prepare('UPDATE audit_log SET user_id=NULL WHERE user_id=?').run(u.id);

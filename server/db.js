@@ -319,6 +319,8 @@ CREATE TABLE IF NOT EXISTS certificates (
 addCols('users', [['trusted_cert_folio', 'TEXT'], ['trusted_cert_issuer', 'TEXT'], ['trusted_cert_expires', 'TEXT'], ['trusted_cert_file', 'TEXT'],
   ['trainings_json', 'TEXT'], ['vehicle_id', 'INTEGER']]);
 addCols('routes', [['vehicle_id', 'INTEGER'], ['check_id', 'INTEGER']]);
+// usuario eliminado que tenía historial: la cuenta ya no existe para operar, su nombre se conserva en pedidos y entregas
+addCols('users', [['deleted_at', 'TEXT']]);
 addCols('customers', [['external_id', 'TEXT'], ['phone_alt', 'TEXT'], ['colonia', 'TEXT'], ['geo_quality', 'TEXT']]);
 db.exec('CREATE INDEX IF NOT EXISTS idx_customers_ext ON customers(external_id)');
 addCols('orders', [['shipment_type', "TEXT NOT NULL DEFAULT 'general'"], ['temp_min', 'REAL'], ['temp_max', 'REAL'], ['requires_seal', 'INTEGER NOT NULL DEFAULT 0'], ['seal_number', 'TEXT']]);

@@ -4261,7 +4261,7 @@ async function userPanel(id) {
       <div class="sec-row"><div>${icon('key')}</div><div class="grow"><b>Restablecer contraseña</b><br><small class="muted">Genera una contraseña temporal y cierra sus sesiones abiertas.</small></div><button class="btn" id="rst">Restablecer</button></div>
       <div class="sec-row"><div>${icon('logout')}</div><div class="grow"><b>Cerrar todas sus sesiones</b><br><small class="muted">Útil si perdió el teléfono. Tendrá que volver a entrar.</small></div><button class="btn" id="kick" ${self ? 'disabled' : ''}>Cerrar sesiones</button></div>
       <div class="sec-row"><div>${icon(u.active ? 'pause' : 'check')}</div><div class="grow"><b>${u.active ? 'Desactivar cuenta' : 'Reactivar cuenta'}</b><br><small class="muted">${u.active ? 'Ya no podrá entrar. Su historial se conserva.' : 'Podrá volver a entrar con su contraseña.'}</small></div><button class="btn ${u.active ? 'bad' : 'ok'}" id="tog" ${self ? 'disabled' : ''}>${u.active ? 'Desactivar' : 'Reactivar'}</button></div>
-      <div class="sec-row danger"><div>${icon('trash')}</div><div class="grow"><b>Eliminar usuario</b><br><small class="muted">Solo si nunca operó (sin pedidos, rutas ni movimientos). Si tiene historial, desactívalo.</small></div><button class="btn bad" id="del" ${self ? 'disabled' : ''}>Eliminar</button></div>
+      <div class="sec-row danger"><div>${icon('trash')}</div><div class="grow"><b>Eliminar usuario</b><br><small class="muted">Ya no podrá entrar ni aparecerá en las listas, y su correo queda libre. Si ya operó, su nombre se conserva en sus pedidos, entregas y bitácora. Antes debe regresar los equipos que traiga y no tener pedidos asignados.</small></div><button class="btn bad" id="del" ${self ? 'disabled' : ''}>Eliminar</button></div>
       ${self ? '<p class="muted" style="margin:0"><small>No puedes desactivar, cerrar sesiones ni eliminar tu propia cuenta.</small></p>' : ''}
     </div></div>
     <div data-pane="act" hidden><div class="timeline" style="margin-top:14px">${u.activity.length ? u.activity.map((a) => `<div><b>${esc(ACTION[a.action] || a.action)}</b> <small class="muted">${fmtDT(a.created_at)}</small>${a.detail ? `<br><small>${esc(a.detail)}</small>` : ''}</div>`).join('') : '<p class="muted">Sin actividad registrada.</p>'}</div></div>`,
@@ -4295,7 +4295,7 @@ async function userPanel(id) {
     catch (e) { toast(e.message, 'bad'); }
   };
   $('#del', m.el).onclick = async () => {
-    if (!(await confirmDlg(`¿Eliminar definitivamente a ${u.name}? Esta acción no se puede deshacer.`))) return;
+    if (!(await confirmDlg(`¿Eliminar a ${u.name}? Ya no podrá entrar a la app. Esta acción no se puede deshacer.`))) return;
     try { await api('DELETE', '/api/users/' + id); toast('Usuario eliminado', 'ok'); m.close(); render(); }
     catch (e) { toast(e.message, 'bad'); }
   };
