@@ -108,6 +108,8 @@ async function api(method, url, body) {
     headers: { 'Content-Type': 'application/json', ...(store.token ? { Authorization: 'Bearer ' + store.token } : {}), ...(canDeliver() && driverMode() ? { 'X-As-Driver': '1' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  const renew = res.headers.get('X-Renew-Token');
+  if (renew) store.token = renew; // la sesión se renueva sola mientras se usa la app
   if (res.status === 401 && url !== '/api/auth/login') {
     store.token = null;
     store.user = null;
@@ -292,7 +294,25 @@ function navUrl(s, app) {
   if (app === 'waze') return exactPin(s) ? `https://waze.com/ul?ll=${s.lat},${s.lng}&navigate=yes` : `https://waze.com/ul?q=${encodeURIComponent(navAddr(s))}&navigate=yes`;
   return `https://www.google.com/maps/dir/?api=1&travelmode=driving&dir_action=navigate&destination=${encodeURIComponent(navDest(s))}`;
 }
-// app con la que navega este teléfono (se recuerda por dispositivo): google (recomendado), waze o app
+// Abre la navegación en la APP de mapas del teléfono (más estable que una página web):
+// Android → Google Maps navegando; iPhone → Google Maps si está instalado, si no Apple Maps (viene en todo iPhone)
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+function openNav(s, app) {
+  const dest = navDest(s);
+  const apple = `https://maps.apple.com/?daddr=${encodeURIComponent(dest)}&dirflg=d`;
+  if (app === 'waze') { location.href = navUrl(s, 'waze'); return; }
+  if (app === 'apple') { location.href = apple; return; }
+  if (typeof IS_IOS !== 'undefined' && IS_IOS) {
+    const t = Date.now();
+    location.href = `comgooglemaps://?daddr=${encodeURIComponent(dest)}&directionsmode=driving`;
+    // si Google Maps no está instalado, la página sigue visible: se abre Apple Maps
+    setTimeout(() => { if (document.visibilityState === 'visible' && Date.now() - t < 3000) location.href = apple; }, 1500);
+    return;
+  }
+  if (IS_ANDROID) { location.href = `google.navigation:q=${encodeURIComponent(dest)}&mode=d`; return; }
+  window.open(navUrl(s, 'google'), '_blank', 'noopener');
+}
+// app con la que navega este teléfono (se recuerda por dispositivo): google (recomendado), waze, apple o app
 const navPref = () => { try { return localStorage.getItem('navApp') || 'google'; } catch { return 'google'; } };
 function gmapsUrl(stops) {
   const pts = stops.filter((s) => s.lat != null || s.address);
@@ -5163,7 +5183,7 @@ async function viewMyRoute(v) {
   });
   // Navegar: abre Google Maps (o Waze) directo; "Mapa de la app" usa el navegador interno
   $('#topbar-nav-pref')?.remove();
-  $('.topbar .actions', v)?.insertAdjacentHTML('afterbegin', `<label class="row" id="topbar-nav-pref" style="gap:4px" title="Con qué app navegar en este teléfono"><small class="muted">Navegar con</small><select id="navSel" style="width:auto"><option value="google">Google Maps</option><option value="waze">Waze</option><option value="app">Mapa de la app</option></select></label>`);
+  $('.topbar .actions', v)?.insertAdjacentHTML('afterbegin', `<label class="row" id="topbar-nav-pref" style="gap:4px" title="Con qué app navegar en este teléfono"><small class="muted">Navegar con</small><select id="navSel" style="width:auto"><option value="google">Google Maps</option><option value="waze">Waze</option>${IS_IOS ? '<option value="apple">Apple Maps</option>' : ''}<option value="app">Mapa de la app</option></select></label>`);
   if ($('#navSel')) { $('#navSel').value = navPref(); $('#navSel').onchange = (e) => { try { localStorage.setItem('navApp', e.target.value); } catch {} toast(`Navegarás con ${e.target.selectedOptions[0].text}`, 'ok'); }; }
   $$('[data-nav]', v).forEach((a) => (a.onclick = (e) => {
     const app = navPref();
@@ -5176,7 +5196,7 @@ async function viewMyRoute(v) {
       const mins = p && st.lat != null ? Math.max(3, Math.round((haversineM(p, st) * (Number(SETTINGS.road_factor) || 1.35)) / 1000 / (Number(SETTINGS.avg_speed_kmh) || 22) * 60)) : 15;
       POST(`/api/orders/${st.id}/arriving`, { minutes: mins }).catch(() => {});
     }
-    window.open(navUrl(st, app), '_blank', 'noopener');
+    openNav(st, app);
   }));
   // "Estoy aquí": el repartidor fija la ubicación del cliente con su GPS
   $$('[data-here]', v).forEach((b) => (b.onclick = async () => {
@@ -5250,8 +5270,8 @@ async function viewNavigate(v, id) {
         ${s.customer_phone_alt ? `<a class="btn lg" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional: ${esc(s.customer_phone_alt)}">${icon('phone')} 2</a>` : ''}
       </div>
       <div class="row" style="margin-top:8px">
-        <a class="btn sm grow primary" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}" title="Con tráfico en tiempo real">${icon('nav')} Google Maps</a>
-        <a class="btn sm grow" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>
+        <a class="btn sm grow primary" data-open-nav="google" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}" title="Con tráfico en tiempo real">${icon('nav')} Google Maps</a>
+        <a class="btn sm grow" data-open-nav="waze" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>${IS_IOS ? '<a class="btn sm grow" data-open-nav="apple" href="#">Apple Maps</a>' : ''}
         <a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>
       <details class="nav-steps"><summary>Indicaciones paso a paso</summary><ol id="nSteps"><li class="muted">Calculando…</li></ol></details>
       ${after ? `<small class="muted">Después: ${esc(after.customer_name)} · ${esc(after.address)}</small>` : ''}
@@ -5270,6 +5290,7 @@ async function viewNavigate(v, id) {
   let routeAt = 0;
   let arrived = false;
   let notified = false;
+  $$('[data-open-nav]', v).forEach((a) => (a.onclick = (e) => { e.preventDefault(); openNav(s, a.dataset.openNav); }));
   map.on('dragstart', () => (follow = false));
   $('#recenter').onclick = () => { follow = true; if (me) map.setView([me.lat, me.lng], Math.max(map.getZoom(), 16)); };
   const osrm = (/router\.project-osrm\.org/.test(SETTINGS.osrm_url || '') || !SETTINGS.osrm_url ? 'https://routing.openstreetmap.de/routed-car' : SETTINGS.osrm_url).replace(/\/+$/, '');

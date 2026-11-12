@@ -1,5 +1,5 @@
 // Service worker: shell offline + red primero para la API.
-const CACHE = 'um-v6';
+const CACHE = 'um-v7';
 const SHELL = ['/', '/index.html', '/css/app.css', '/js/app.js', '/manifest.json', '/icon.svg', '/img/logo.png', '/img/icon-192.png'];
 
 self.addEventListener('install', (e) => {

@@ -100,6 +100,8 @@ function auth(...roles) {
       if (req.headers['x-as-driver'] === '1' && u.can_deliver && u.role !== 'repartidor') { u.real_role = u.role; u.role = 'repartidor'; }
       if ((p.tv || 0) !== u.token_version) return res.status(401).json({ error: 'Tu sesión se cerró, vuelve a entrar' });
       if (roles.length && !roles.includes(u.role)) return res.status(403).json({ error: 'Sin permiso' });
+      // renovación: si la sesión tiene más de 1 hora, se entrega una nueva (la app la guarda sola)
+      if (Date.now() / 1000 - (p.iat || 0) > 3600) res.setHeader('X-Renew-Token', signToken({ id: u.id, role: u.real_role || u.role, token_version: u.token_version }));
       delete u.token_version;
       u.office = u.role === 'admin' ? null : Number(u.office_id || db.prepare('SELECT id FROM warehouses WHERE is_default = 1').get()?.id || 0) || null;
       u.supervises = db.prepare('SELECT id FROM warehouses WHERE supervisor_id = ? AND active = 1').all(u.id).map((r) => r.id);
@@ -128,7 +130,9 @@ function tempPassword() {
   const abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from(crypto.randomBytes(10), (b) => abc[b % abc.length]).join('');
 }
-const signToken = (u) => jwt.sign({ sub: u.id, role: u.role, tv: u.token_version || 0 }, JWT_SECRET, { expiresIn: '12h' });
+// Sesión de 30 días que se renueva sola mientras se usa (el repartidor no vuelve a entrar a media ruta).
+// Se cierra de inmediato si se desactiva el usuario o se cambia su contraseña (token_version).
+const signToken = (u) => jwt.sign({ sub: u.id, role: u.role, tv: u.token_version || 0 }, JWT_SECRET, { expiresIn: '30d' });
 const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, last_login, must_change_password, created_at';
 
 app.post(
