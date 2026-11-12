@@ -1387,6 +1387,45 @@ app.get('/api/my/available', auth('repartidor'), wrap((req, res) => {
     plain: prods.filter((p) => !p.serialized).map((p) => ({ product_id: p.id, name: p.name, sku: p.sku, unit: p.unit, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
   });
 }));
+// Pedidos del cliente que el repartidor puede reactivar / tomar para entregar ahora (de su oficina)
+app.get('/api/my/customer-orders/:cid', auth('repartidor'), wrap((req, res) => {
+  const c = db.prepare('SELECT id FROM customers WHERE id=?').get(Number(req.params.cid));
+  if (!c) throw new HttpError(404, 'Cliente no encontrado');
+  if (req.user.office && customerOffice(c.id) !== req.user.office) return res.json({ rows: [], other_office: true });
+  const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.scheduled_date, o.driver_id, o.notes, u.name driver_name,
+      (SELECT GROUP_CONCAT(i.qty || ' × ' || p.name, ', ') FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = o.id) items
+    FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.customer_id=? AND o.status <> 'entregado' ORDER BY o.id DESC`).all(c.id);
+  const live = rows.filter((o) => o.status !== 'cancelado');
+  const delivered = db.prepare("SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status='entregado'").get(c.id).n;
+  // cancelados: solo si el cliente no tiene otro pedido vivo ni entregado (no revivir duplicados)
+  const out = live.length || delivered ? live : rows.slice(0, 1);
+  res.json({ rows: out.map((o) => ({ ...o, mine: o.driver_id === req.user.id && ['asignado', 'cargado'].includes(o.status) })), delivered });
+}));
+app.post('/api/my/orders/:id/reactivate', auth('repartidor'), wrap((req, res) => {
+  const me = req.user;
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(req.params.id));
+  if (!o) throw new HttpError(404, 'Pedido no encontrado');
+  if (me.office && customerOffice(o.customer_id) !== me.office) throw new HttpError(403, 'Este cliente es de otra oficina');
+  if (o.status === 'entregado') throw new HttpError(409, 'Este pedido ya fue entregado');
+  if (o.status === 'cargado' && o.driver_id !== me.id) throw new HttpError(409, 'Este pedido ya va cargado en la unidad de otro repartidor');
+  if (['asignado', 'cargado'].includes(o.status) && o.driver_id === me.id && o.scheduled_date === today()) return res.json({ id: o.id, tracking_code: o.tracking_code, already: true });
+  const before = o.status;
+  tx(() => {
+    if (o.status === 'cancelado') {
+      // vuelve a apartar su existencia (al cancelarse regresó al inventario)
+      for (const it of db.prepare('SELECT product_id, qty FROM order_items WHERE order_id=?').all(o.id)) {
+        const st = db.prepare('SELECT stock FROM products WHERE id=?').get(it.product_id)?.stock || 0;
+        if (st >= it.qty) moveStock(it.product_id, 'salida', it.qty, `Pedido ${o.tracking_code} reactivado`, me.id);
+      }
+    }
+    db.prepare(`UPDATE orders SET status='pendiente', notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?`)
+      .run(`Reactivado por ${me.name} para entrega inmediata (${before})`, o.id);
+  });
+  const r = assignOrdersTo(req, { id: me.id, name: me.name }, [o.id], today());
+  if (!r.assigned) throw new HttpError(409, r.skipped[0]?.reason || 'No se pudo tomar el pedido');
+  audit(req, 'pedidos.reactivar', `${o.tracking_code}: ${before} → entrega inmediata por ${me.name}`);
+  res.json({ id: o.id, tracking_code: o.tracking_code });
+}));
 // El repartidor arma una entrega en campo: elige cliente y productos de lo que él trae (S/N o cantidad).
 // Se crea el pedido ya cargado en su unidad y se agrega a su ruta del día, listo para registrar la entrega.
 app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {

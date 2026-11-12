@@ -5529,7 +5529,9 @@ function viewNewCustomer(v) {
   $('#dcq').q.oninput = (e) => { clearTimeout(t); t = setTimeout(() => search(e.target.value), 350); };
 
   async function pickForCustomer(cid) {
-    const [c, mine, myRoute, av] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null), GET('/api/my/available').catch(() => ({ serialized: [], plain: [] }))]);
+    const [c, mine, myRoute, av, co] = await Promise.all([GET('/api/customers/' + cid), GET('/api/my/custody'), GET('/api/my/route').catch(() => null), GET('/api/my/available').catch(() => ({ serialized: [], plain: [] })), GET('/api/my/customer-orders/' + cid).catch(() => ({ rows: [] }))]);
+    // pedidos del cliente que no están en su ruta de hoy: se pueden reactivar / tomar y entregar ya
+    const takeable = co.rows.filter((o) => !o.mine);
     const mineOpen = (myRoute?.stops || []).filter((s) => s.customer_id === c.id && ['asignado', 'cargado'].includes(s.status));
     // lo suyo + lo abierto (cualquier repartidor puede entregarlo)
     const items = (mine.items || []).map((it) => ({ ...it, serials: it.serials.map((x) => ({ ...x, pool: false })), own: it.qty, pool: 0 }));
@@ -5555,7 +5557,11 @@ function viewNewCustomer(v) {
         <div class="row" style="margin-top:6px;gap:6px">${c.phone ? `<a class="btn sm" href="tel:${esc(c.phone)}">${icon('phone')} ${esc(c.phone)}</a>` : ''}${c.phone_alt ? `<a class="btn sm" href="tel:${esc(c.phone_alt)}">${icon('phone')} ${esc(c.phone_alt)}</a>` : ''}</div></div>
 </div>
       ${mineOpen.length ? `<div class="info-bar" style="margin-top:10px">${icon('box')} Ya tienes ${mineOpen.length === 1 ? 'un pedido' : mineOpen.length + ' pedidos'} para este cliente en tu ruta: ${mineOpen.map((s) => `<button class="btn sm primary" data-dlv="${s.id}">Entregar ${esc(s.tracking_code)}</button>`).join(' ')}</div>` : ''}
-      <h3>¿Qué le vas a entregar?</h3>
+      ${takeable.length ? `<div class="card" style="margin-top:10px;border:2px solid var(--brand,#1d5a96);padding:12px"><b>${icon('box')} Este cliente ya tiene pedido</b>
+        <small class="muted" style="display:block;margin:2px 0 8px">Reactívalo para entregarlo ahora: se conserva su número de guía.</small>
+        ${takeable.map((o) => `<div class="row between" style="gap:8px;padding:6px 0;border-top:1px solid var(--border)"><span class="grow"><b class="mono">${esc(o.tracking_code)}</b> ${badge(o.status)}<br><small class="muted">${esc(o.items || '')}${o.driver_name ? ' · ' + esc(o.driver_name) : ''} · ${esc(o.scheduled_date || '')}</small></span>
+          <button class="btn primary" data-react="${o.id}">${icon('check')} ${['fallido', 'cancelado'].includes(o.status) ? 'Reactivar y entregar' : 'Tomar y entregar ahora'}</button></div>`).join('')}</div>` : ''}
+      <h3>${takeable.length || mineOpen.length ? '¿O le entregas algo distinto?' : 'Activar entrega inmediata: ¿qué le vas a entregar?'}</h3>
       ${!assigned ? `<div class="info-bar" style="margin-bottom:8px">${icon('info')} No tienes inventario asignado. Elige lo que traes en tu unidad de lo disponible en almacén 📦, o escribe/escanea el S/N del equipo.</div>` : ''}
       ${items.length ? `<div class="row" style="margin-bottom:8px"><input id="dcPq" class="grow" placeholder="Buscar producto o S/N" autocomplete="off" /></div>
         <div id="dcSel" class="muted" style="margin-bottom:6px">Nada seleccionado</div>` : ''}
@@ -5570,9 +5576,16 @@ function viewNewCustomer(v) {
         <div id="dcNewList"></div><small class="muted">Se registra en el inventario al crear la entrega.</small></div>
       ${snProducts.length ? `<button class="btn block" id="dcScan">${icon('scan')} Escanear el S/N del equipo</button>` : ''}
       <label class="f" style="margin-top:8px">Nota<input id="dcNote" maxlength="300" placeholder="Ej. instalación, cambio de equipo…" /></label>
-      <button class="btn primary lg block" id="dcGo" style="margin-top:10px">${icon('sign')} Crear entrega y registrar</button></div>`;
+      <button class="btn primary lg block" id="dcGo" style="margin-top:10px">${icon('sign')} ${takeable.length || mineOpen.length ? 'Crear entrega nueva y registrar' : 'Activar entrega inmediata'}</button></div>`;
     box.scrollIntoView({ behavior: 'smooth' });
     $$('[data-dlv]', box).forEach((b) => (b.onclick = () => (location.hash = '#/deliver/' + b.dataset.dlv)));
+    $$('[data-react]', box).forEach((b) => (b.onclick = async () => {
+      const o = takeable.find((x) => String(x.id) === b.dataset.react);
+      if (!(await confirmDlg(`¿${['fallido', 'cancelado'].includes(o.status) ? 'Reactivar' : 'Tomar'} el pedido ${o.tracking_code} y entregarlo ahora? Pasa a tu ruta de hoy.`))) return;
+      b.disabled = true;
+      try { const x = await POST(`/api/my/orders/${o.id}/reactivate`, {}); toast(`Pedido ${x.tracking_code} listo para entregar`, 'ok'); location.hash = '#/deliver/' + x.id; }
+      catch (er) { toast(er.message, 'bad'); b.disabled = false; }
+    }));
     // buscar dentro de lo que trae: por nombre / SKU del producto o por número de serie
     const updSel = () => {
       const nSn = $$('[data-sn]', box).filter((x) => x.checked).length;
