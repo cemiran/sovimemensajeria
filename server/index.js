@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { db, tx, getSettings, DATA_DIR, UPLOAD_DIR } = require('./db');
 const { haversine, optimizeRoute } = require('./routing');
+const gmaps = require('./gmaps');
 const notify = require('./notify');
 
 // ---------- Configuración ----------
@@ -2530,6 +2531,15 @@ async function geocodeAddress({ address, colonia, city, id = 0 }) {
   const anchor = await colonyAnchor(col, city, cityName, st, bias, inBox, id);
   const house = (g) => g.cat === 'building' || ['house', 'building', 'apartments', 'detached', 'commercial'].includes(g.type) || ['building', 'house'].includes(g.addr) || (g.cat === 'place' && g.type === 'house');
   let street1 = null;
+  if (street && gmaps.enabled()) {
+    try {
+      const g = await gmaps.geocode(`${street}${col ? ', Col. ' + col : ''}, ${cityName}, ${st}, México`);
+      if (g && inBox(g) && !(anchor && haversine(g, anchor) > (g.quality === 'exacta' ? 2.5 : 1.2))) {
+        if (g.quality === 'exacta' && !g.partial) return { lat: g.lat, lng: g.lng, quality: 'exacta' };
+        if (g.quality === 'exacta' || g.quality === 'calle') street1 = { lat: g.lat, lng: g.lng, quality: 'calle' };
+      }
+    } catch (e) { console.error('google geocode', e.message); }
+  }
   for (const [q] of tries) {
     try {
       let g, quality;
@@ -3276,9 +3286,31 @@ function stopsFor(orderIds) {
     )
     .all(...orderIds);
 }
-function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings, startTime }) {
+// puntos de la matriz: almacén + paradas con ubicación (mismo orden que usa el optimizador)
+const matrixPoints = (depot, stops) => [depot, ...stops.filter((x) => Number.isFinite(x.lat) && Number.isFinite(x.lng))];
+const googleMatrix = (depot, stops) => (gmaps.enabled() ? gmaps.cachedMatrix(matrixPoints(depot, stops)) : null);
+const gmPending = new Set();
+function googleRefine(rid) {
+  if (!gmaps.enabled() || gmPending.has(rid)) return;
+  gmPending.add(rid);
+  setTimeout(async () => {
+    try {
+      const r = db.prepare('SELECT * FROM routes WHERE id=?').get(rid);
+      if (!r || r.status !== 'planificada') return;
+      const ids = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(rid).map((x) => x.id);
+      const done = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(rid).c;
+      if (!ids.length || done) return;
+      const depot = { lat: r.depot_lat, lng: r.depot_lng };
+      if (!(await gmaps.fillMatrix(matrixPoints(depot, stopsFor(ids))))) return;
+      persistRoute({ routeId: rid, driverId: r.driver_id, date: r.date, depot, orderIds: ids, settings: getSettings(), noRefine: true });
+    } catch (e) { console.error('googleRefine', e.message); } finally { gmPending.delete(rid); }
+  }, 1500);
+}
+function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings, startTime, noRefine }) {
   const stops = stopsFor(orderIds);
-  const opt = optimizeRoute(depot, stops, settings, { startTime });
+  const matrix = googleMatrix(depot, stops);
+  const opt = optimizeRoute(depot, stops, settings, { startTime, matrix });
+  if (!matrix && !noRefine && orderIds.length && gmaps.enabled()) setImmediate(() => { const id = routeId || db.prepare('SELECT route_id FROM orders WHERE id=?').get(orderIds[0])?.route_id; if (id) googleRefine(id); });
   return tx(() => {
     let rid = routeId;
     if (!rid) {
@@ -3667,7 +3699,7 @@ app.post(
 app.post(
   '/api/routes/:id/optimize',
   auth(),
-  wrap((req, res) => {
+  wrap(async (req, res) => {
     const r = db.prepare('SELECT * FROM routes WHERE id=?').get(req.params.id);
     if (!r) throw new HttpError(404, 'No encontrada');
     if (req.user.role === 'repartidor' && r.driver_id !== req.user.id) throw new HttpError(403, 'Sin permiso');
@@ -3679,7 +3711,9 @@ app.post(
     const from = req.body.lat != null ? { lat: Number(req.body.lat), lng: Number(req.body.lng) } : { lat: r.depot_lat, lng: r.depot_lng };
     const now = new Date();
     const startTime = done ? `${now.getHours()}:${now.getMinutes()}` : undefined;
-    const opt = optimizeRoute(from, stopsFor(pending), s, { startTime });
+    const stops = stopsFor(pending);
+    if (gmaps.enabled()) await gmaps.fillMatrix(matrixPoints(from, stops)).catch(() => false);
+    const opt = optimizeRoute(from, stops, s, { startTime, matrix: googleMatrix(from, stops) });
     tx(() => {
       const upd = db.prepare('UPDATE orders SET stop_seq=?, eta=?, leg_km=? WHERE id=?');
       for (const st of opt.sequence) upd.run(done + st.seq, st.eta, st.leg_km, st.id);
@@ -3933,6 +3967,11 @@ function integrationView() {
   return out;
 }
 app.get('/api/integrations', auth('admin'), (req, res) => res.json(integrationView()));
+app.get('/api/google/status', auth('admin'), (req, res) => res.json(gmaps.status()));
+app.post('/api/google/test', auth('admin'), wrap(async (req, res) => {
+  try { const r = await gmaps.test(); audit(req, 'google.prueba', 'Conexión con Google Maps correcta'); res.json({ ok: true, ...r, status: gmaps.status() }); }
+  catch (e) { res.status(400).json({ error: e.message, status: gmaps.status() }); }
+}));
 // WhatsApp vinculado por QR
 const wa = require('./wa');
 const waSlot = (req) => Number(req.query.slot || req.body?.slot) || 1;

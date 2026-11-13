@@ -4685,7 +4685,7 @@ const TPL_VARS = ['{cliente}', '{guia}', '{empresa}', '{fecha}', '{eta}', '{repa
 async function viewSettings(v) {
   const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'general';
   const [s, it] = await Promise.all([GET('/api/settings'), GET('/api/integrations')]);
-  const tabs = [['general', 'General', 'cog'], ['entrega', 'Entrega y evidencia', 'sign'], ['notif', 'Notificaciones', 'chat'], ['sheets', 'Google Sheets', 'sheet']];
+  const tabs = [['general', 'General', 'cog'], ['entrega', 'Entrega y evidencia', 'sign'], ['notif', 'Notificaciones', 'chat'], ['sheets', 'Google Sheets', 'sheet'], ['maps', 'Google Maps', 'route']];
   v.innerHTML = topbar('Configuración') + `<div class="tabs">${tabs.map(([k, l, i]) => `<a href="#/settings?tab=${k}" class="${k === tab ? 'on' : ''}">${icon(i)} ${l}</a>`).join('')}</div><div id="stab"></div>`;
   const box = $('#stab');
   const saveInt = async (body, msg = 'Guardado') => { try { const r = await PUT('/api/integrations', body); Object.assign(it, r); toast(msg, 'ok'); return r; } catch (e) { toast(e.message, 'bad'); throw e; } };
@@ -4858,6 +4858,60 @@ async function viewSettings(v) {
       await saveInt(body, 'Notificaciones guardadas');
       SETTINGS.phone_country = body.phone_country;
     };
+  }
+
+  if (tab === 'maps') {
+    const draw = async () => {
+      const g = await GET('/api/google/status');
+      const bar = (a, b) => `<div class="bar" style="height:6px;background:var(--line);border-radius:4px;overflow:hidden"><i style="display:block;height:100%;width:${Math.min(100, (a / (b || 1)) * 100)}%;background:${a >= b ? 'var(--bad)' : 'var(--brand)'}"></i></div>`;
+      box.innerHTML = `<div class="grid g-main">
+        <form class="card stack" id="gmf">
+          <h2>${icon('route')} Google Maps</h2>
+          <div class="${g.enabled ? 'chip ok' : 'chip'}" style="align-self:flex-start">${g.enabled ? '✅ Conectado: pins y rutas con Google' : g.configured ? 'Clave guardada (desactivada en práctica)' : 'Sin conectar: se usa OpenStreetMap'}</div>
+          <label class="f">Clave de API de Google Maps<input name="google_maps_key" value="${esc(it.google_maps_key || '')}" placeholder="AIza…" autocomplete="off" spellcheck="false" />
+            <small class="muted">Se guarda solo en el servidor y se muestra oculta. Para quitarla, borra el campo y guarda.</small></label>
+          <div class="grid g2">
+            <label class="f">Tope diario: domicilios a ubicar<input name="google_daily_geocode" type="number" min="0" value="${esc(it.google_daily_geocode || g.caps.geocode)}" /></label>
+            <label class="f">Tope diario: tramos de ruta<input name="google_daily_elements" type="number" min="0" value="${esc(it.google_daily_elements || g.caps.elements)}" /></label>
+          </div>
+          <small class="muted">Al llegar al tope, ese día se sigue con OpenStreetMap (gratis). Una ruta de 30 paradas usa unos 900 tramos la primera vez; después se reutilizan por 60 días.</small>
+          <div class="stack" style="gap:6px">
+            <small>Hoy: <b>${g.today.geocode}</b> de ${g.caps.geocode} domicilios</small>${bar(g.today.geocode, g.caps.geocode)}
+            <small>Hoy: <b>${g.today.elements}</b> de ${g.caps.elements} tramos</small>${bar(g.today.elements, g.caps.elements)}
+          </div>
+          ${g.last_error ? `<div class="login-err" style="font-weight:600">Último error de Google: ${esc(g.last_error)}</div>` : ''}
+          <div class="row"><button class="btn primary">Guardar</button><button type="button" class="btn" id="gmT" ${g.configured ? '' : 'disabled'}>${icon('send')} Probar conexión</button><button type="button" class="btn" id="gmR" ${g.enabled ? '' : 'disabled'} title="Vuelve a buscar con Google los clientes cuyo pin es aproximado (colonia, calle o ciudad)">Re-ubicar pins aproximados</button></div>
+        </form>
+        <div class="card stack"><h2>Qué mejora</h2>
+          <ul class="steps-list">
+            <li><b>Pins:</b> al crear o importar clientes se busca primero en Google; el resultado se valida contra su colonia y, si no cuadra, se usa OpenStreetMap como antes.</li>
+            <li><b>Diseño de rutas:</b> el orden de las paradas y las horas estimadas usan los tiempos de manejo reales de Google entre cada punto (al asignar, planificar u <b>Optimizar</b>).</li>
+            <li><b>Navegación:</b> el repartidor sigue abriendo la app de Google Maps; con pins correctos llega al domicilio correcto.</li>
+          </ul>
+          <h2>Cómo obtener la clave</h2>
+          <ol class="steps-list">
+            <li>Entra a <b>console.cloud.google.com</b>, crea un proyecto (p. ej. “Sovime”) y activa la <b>facturación</b>.</li>
+            <li>En <b>APIs y servicios → Biblioteca</b> habilita <b>Geocoding API</b> y <b>Routes API</b>.</li>
+            <li>En <b>Credenciales → Crear credenciales → Clave de API</b>. Restríngela: por <b>dirección IP</b> (la de tu servidor) y solo a esas 2 APIs.</li>
+            <li>En <b>Facturación → Presupuestos</b> crea una alerta (p. ej. 20 USD al mes).</li>
+            <li>Pega la clave aquí, guarda y toca <b>Probar conexión</b>.</li></ol></div></div>`;
+      const f = $('#gmf');
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        await saveInt({ google_maps_key: f.google_maps_key.value.trim(), google_daily_geocode: f.google_daily_geocode.value, google_daily_elements: f.google_daily_elements.value }, 'Google Maps guardado');
+        draw();
+      };
+      $('#gmT').onclick = async (e) => {
+        const b = e.currentTarget; b.disabled = true;
+        try { const r = await POST('/api/google/test', {}); toast(`Google responde ✅ Ubicó: ${r.geocode.address || 'domicilio de prueba'} (${r.geocode.quality}) · tramo de prueba ${r.leg.km} km / ${r.leg.min} min`, 'ok'); }
+        catch (er) { toast(er.message, 'bad'); } finally { draw(); }
+      };
+      $('#gmR').onclick = async () => {
+        if (!(await confirmDlg('Se volverán a buscar con Google los clientes con pin aproximado, poco a poco y respetando el tope diario. Solo se cambia el pin si el nuevo es más preciso. ¿Continuar?'))) return;
+        await POST('/api/customers/geocode', { refine: true }); toast('Re-ubicación iniciada en segundo plano', 'ok');
+      };
+    };
+    await draw();
   }
 
   if (tab === 'sheets') {

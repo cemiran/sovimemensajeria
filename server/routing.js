@@ -57,7 +57,7 @@ function cost(order, m, stops, opts) {
   for (const i of order) {
     const leg = m[prev][i];
     d += leg;
-    t += (leg / opts.speed) * 60;
+    t += opts.tm ? opts.tm[prev][i] : (leg / opts.speed) * 60;
     const s = stops[i - 1];
     const ws = toMin(s.window_start);
     const we = toMin(s.window_end);
@@ -144,7 +144,8 @@ function orOpt(order, evalFn) {
  * @param stops [{id, lat, lng, priority, window_start, window_end}]
  * @param settings {avg_speed_kmh, service_minutes, road_factor, start_time}
  */
-function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, startTime } = {}) {
+// matrix (opcional): { km, min } por calle y en minutos (Google), en el orden [almacén, ...paradas con ubicación]
+function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, startTime, matrix } = {}) {
   const opts = {
     speed: Number(settings.avg_speed_kmh) || 22,
     service: Number(settings.service_minutes) || 6,
@@ -155,11 +156,15 @@ function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, sta
   const valid = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
   const invalid = stops.filter((s) => !(Number.isFinite(s.lat) && Number.isFinite(s.lng)));
   const points = [depot, ...valid];
-  const m = buildMatrix(points, opts.roadFactor);
+  const real = matrix && matrix.km.length === points.length ? matrix : null;
+  // con tiempos reales se optimiza por minutos de manejo (convertidos a km equivalentes) y se reportan km reales
+  const kmM = real ? real.km : buildMatrix(points, opts.roadFactor);
+  const m = real ? real.min.map((row) => row.map((x) => (x * opts.speed) / 60)) : kmM;
+  if (real) opts.tm = real.min;
 
   // Distancia en el orden original (como llegaron los pedidos) para medir el ahorro.
   const originalOrder = valid.map((_, i) => i + 1);
-  const originalKm = pathLength(originalOrder, m, returnToDepot);
+  const originalKm = pathLength(originalOrder, kmM, returnToDepot);
 
   // Prioridad alta va primero; dentro de cada grupo se optimiza.
   const high = originalOrder.filter((i) => valid[i - 1].priority === 'alta');
@@ -180,9 +185,9 @@ function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, sta
   let totalKm = 0;
   let late = 0;
   const sequence = full.map((i, idx) => {
-    const leg = m[prev][i];
+    const leg = kmM[prev][i];
     totalKm += leg;
-    t += (leg / opts.speed) * 60;
+    t += real ? real.min[prev][i] : (leg / opts.speed) * 60;
     const s = valid[i - 1];
     const ws = toMin(s.window_start);
     const we = toMin(s.window_end);
@@ -194,7 +199,7 @@ function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, sta
     prev = i;
     return { id: s.id, seq: idx + 1, leg_km: +leg.toFixed(2), eta, on_time: onTime };
   });
-  if (returnToDepot && full.length) totalKm += m[prev][0];
+  if (returnToDepot && full.length) totalKm += kmM[prev][0];
   const estMinutes = t - opts.startMin;
 
   return {
@@ -205,6 +210,7 @@ function optimizeRoute(depot, stops, settings = {}, { returnToDepot = false, sta
     saving_pct: originalKm > 0 ? +(((originalKm - totalKm) / originalKm) * 100).toFixed(1) : 0,
     est_minutes: Math.round(estMinutes),
     late_stops: late,
+    source: real ? 'google' : 'aprox',
   };
 }
 

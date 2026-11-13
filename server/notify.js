@@ -11,7 +11,7 @@ const EVENTS = {
   fallido: 'No entregado',
 };
 const CHANNELS = ['sms', 'whatsapp', 'email'];
-const SECRET_KEYS = ['twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass', 'sms2_pass', 'sms3_pass'];
+const SECRET_KEYS = ['google_maps_key', 'twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass', 'sms2_pass', 'sms3_pass'];
 const INTEGRATION_KEYS = [
   'public_url', 'phone_country', 'notif_enabled', 'notif_matrix', 'notif_test_to', 'notif_test_email',
   ...Object.keys(EVENTS).map((e) => 'tpl_' + e),
@@ -19,6 +19,7 @@ const INTEGRATION_KEYS = [
   'sms_android_mode', 'sms_android_url', 'sms_android_user', 'sms_android_pass', 'sms_android_name', 'sms_daily_cap_per_device',
   ...[2, 3].flatMap((i) => [`sms${i}_enabled`, `sms${i}_name`, `sms${i}_mode`, `sms${i}_url`, `sms${i}_user`, `sms${i}_pass`]),
   'notif_driver_phone_date', 'wa_provider', 'wa_token', 'wa_phone_id', 'wa_daily_cap', 'wa1_name', 'wa2_name', 'wa3_name', 'wa2_enabled', 'wa3_enabled',
+  'google_maps_key', 'google_daily_geocode', 'google_daily_elements',
   'email_provider', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass', 'smtp_from',
   'sheets_enabled', 'sheets_url', 'sheets_secret',
 ];
