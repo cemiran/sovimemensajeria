@@ -3391,10 +3391,10 @@ function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings
       );
     }
     const upd = db.prepare(
-      "UPDATE orders SET route_id=?, driver_id=?, stop_seq=?, eta=?, leg_km=?, status=CASE WHEN status='pendiente' THEN 'asignado' ELSE status END WHERE id=?"
+      "UPDATE orders SET route_id=?, driver_id=?, stop_seq=?, eta=?, leg_km=?, status=CASE WHEN status='pendiente' THEN 'asignado' ELSE status END, scheduled_date=COALESCE((SELECT date FROM routes WHERE id=?), scheduled_date) WHERE id=?"
     );
-    for (const s of opt.sequence) upd.run(rid, driverId, s.seq, s.eta, s.leg_km, s.id);
-    for (const id of opt.unlocated) upd.run(rid, driverId, 999, null, null, id);
+    for (const s of opt.sequence) upd.run(rid, driverId, s.seq, s.eta, s.leg_km, rid, s.id);
+    for (const id of opt.unlocated) upd.run(rid, driverId, 999, null, null, rid, id);
     return { route_id: rid, ...opt };
   });
 }
@@ -3643,8 +3643,10 @@ app.post('/api/routes/:id/date', auth(...STAFF), wrap((req, res) => {
 function releaseOverdue() {
   try {
     const t = today();
-    const rows = db.prepare(`SELECT id, status, scheduled_date FROM orders WHERE scheduled_date < ?
-      AND (status IN ('asignado','cargado') OR (status='fallido' AND (route_id IS NOT NULL OR driver_id IS NOT NULL)))`).all(t);
+    // cuenta la fecha de su RUTA (no la fecha original del pedido): lo que está en una ruta de hoy o futura no se toca
+    const rows = db.prepare(`SELECT o.id, o.status, COALESCE(r.date, o.scheduled_date) scheduled_date FROM orders o LEFT JOIN routes r ON r.id = o.route_id
+      WHERE COALESCE(r.date, o.scheduled_date) < ?
+      AND (o.status IN ('asignado','cargado') OR (o.status='fallido' AND (o.route_id IS NOT NULL OR o.driver_id IS NOT NULL)))`).all(t);
     const routes = db.prepare("SELECT COUNT(*) n FROM routes WHERE date < ? AND status IN ('planificada','en_curso')").get(t).n;
     if (!rows.length && !routes) return;
     tx(() => {
