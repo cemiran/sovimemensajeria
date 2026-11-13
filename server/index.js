@@ -3644,20 +3644,41 @@ function releaseOverdue() {
   try {
     const t = today();
     // cuenta la fecha de su RUTA (no la fecha original del pedido): lo que está en una ruta de hoy o futura no se toca
-    const rows = db.prepare(`SELECT o.id, o.status, COALESCE(r.date, o.scheduled_date) scheduled_date FROM orders o LEFT JOIN routes r ON r.id = o.route_id
+    const rows = db.prepare(`SELECT o.id, o.status, o.driver_id, COALESCE(r.date, o.scheduled_date) scheduled_date FROM orders o LEFT JOIN routes r ON r.id = o.route_id
       WHERE COALESCE(r.date, o.scheduled_date) < ?
       AND (o.status IN ('asignado','cargado') OR (o.status='fallido' AND (o.route_id IS NOT NULL OR o.driver_id IS NOT NULL)))`).all(t);
     const routes = db.prepare("SELECT COUNT(*) n FROM routes WHERE date < ? AND status IN ('planificada','en_curso')").get(t).n;
     if (!rows.length && !routes) return;
+    // sin entregar (ni intentados) con repartidor activo: pasan a la ruta de HOY del mismo repartidor
+    const active = (id) => id && db.prepare('SELECT 1 FROM users WHERE id=? AND active=1 AND deleted_at IS NULL').get(id);
+    const carry = new Map();
+    for (const o of rows) if (o.status !== 'fallido' && active(o.driver_id)) { if (!carry.has(o.driver_id)) carry.set(o.driver_id, []); carry.get(o.driver_id).push(o); }
+    const free = rows.filter((o) => !(o.status !== 'fallido' && active(o.driver_id)));
+    const s = getSettings();
+    let carried = 0;
+    for (const [did, list] of carry) {
+      try {
+        tx(() => {
+          const drv = db.prepare('SELECT name FROM users WHERE id=?').get(did);
+          const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(did, t);
+          const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
+          const addNote = db.prepare("UPDATE orders SET notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?");
+          for (const o of list) addNote.run(`Sin entregar el ${o.scheduled_date}: sigue con ${drv?.name || 'su repartidor'} el ${t}`, o.id);
+          persistRoute({ routeId: r?.id, name: `Ruta ${drv?.name || ''} ${t}`.trim(), driverId: did, date: t, depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}, did), orderIds: [...keep, ...list.map((o) => o.id)], settings: s });
+        });
+        carried += list.length;
+      } catch (e) { console.error('releaseOverdue carry', e.message); free.push(...list); }
+    }
     tx(() => {
-      for (const o of rows) {
+      for (const o of free) {
         db.prepare(`UPDATE orders SET status=?, route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL,
           notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?`)
           .run(o.status === 'fallido' ? 'fallido' : 'pendiente', `${o.status === 'fallido' ? 'No entregado' : 'Sin entregar'} el ${o.scheduled_date}: liberado para reasignar`, o.id);
       }
       db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE date < ? AND status IN ('planificada','en_curso')").run(t);
     });
-    if (rows.length) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('pedidos.liberar', `${rows.length} pedido(s) no exitosos en su fecha quedaron libres para reasignar`);
+    if (free.length) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('pedidos.liberar', `${free.length} pedido(s) no exitosos en su fecha quedaron libres para reasignar`);
+    if (carried) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('pedidos.siguen', `${carried} pedido(s) sin entregar siguen con su repartidor en la ruta del ${t}`);
   } catch (e) { console.error('releaseOverdue', e.message); }
 }
 // Programar varios pedidos en un rango de días para un repartidor: se reparten por cercanía, N por día
@@ -4678,4 +4699,5 @@ if (require.main === module) {
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }
 app.releaseOverdue = releaseOverdue;
+app.internal = { persistRoute, depotOf };
 module.exports = app;
