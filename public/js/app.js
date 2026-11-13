@@ -1255,7 +1255,7 @@ async function orderDetail(id) {
   $('#ntf', m.el)?.addEventListener('click', () => notifyDialog(o));
   $$('[data-rcpt]', m.el).forEach((b) => (b.onclick = () => {
     const e = o.evidences.find((x) => String(x.id) === b.dataset.rcpt);
-    openReceipt({ ...e, tracking_code: o.tracking_code, customer_name: o.customer_name, address: o.address, customer_phone: o.customer_phone, cod_amount: o.cod_amount, public_link: o.public_link, driver_name: e.kind === 'mostrador' ? '' : o.driver_name, serials_text: e.result === 'entregado' ? o.serials.map((x) => x.serial).join(', ') : '' });
+    openReceipt({ ...e, tracking_code: o.tracking_code, customer_name: o.customer_name, address: o.address, customer_phone: o.customer_phone, cod_amount: o.cod_amount, public_link: o.public_link, driver_name: e.driver_name || (e.kind === 'mostrador' ? '' : o.driver_name), serials_text: e.result === 'entregado' ? o.serials.map((x) => x.serial).join(', ') : '' });
   }));
   if (o.lat != null || staff) {
     const has = o.lat != null;
@@ -4973,10 +4973,48 @@ function openReceipt(e) {
     wide: true,
     footer: `${e.public_link ? `<button class="btn" id="cpL">${icon('copy')} Copiar enlace</button><a class="btn" target="_blank" href="${esc(e.public_link)}">${icon('ext')} Ver como cliente</a>` : ''}
       ${e.customer_phone && e.public_link ? `<a class="btn" target="_blank" href="${esc(waLink(e.customer_phone, `Hola, este es el comprobante de entrega de tu paquete ${e.tracking_code}: ${e.public_link}`))}">${icon('chat')} Enviar por WhatsApp</a>` : ''}
+      ${!driverMode() && e.id ? `<label class="btn" title="Subir o tomar la foto de la entrega">${icon('camera')} ${e.photo_path ? 'Cambiar foto' : 'Agregar foto'}<input type="file" accept="image/*" id="rcPh" hidden /></label>` : ''}
+      ${store.user.role === 'admin' && !driverMode() && e.id ? `<button class="btn" id="rcWho">${icon('person')} Quién entregó</button>` : ''}
       ${e.serials_text && !driverMode() ? `<button class="btn" id="fixSN" title="Corregir un número de serie capturado por error">${icon('edit')} Corregir S/N</button>` : ''}
       <button class="btn primary" id="prR">${icon('print')} Imprimir</button>`,
   });
   $('#cpL', m.el)?.addEventListener('click', () => copyText(e.public_link));
+  // foto de la entrega: subirla o tomarla (oficina)
+  $('#rcPh', m.el)?.addEventListener('change', async (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    if (e.photo_path && !(await confirmDlg('Esta entrega ya tiene foto. ¿Reemplazarla?'))) { ev.target.value = ''; return; }
+    try {
+      const photo = await compressImage(f, 1600, 0.8);
+      const r = await POST(`/api/evidences/${e.id}/photo`, { photo });
+      e.photo_path = r.photo_path;
+      $('#rcpt', m.el).outerHTML = receiptHTML(e);
+      toast('Foto guardada en la entrega', 'ok');
+    } catch (er) { toast(er.message, 'bad'); }
+  });
+  // quién entregó (o mostrador): la entrega se le cuenta a esa persona
+  $('#rcWho', m.el)?.addEventListener('click', async () => {
+    const us = await GET('/api/users').then((r) => (Array.isArray(r) ? r : r.rows || []).filter((u) => u.active)).catch(() => []);
+    const ROLE_TXT = { admin: 'Administrador', despachador: 'Despachador', repartidor: 'Repartidor' };
+    const d = modal('¿Quién entregó?', `<form id="whoF" class="stack">
+      <label class="f">Empleado que entregó<select name="driver_id"><option value="">— Nadie / sin asignar —</option>${us.map((u) => `<option value="${u.id}" ${u.id === e.driver_id ? 'selected' : ''}>${esc(u.name)} · ${ROLE_TXT[u.role] || u.role}</option>`).join('')}</select></label>
+      <fieldset class="ch-line"><legend>Tipo de entrega</legend>
+        <label class="row" style="gap:8px"><input type="radio" name="kind" value="ruta" ${e.kind !== 'mostrador' ? 'checked' : ''} /> <span>En ruta (en el domicilio del cliente)</span></label>
+        <label class="row" style="gap:8px"><input type="radio" name="kind" value="mostrador" ${e.kind === 'mostrador' ? 'checked' : ''} /> <span>En mostrador (el cliente pasó a la oficina)</span></label></fieldset>
+      <small class="muted">La entrega se le cuenta a esa persona en el Tablero, el ranking y la hoja de Google.</small></form>`,
+      { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="whoGo">Guardar</button>' });
+    $('#whoGo', d.el).onclick = async () => {
+      const f = $('#whoF', d.el);
+      try {
+        await api('PUT', '/api/evidences/' + e.id, { driver_id: f.driver_id.value || null, kind: f.kind.value });
+        const u = us.find((x) => String(x.id) === f.driver_id.value);
+        e.driver_id = u?.id || null; e.driver_name = u?.name || ''; e.kind = f.kind.value;
+        $('#rcpt', m.el).outerHTML = receiptHTML(e);
+        toast(`Entrega asignada a ${u?.name || 'nadie'}${e.kind === 'mostrador' ? ' (mostrador)' : ''}`, 'ok');
+        d.close();
+      } catch (er) { toast(er.message, 'bad'); }
+    };
+  });
   // corregir S/N mal capturado: el correcto queda en el pedido, el comprobante y la hoja de Google
   $('#fixSN', m.el)?.addEventListener('click', () => {
     const list = String(e.serials_text).split(',').map((x) => x.trim()).filter(Boolean);

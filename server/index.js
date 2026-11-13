@@ -1477,6 +1477,19 @@ app.put('/api/evidences/:id', auth('admin'), wrap((req, res) => {
   set('receiver_id_doc', b.receiver_id_doc, 'identificación');
   set('notes', b.notes, 'notas');
   set('reason', b.reason, 'motivo');
+  // quién entregó (cualquier empleado activo) y si fue en ruta o en mostrador: la entrega se le cuenta a esa persona
+  if (b.driver_id !== undefined || b.kind !== undefined) {
+    const kind = b.kind === 'mostrador' ? 'mostrador' : b.kind === 'ruta' ? 'ruta' : e.kind;
+    const did = b.driver_id === '' || b.driver_id === null ? null : b.driver_id !== undefined ? Number(b.driver_id) : e.driver_id;
+    const u = did ? db.prepare('SELECT id, name FROM users WHERE id=? AND deleted_at IS NULL').get(did) : null;
+    if (did && !u) throw new HttpError(400, 'Empleado no encontrado');
+    if (did !== e.driver_id || kind !== e.kind) {
+      const prev = e.driver_id ? db.prepare('SELECT name FROM users WHERE id=?').get(e.driver_id)?.name : null;
+      db.prepare('UPDATE evidences SET driver_id=?, kind=? WHERE id=?').run(did, kind, e.id);
+      if (e.result === 'entregado' && did) db.prepare('UPDATE orders SET driver_id=? WHERE id=?').run(did, e.order_id);
+      ch.push(`entregó: ${prev || '—'}${e.kind === 'mostrador' ? ' (mostrador)' : ''} → ${u?.name || '—'}${kind === 'mostrador' ? ' (mostrador)' : ''}`);
+    }
+  }
   if (b.created_at) {
     const d = new Date(b.created_at);
     if (isNaN(d)) throw new HttpError(400, 'Fecha y hora inválidas');
@@ -2684,7 +2697,7 @@ function loadOrder(id) {
   o.serials = serialsOfOrder(o.id);
   o.serial_needs = orderSerialNeeds(o.id);
   o.serials_missing = o.serial_needs.reduce((a, r) => a + r.missing, 0);
-  o.evidences = db.prepare('SELECT * FROM evidences WHERE order_id = ? ORDER BY id DESC').all(o.id);
+  o.evidences = db.prepare('SELECT e.*, u.name driver_name FROM evidences e LEFT JOIN users u ON u.id = e.driver_id WHERE e.order_id = ? ORDER BY e.id DESC').all(o.id);
   return o;
 }
 function canSee(user, order) {

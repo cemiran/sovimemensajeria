@@ -325,7 +325,7 @@ function sheetRow(evidenceId) {
     e.tracking_code, iso, e.cname, fmtPhone(e.ctelnor), fmtPhone(e.cphone), fmtPhone(e.cphone2),
     db.prepare('SELECT GROUP_CONCAT(serial, \', \') sn FROM (SELECT serial FROM serials WHERE order_id = ? ORDER BY serial)').get(e.order_id)?.sn || '',
     e.address, counter ? 'Mostrador' : zoneOf(s, e.clat, e.clng),
-    ok ? 'Entregado' : 'No Entregado', counter ? 'Mostrador' : e.dname || '', note,
+    ok ? 'Entregado' : 'No Entregado', counter ? (e.dname ? `${e.dname} (mostrador)` : 'Mostrador') : e.dname || '', note,
     e.receiver_name || '', e.receiver_relation || '', e.receiver_id_doc || '', counter ? 'Mostrador' : 'En ruta', e.reason || '', e.rname || '',
     e.lat ?? '', e.lng ?? '', e.distance_to_customer_m ?? '', e.barcode_verified ? 'Sí' : 'No', e.cod_amount || 0,
     up(e.photo_path), up(e.signature_path), trackLink(s, e.public_token),
