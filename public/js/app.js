@@ -236,6 +236,34 @@ async function afterCustomerMoved(s, onEdit) {
   }
   onEdit();
 }
+// Quitar clientes de una ruta: liberarlos, reprogramarlos o cancelarlos (administrador)
+function removeFromRoute(r, ids, after) {
+  if (!ids.length) return;
+  const stops = r.stops.filter((x) => ids.includes(x.id));
+  const loaded = stops.filter((x) => x.status === 'cargado').length;
+  const tom = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toLocaleDateString('en-CA'); })();
+  const d = modal(ids.length === 1 ? 'Quitar cliente de la ruta' : `Quitar ${ids.length} clientes de la ruta`, `<form id="rmF" class="stack">
+    <div class="table-wrap" style="max-height:180px"><table><tbody>${stops.map((x) => `<tr><td><b>${esc(x.customer_name)}</b><br><small class="muted">${esc(x.tracking_code)} · ${esc(x.address || '')}</small></td><td>${badge(x.status)}</td></tr>`).join('')}</tbody></table></div>
+    ${loaded ? `<div class="offline-bar">${loaded} paquete(s) ya están cargados en la unidad de ${esc(r.driver_name || 'el repartidor')}: pídele que los regrese al almacén.</div>` : ''}
+    <fieldset class="ch-line"><legend>¿Qué hacer con ${ids.length === 1 ? 'el pedido' : 'los pedidos'}?</legend>
+      <label class="row" style="gap:8px"><input type="radio" name="mode" value="liberar" checked /> <span>Liberar <small class="muted">(queda pendiente, sin repartidor, para asignarlo a quien elijas)</small></span></label>
+      <label class="row" style="gap:8px"><input type="radio" name="mode" value="fecha" /> <span class="grow">Reprogramar para</span><input type="date" name="date" value="${tom}" style="width:auto" /></label>
+      ${store.user.role === 'admin' ? '<label class="row" style="gap:8px"><input type="radio" name="mode" value="cancelar" /> <span>Cancelar el pedido <small class="muted">(regresan existencias y S/N)</small></span></label>' : ''}
+    </fieldset>
+    <label class="f">Motivo (opcional)<input name="reason" placeholder="Ej. el cliente pidió cambiar de día" /></label>
+    <small class="muted">La ruta de ${esc(r.driver_name || 'el repartidor')} se reordena sola.</small></form>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn bad" id="rmOk">Quitar de la ruta</button>' });
+  $('#rmOk', d.el).onclick = async () => {
+    const f = $('#rmF', d.el);
+    const md = f.mode.value;
+    if (md === 'cancelar' && !(await confirmDlg(`¿Cancelar ${ids.length} pedido(s)?`))) return;
+    try {
+      await PUT('/api/routes/' + r.id, { remove_order_ids: ids, remove_mode: md, remove_date: md === 'fecha' ? f.date.value : null, reason: f.reason.value });
+      toast(`${ids.length} cliente(s) quitados de la ruta${md === 'fecha' ? ' y reprogramados al ' + f.date.value : md === 'cancelar' ? ' y cancelados' : ': quedan pendientes'}`, 'ok');
+      d.close(); after();
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+}
 function wireStopEdit(map, mk, s, onEdit) {
   mk.on('popupopen', (e) => {
     const el = e.popup.getElement();
@@ -1747,17 +1775,19 @@ async function routeDetail(id) {
         <div class="row" style="margin-top:10px;gap:6px;align-items:flex-end"><label class="f grow" style="margin:0">Fecha de la ruta<input type="date" id="rdate2" value="${esc(r.date)}" /></label><button class="btn" id="rdateGo" title="Mueve la ruta completa a otra fecha (si aún no tiene entregas)">📅 Cambiar fecha</button></div>
         <label class="f" style="margin-top:10px">Reasignar repartidor<select id="rdrv">${drivers.map((d) => `<option value="${d.id}" ${d.id === r.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
       </div>
-      <div class="table-wrap" style="max-height:520px"><table><thead><tr><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
-        ${r.stops.map((s) => `<tr><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.appointment_time ? `<br><small><b>⏰ ${esc(s.appointment_time)}</b> acordada</small>` : s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
-          <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar de la ruta">${icon('x')}</button>` : ''}</td></tr>`).join('')}
-      </tbody></table></div>
+      <div><div class="row" id="rmBar" style="gap:6px;margin-bottom:6px" hidden><b id="rmN"></b><button class="btn sm bad" id="rmGo">${icon('x')} Quitar de la ruta</button><button class="btn sm ghost" id="rmNone">Desmarcar</button></div>
+      <div class="table-wrap" style="max-height:520px"><table><thead><tr><th><input type="checkbox" id="rmAll" title="Marcar todos los pendientes" /></th><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
+        ${r.stops.map((s) => `<tr><td>${['asignado', 'cargado'].includes(s.status) ? `<input type="checkbox" data-rms="${s.id}" />` : ''}</td><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.appointment_time ? `<br><small><b>⏰ ${esc(s.appointment_time)}</b> acordada</small>` : s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
+          <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar este cliente de la ruta" style="color:var(--bad)">${icon('x')} Quitar</button>` : ''}</td></tr>`).join('')}
+      </tbody></table></div></div>
     </div>`, {
     wide: true,
     footer: `${r.status !== 'completada' && r.stops.some((x) => ['asignado', 'cargado'].includes(x.status)) ? `<button class="btn bad" id="rclose" title="Reprogramar, liberar, pasar a otro repartidor o cancelar lo que falta">${icon('x')} Cerrar ruta</button>` : ''}${r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? '' : '<button class="btn bad" id="rdel">Eliminar ruta</button>'}<button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
-  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null, onEdit: () => { m.el.remove(); routeDetail(r.id); } });
+  const rdPins = [];
+  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null, onEdit: () => { m.el.remove(); routeDetail(r.id); }, collect: rdPins });
   if (r.last_lat) L.marker([r.last_lat, r.last_lng], { icon: truckIcon() }).addTo(map).bindPopup('Última posición ' + fmtDT(r.last_seen));
   $('#rdateGo', m.el).onclick = async () => {
     const d = $('#rdate2', m.el).value;
@@ -1801,7 +1831,26 @@ async function routeDetail(id) {
     };
   });
   $('#rdel', m.el)?.addEventListener('click', async () => { if (!(await confirmDlg('¿Eliminar la ruta? Los pedidos regresarán a pendientes.'))) return; try { await api('DELETE', '/api/routes/' + r.id); toast('Ruta eliminada', 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } });
-  $$('[data-rm]', m.el).forEach((b) => (b.onclick = async () => { await PUT('/api/routes/' + r.id, { remove_order_ids: [Number(b.dataset.rm)] }); m.el.remove(); routeDetail(r.id); }));
+  // quitar uno o varios clientes de la ruta
+  const reopenRd = () => { m.el.remove(); routeDetail(r.id); };
+  const rmSel = () => $$('[data-rms]', m.el).filter((c) => c.checked).map((c) => Number(c.dataset.rms));
+  const rmUpd = () => { const n = rmSel().length; $('#rmBar', m.el).hidden = !n; $('#rmN', m.el).textContent = `${n} marcado(s)`; };
+  $$('[data-rms]', m.el).forEach((c) => (c.onchange = rmUpd));
+  $('#rmAll', m.el).onchange = (e) => { $$('[data-rms]', m.el).forEach((c) => (c.checked = e.target.checked)); rmUpd(); };
+  $('#rmNone', m.el).onclick = () => { $$('[data-rms]', m.el).forEach((c) => (c.checked = false)); $('#rmAll', m.el).checked = false; rmUpd(); };
+  $('#rmGo', m.el).onclick = () => removeFromRoute(r, rmSel(), reopenRd);
+  $$('[data-rm]', m.el).forEach((b) => (b.onclick = () => removeFromRoute(r, [Number(b.dataset.rm)], reopenRd)));
+  // en el mapa: botón "Quitar de la ruta" en el globo de cada parada pendiente
+  rdPins.forEach(({ s: st, mk }) => {
+    if (!['asignado', 'cargado'].includes(st.status)) return;
+    mk.on('popupopen', (e) => {
+      const el = e.popup.getElement();
+      if ($('[data-rmp]', el)) return;
+      const row = $('.row', el) || el.querySelector('.leaflet-popup-content');
+      row.insertAdjacentHTML('beforeend', `<button class="btn sm" data-rmp="1" style="color:var(--bad)">${icon('x')} Quitar de la ruta</button>`);
+      $('[data-rmp]', el).onclick = () => { map.closePopup(); removeFromRoute(r, [st.id], reopenRd); };
+    });
+  });
 }
 
 // ================= Inventario =================

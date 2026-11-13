@@ -3863,9 +3863,28 @@ app.put(
       db.prepare('UPDATE routes SET driver_id=? WHERE id=?').run(driver_id, r.id);
       db.prepare('UPDATE orders SET driver_id=? WHERE route_id=?').run(driver_id, r.id);
     }
-    if (remove_order_ids.length)
-      for (const id of remove_order_ids)
-        db.prepare("UPDATE orders SET route_id=NULL, stop_seq=NULL, eta=NULL, driver_id=NULL, status='pendiente' WHERE id=? AND route_id=? AND status IN ('asignado','cargado')").run(id, r.id);
+    if (remove_order_ids.length) {
+      // quitar de la ruta: liberar (pendiente sin repartidor), reprogramar a otra fecha o cancelar (solo administrador)
+      const mode = ['liberar', 'fecha', 'cancelar'].includes(req.body.remove_mode) ? req.body.remove_mode : 'liberar';
+      const rdate = /^\d{4}-\d{2}-\d{2}$/.test(req.body.remove_date || '') ? req.body.remove_date : null;
+      if (mode === 'fecha' && !rdate) throw new HttpError(400, 'Elige la nueva fecha');
+      if (mode === 'cancelar' && req.user.role !== 'admin') throw new HttpError(403, 'Solo el administrador cancela pedidos');
+      const why = String(req.body.reason || '').trim().slice(0, 200);
+      const dn = db.prepare('SELECT name FROM users WHERE id=?').get(r.driver_id)?.name || 'repartidor';
+      const note = ` | Quitado de la ruta de ${dn} (${today()}, ${req.user.name})${mode === 'fecha' ? ' → ' + rdate : mode === 'cancelar' ? ': cancelado' : ''}${why ? ': ' + why : ''}`;
+      const done = [];
+      tx(() => {
+        for (const id of remove_order_ids.map(Number)) {
+          const o = db.prepare("SELECT id, tracking_code FROM orders WHERE id=? AND route_id=? AND status IN ('asignado','cargado')").get(id, r.id);
+          if (!o) continue;
+          if (mode === 'cancelar') releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado al quitarlo de la ruta`);
+          db.prepare(`UPDATE orders SET route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL, loaded_at=NULL, status=?, scheduled_date=COALESCE(?, scheduled_date),
+            notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`).run(mode === 'cancelar' ? 'cancelado' : 'pendiente', rdate, note, o.id);
+          done.push(o.tracking_code);
+        }
+      });
+      if (done.length) audit(req, 'rutas.quitar', `${r.name || 'Ruta ' + r.id}: ${done.length} quitado(s) (${mode === 'fecha' ? 'reprogramados al ' + rdate : mode === 'cancelar' ? 'cancelados' : 'liberados'}): ${done.slice(0, 10).join(', ')}${done.length > 10 ? '…' : ''}`);
+    }
     const s = getSettings();
     const keep = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado','pendiente')").all(r.id).map((x) => x.id);
     const all = [...new Set([...keep, ...add_order_ids.map(Number)])];
