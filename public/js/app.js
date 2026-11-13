@@ -2446,7 +2446,7 @@ async function orderEditor(id) {
     </fieldset>
     <fieldset class="ch-line"><legend>Productos${o.status === 'entregado' ? ' entregados' : ''}</legend>
       ${o.items.length ? o.items.map((it) => `<div class="row between" style="gap:8px;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid var(--border)">
-        <span class="grow"><b>${esc(it.name)}</b>${it.serialized ? `<br>${snOf(it.product_id).map((x) => `<span class="chip mono">${esc(x.serial)}</span>`).join(' ') || '<small class="muted">sin S/N</small>'}` : ''}</span>
+        <span class="grow"><b>${esc(it.name)}</b>${it.serialized ? `<br>${snOf(it.product_id).map((x) => `<span class="chip mono" style="gap:4px">${esc(x.serial)} <button type="button" class="btn ghost sm" data-sne="${esc(x.serial)}" title="Corregir este S/N" style="padding:0 4px">✎</button><button type="button" class="btn ghost sm" data-snx="${x.id}" data-sns="${esc(x.serial)}" title="Quitar este S/N" style="padding:0 4px;color:var(--bad)">✕</button></span>`).join(' ') || '<small class="muted">sin S/N</small>'}` : ''}</span>
         <label class="row" style="gap:4px">Cant.<input type="number" min="0" value="${it.qty}" data-iq="${it.product_id}" style="width:70px" /></label>
         ${it.serialized && snOf(it.product_id).length < it.qty ? `<button type="button" class="btn sm" data-isn="${it.product_id}">+ S/N</button>` : ''}</div>`).join('') : '<p class="muted" style="margin:0">Sin productos</p>'}
       <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"><select id="oePr" class="grow">${prods.map((p) => `<option value="${p.id}" data-s="${p.serialized ? 1 : 0}">${esc(p.name)}${p.serialized ? ' (con S/N)' : ''}</option>`).join('')}</select>
@@ -2470,6 +2470,17 @@ async function orderEditor(id) {
     try { await api('PUT', `/api/orders/${id}/items/${inp.dataset.iq}`, { qty: Number(inp.value) }); toast('Cantidad actualizada', 'ok'); reopen(); } catch (e) { toast(e.message, 'bad'); }
   }));
   $$('[data-isn]', m.el).forEach((b) => (b.onclick = () => { m.close(); assignSerialManual(o); }));
+  // quitar un S/N (también de un pedido entregado: si fue error de captura se borra; si existe, regresa al inventario)
+  $$('[data-snx]', m.el).forEach((b) => (b.onclick = async () => {
+    if (!(await confirmDlg(`¿Quitar el S/N ${b.dataset.sns} de este pedido?${o.status === 'entregado' ? ' Como el pedido está entregado, también baja una pieza de ese producto.' : ''}`))) return;
+    try { const r = await api('DELETE', `/api/orders/${id}/serials/${b.dataset.snx}`); toast(r.how === 'borrado' ? `${b.dataset.sns} borrado (era error de captura)` : `${b.dataset.sns} regresó al inventario`, 'ok'); render(); reopen(); } catch (e) { toast(e.message, 'bad'); }
+  }));
+  // corregir un S/N (error de dedo o cambiarlo por otro del inventario)
+  $$('[data-sne]', m.el).forEach((b) => (b.onclick = async () => {
+    const nv = prompt(`Corregir el S/N ${b.dataset.sne} por:`, b.dataset.sne);
+    if (!nv || nv.trim().toUpperCase() === b.dataset.sne) return;
+    try { const r = await POST(`/api/orders/${id}/serials/fix`, { old_serial: b.dataset.sne, new_serial: nv.trim().toUpperCase() }); toast(`S/N corregido${r.how === 'intercambiado' ? ' (el anterior regresó al inventario)' : ''}`, 'ok'); render(); reopen(); } catch (e) { toast(e.message, 'bad'); }
+  }));
   $('#oeAdd', m.el).onclick = async () => {
     const pid = Number($('#oePr', m.el).value), qty = Number($('#oeQty', m.el).value) || 1;
     const sn = $('#oeSn', m.el).value.trim().toUpperCase();
@@ -4975,10 +4986,12 @@ function openReceipt(e) {
       ${e.customer_phone && e.public_link ? `<a class="btn" target="_blank" href="${esc(waLink(e.customer_phone, `Hola, este es el comprobante de entrega de tu paquete ${e.tracking_code}: ${e.public_link}`))}">${icon('chat')} Enviar por WhatsApp</a>` : ''}
       ${!driverMode() && e.id ? `<label class="btn" title="Subir o tomar la foto de la entrega">${icon('camera')} ${e.photo_path ? 'Cambiar foto' : 'Agregar foto'}<input type="file" accept="image/*" id="rcPh" hidden /></label>` : ''}
       ${store.user.role === 'admin' && !driverMode() && e.id ? `<button class="btn" id="rcWho">${icon('person')} Quién entregó</button>` : ''}
+      ${store.user.role === 'admin' && !driverMode() && e.order_id ? `<button class="btn" id="rcEdit">${icon('edit')} Productos y S/N</button>` : ''}
       ${e.serials_text && !driverMode() ? `<button class="btn" id="fixSN" title="Corregir un número de serie capturado por error">${icon('edit')} Corregir S/N</button>` : ''}
       <button class="btn primary" id="prR">${icon('print')} Imprimir</button>`,
   });
   $('#cpL', m.el)?.addEventListener('click', () => copyText(e.public_link));
+  $('#rcEdit', m.el)?.addEventListener('click', () => { m.close(); orderEditor(e.order_id); });
   // foto de la entrega: subirla o tomarla (oficina)
   $('#rcPh', m.el)?.addEventListener('change', async (ev) => {
     const f = ev.target.files[0];

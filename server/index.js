@@ -1832,13 +1832,35 @@ app.delete(
   '/api/orders/:id/serials/:sid',
   auth(...STAFF),
   wrap((req, res) => {
-    const s = db.prepare("SELECT * FROM serials WHERE id=? AND order_id=? AND status='asignado'").get(req.params.sid, req.params.id);
-    if (!s) throw new HttpError(404, 'Esa serie no está asignada a este pedido');
+    const s = db.prepare('SELECT * FROM serials WHERE id=? AND order_id=?').get(req.params.sid, req.params.id);
+    if (!s) throw new HttpError(404, 'Esa serie no está en este pedido');
+    if (!officeOrders(req, [s.order_id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+    if (s.status !== 'asignado' && !(s.status === 'entregado' && req.user.role === 'admin')) throw new HttpError(409, 'Solo el administrador puede quitar un S/N ya entregado');
+    const o = db.prepare('SELECT * FROM orders WHERE id=?').get(s.order_id);
+    let how = 'liberado';
     tx(() => {
-      db.prepare("UPDATE serials SET status='disponible', order_id=NULL, assigned_at=NULL, updated_at=datetime('now') WHERE id=?").run(s.id);
-      serialEvent(s.id, 'liberado', Number(req.params.id), req.user.id, 'Quitado del pedido');
+      // S/N que solo existió por este pedido (alta al asignar, sin otro movimiento): era un error de captura y se borra
+      const otherEvents = db.prepare("SELECT COUNT(*) n FROM serial_events WHERE serial_id=? AND event NOT IN ('alta','asignado','entregado','corregido')").get(s.id).n;
+      const typo = /^Alta (al asignar|en campo)/.test(s.reference || '') && !otherEvents;
+      if (typo) {
+        db.prepare('DELETE FROM serial_events WHERE serial_id=?').run(s.id);
+        db.prepare('DELETE FROM serials WHERE id=?').run(s.id);
+        how = 'borrado';
+      } else {
+        // regresa al inventario disponible (almacén de la oficina del pedido)
+        db.prepare("UPDATE serials SET status='disponible', order_id=NULL, assigned_at=NULL, delivered_at=NULL, holder_id=NULL, held_at=NULL, open_pool=0, warehouse_id=COALESCE(warehouse_id, ?), updated_at=datetime('now') WHERE id=?").run(customerOffice(o.customer_id), s.id);
+        serialEvent(s.id, 'liberado', o.id, req.user.id, s.status === 'entregado' ? 'Quitado de un pedido entregado (corrección de administración)' : 'Quitado del pedido');
+      }
+      // pedido entregado: también baja la cantidad del producto (lo entregado fue una pieza menos)
+      if (s.status === 'entregado') {
+        const it = db.prepare('SELECT qty FROM order_items WHERE order_id=? AND product_id=?').get(o.id, s.product_id);
+        if (it && it.qty > 1) db.prepare('UPDATE order_items SET qty=qty-1 WHERE order_id=? AND product_id=?').run(o.id, s.product_id);
+        else if (it) db.prepare('DELETE FROM order_items WHERE order_id=? AND product_id=?').run(o.id, s.product_id);
+        db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(o.id);
+      }
     });
-    res.json({ ok: true, missing: missingSerialCount(Number(req.params.id)), serials: serialsOfOrder(Number(req.params.id)) });
+    audit(req, 'series.quitar', `${o.tracking_code}: ${s.serial} ${how === 'borrado' ? 'borrado (error de captura)' : 'regresó al inventario'}`);
+    res.json({ ok: true, how, missing: missingSerialCount(o.id), serials: serialsOfOrder(o.id) });
   })
 );
 
