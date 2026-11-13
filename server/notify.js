@@ -19,7 +19,7 @@ const INTEGRATION_KEYS = [
   'sms_android_mode', 'sms_android_url', 'sms_android_user', 'sms_android_pass', 'sms_android_name', 'sms_daily_cap_per_device',
   ...[2, 3].flatMap((i) => [`sms${i}_enabled`, `sms${i}_name`, `sms${i}_mode`, `sms${i}_url`, `sms${i}_user`, `sms${i}_pass`]),
   'notif_driver_phone_date', 'wa_provider', 'wa_token', 'wa_phone_id', 'wa_daily_cap', 'wa1_name', 'wa2_name', 'wa3_name', 'wa2_enabled', 'wa3_enabled',
-  'google_maps_key', 'google_daily_geocode', 'google_daily_elements',
+  'google_maps_key', 'google_daily_geocode', 'google_daily_elements', 'google_daily_routes', 'google_daily_tiles', 'google_tiles',
   'email_provider', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass', 'smtp_from',
   'sheets_enabled', 'sheets_url', 'sheets_secret',
 ];

@@ -2489,7 +2489,11 @@ async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0)
     const colS = String(col).replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªoAO]?|primera|segunda|tercera)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').replace(/^(fracc?(ionamiento)?|col(onia)?)\.?\s+/i, '').trim();
     // variantes: tal cual, sin "2a sección"/"Fracc.", y en plural o singular ("INFONAVIT PRESIDENTE" = "INFONAVIT Presidentes")
     const pl = (x) => (/s$/i.test(x) ? x.replace(/e?s$/i, '') : /[aeiou]$/i.test(x) ? x + 'S' : x + 'ES');
-    for (const v of [...new Set([col, colS, pl(colS)])].filter(Boolean)) {
+    if (gmaps.enabled()) {
+      const g = await gmaps.colonyCenter(`${colS || col}, ${cityName}, ${st}, México`);
+      if (g && inBox(g)) a = { lat: g.lat, lng: g.lng, src: 'google' };
+    }
+    for (const v of a ? [] : [...new Set([col, colS, pl(colS)])].filter(Boolean)) {
       try {
         const g = await nominatim(`${v}, ${cityName}, ${st}`, bias); await pause(1100);
         // solo una zona (colonia, fraccionamiento, barrio), no una calle que se llame igual
@@ -4002,8 +4006,33 @@ app.get('/api/settings', auth(), (req, res) => {
     if (w) Object.assign(s, { depot_name: w.name, depot_lat: String(w.lat), depot_lng: String(w.lng), office_ref: '1' });
   }
   for (const k of notify.INTEGRATION_KEYS) if (!PUBLIC_INTEGRATION.has(k)) delete s[k];
+  s.google_maps = gmaps.enabled() ? '1' : '0';
+  s.google_tiles = gmaps.tilesOn() ? '1' : '0';
   res.json(s);
 });
+// Trazo por calles de una ruta (Google; si no hay, la app deja la línea punteada)
+app.post('/api/directions/path', auth(), wrap(async (req, res) => {
+  const pts = (req.body?.points || []).map((p) => ({ lat: Number(p[0]), lng: Number(p[1]) })).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)).slice(0, 200);
+  if (pts.length < 2 || !gmaps.enabled()) return res.json({ source: 'none' });
+  const coords = [];
+  let distance = 0, duration = 0;
+  for (let i = 0; i < pts.length - 1; i += 26) {
+    const seg = await gmaps.directions(pts.slice(i, i + 27));
+    if (!seg) return res.json({ source: 'none' });
+    coords.push(...seg.coords); distance += seg.distance; duration += seg.duration;
+  }
+  res.json({ source: 'google', coords, distance, duration });
+}));
+// Navegación dentro de la app: camino e indicaciones de Google desde donde está el repartidor (formato compatible con OSRM)
+app.get('/api/directions/nav', auth(), wrap(async (req, res) => {
+  const [fl, fg] = String(req.query.from || '').split(',').map(Number);
+  const [tl, tg] = String(req.query.to || '').split(',').map(Number);
+  if (![fl, fg, tl, tg].every(Number.isFinite) || !gmaps.enabled()) return res.json({ source: 'none' });
+  const d = await gmaps.directions([{ lat: fl, lng: fg }, { lat: tl, lng: tg }], { steps: true, ttl: 3 * 60e3 });
+  if (!d) return res.json({ source: 'none' });
+  const steps = [...d.steps, { maneuver: { type: 'arrive', modifier: '', location: [tg, tl] }, text: 'Llegas a tu destino', distance: 0, name: '' }];
+  res.json({ source: 'google', distance: d.distance, duration: d.duration, geometry: { coordinates: d.coords.map(([a, b]) => [b, a]) }, legs: [{ steps }] });
+}));
 app.put(
   '/api/settings',
   auth('admin'),
@@ -4586,6 +4615,10 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
   const z = Number(req.params.z), x = Number(req.params.x), y = Number(req.params.y);
   const max = 2 ** z;
   if (![z, x, y].every(Number.isInteger) || z < 0 || z > 19 || x < 0 || y < 0 || x >= max || y >= max) return res.status(400).end();
+  if (req.query.src !== 'osm') {
+    const g = await gmaps.tile(z, x, y);
+    if (g) { res.set('Cache-Control', g.cache); return res.type(g.type).send(g.buf); }
+  }
   const file = path.join(TILE_DIR, String(z), String(x), `${y}.png`);
   try {
     const st = fs.statSync(file);

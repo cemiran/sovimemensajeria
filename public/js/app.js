@@ -215,7 +215,15 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
     if (onEdit) wireStopEdit(map, mk, s, onEdit);
     collect?.push({ s, mk });
   }
-  if (pts.length > 1) L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(tgt);
+  if (pts.length > 1) {
+    const dashed = L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(tgt);
+    // con Google: el camino real por calles reemplaza la línea punteada
+    if (SETTINGS.google_maps === '1' && pts.length <= 200) POST('/api/directions/path', { points: pts }).then((r) => {
+      if (r.source !== 'google' || !r.coords?.length || !map.hasLayer(dashed)) return;
+      const road = L.polyline(r.coords, { color, weight: 5, opacity: 0.8 });
+      tgt.removeLayer(dashed); road.addTo(tgt);
+    }).catch(() => {});
+  }
   if (fit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 15 });
   return pts;
 }
@@ -2714,8 +2722,9 @@ function warehouseForm(w) {
     const q = [f.address.value, f.city.value, 'Baja California'].filter((x) => String(x).trim()).join(', ');
     if (!f.address.value.trim()) return toast('Escribe el domicilio', 'bad');
     try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=mx&q=' + encodeURIComponent(q)).then((r) => r.json());
-      if (r[0]) { setWh({ lat: Number(r[0].lat), lng: Number(r[0].lon) }, true); toast('Ubicado: revisa el punto y ajústalo tocando el mapa si hace falta', 'ok'); }
+      void q;
+      const g = await GET(`/api/geocode?address=${encodeURIComponent(f.address.value)}&city=${encodeURIComponent(f.city.value || '')}`);
+      if (g.lat != null && g.quality !== 'ciudad') { setWh({ lat: g.lat, lng: g.lng }, true); toast('Ubicado: revisa el punto y ajústalo tocando el mapa si hace falta', 'ok'); }
       else toast('No se encontró el domicilio: toca el mapa para marcarlo', 'bad');
     } catch { toast('Geocodificador no disponible: toca el mapa para marcarlo', 'bad'); }
   };
@@ -4878,11 +4887,16 @@ async function viewSettings(v) {
           <div class="grid g2">
             <label class="f">Tope diario: domicilios a ubicar<input name="google_daily_geocode" type="number" min="0" value="${esc(it.google_daily_geocode || g.caps.geocode)}" /></label>
             <label class="f">Tope diario: tramos de ruta<input name="google_daily_elements" type="number" min="0" value="${esc(it.google_daily_elements || g.caps.elements)}" /></label>
+            <label class="f">Tope diario: trazos y navegación<input name="google_daily_routes" type="number" min="0" value="${esc(it.google_daily_routes || g.caps.routes)}" /></label>
+            <label class="f">Tope diario: mosaicos del mapa<input name="google_daily_tiles" type="number" min="0" value="${esc(it.google_daily_tiles || g.caps.tiles)}" /></label>
           </div>
+          <label class="switch"><input type="checkbox" name="google_tiles" ${it.google_tiles !== '0' ? 'checked' : ''} /><span></span><div><b>Mapa base de Google</b><br><small class="muted">Los mapas de la app se ven con Google Maps (requiere habilitar <b>Map Tiles API</b>). ${g.tiles_on ? '✅ Activo' : 'Ahora: OpenStreetMap'}</small></div></label>
           <small class="muted">Al llegar al tope, ese día se sigue con OpenStreetMap (gratis). Una ruta de 30 paradas usa unos 900 tramos la primera vez; después se reutilizan por 60 días.</small>
           <div class="stack" style="gap:6px">
             <small>Hoy: <b>${g.today.geocode}</b> de ${g.caps.geocode} domicilios</small>${bar(g.today.geocode, g.caps.geocode)}
             <small>Hoy: <b>${g.today.elements}</b> de ${g.caps.elements} tramos</small>${bar(g.today.elements, g.caps.elements)}
+            <small>Hoy: <b>${g.today.routes}</b> de ${g.caps.routes} trazos y navegación</small>${bar(g.today.routes, g.caps.routes)}
+            <small>Hoy: <b>${g.today.tiles}</b> de ${g.caps.tiles} mosaicos de mapa</small>${bar(g.today.tiles, g.caps.tiles)}
           </div>
           ${g.last_error ? `<div class="login-err" style="font-weight:600">Último error de Google: ${esc(g.last_error)}</div>` : ''}
           <div class="row"><button class="btn primary">Guardar</button><button type="button" class="btn" id="gmT" ${g.configured ? '' : 'disabled'}>${icon('send')} Probar conexión</button><button type="button" class="btn" id="gmR" ${g.enabled ? '' : 'disabled'} title="Vuelve a buscar con Google los clientes cuyo pin es aproximado (colonia, calle o ciudad)">Re-ubicar pins aproximados</button></div>
@@ -4896,14 +4910,15 @@ async function viewSettings(v) {
           <h2>Cómo obtener la clave</h2>
           <ol class="steps-list">
             <li>Entra a <b>console.cloud.google.com</b>, crea un proyecto (p. ej. “Sovime”) y activa la <b>facturación</b>.</li>
-            <li>En <b>APIs y servicios → Biblioteca</b> habilita <b>Geocoding API</b> y <b>Routes API</b>.</li>
-            <li>En <b>Credenciales → Crear credenciales → Clave de API</b>. Restríngela: por <b>dirección IP</b> (la de tu servidor) y solo a esas 2 APIs.</li>
+            <li>En <b>APIs y servicios → Biblioteca</b> habilita <b>Geocoding API</b>, <b>Routes API</b> y <b>Map Tiles API</b> (mapa base).</li>
+            <li>En <b>Credenciales → Crear credenciales → Clave de API</b>. Restríngela: por <b>dirección IP</b> (la de tu servidor) y solo a esas 3 APIs.</li>
             <li>En <b>Facturación → Presupuestos</b> crea una alerta (p. ej. 20 USD al mes).</li>
             <li>Pega la clave aquí, guarda y toca <b>Probar conexión</b>.</li></ol></div></div>`;
       const f = $('#gmf');
       f.onsubmit = async (e) => {
         e.preventDefault();
-        await saveInt({ google_maps_key: f.google_maps_key.value.trim(), google_daily_geocode: f.google_daily_geocode.value, google_daily_elements: f.google_daily_elements.value }, 'Google Maps guardado');
+        await saveInt({ google_maps_key: f.google_maps_key.value.trim(), google_daily_geocode: f.google_daily_geocode.value, google_daily_elements: f.google_daily_elements.value, google_daily_routes: f.google_daily_routes.value, google_daily_tiles: f.google_daily_tiles.value, google_tiles: f.google_tiles.checked ? '1' : '0' }, 'Google Maps guardado');
+        SETTINGS = await GET('/api/settings');
         draw();
       };
       $('#gmT').onclick = async (e) => {
@@ -5534,6 +5549,7 @@ function stopNav() {
 }
 const MOD = { left: 'a la izquierda', right: 'a la derecha', 'slight left': 'ligeramente a la izquierda', 'slight right': 'ligeramente a la derecha', 'sharp left': 'cerrado a la izquierda', 'sharp right': 'cerrado a la derecha', straight: 'derecho', uturn: 'en U' };
 function stepText(st) {
+  if (st.text) return st.text;
   const m = st.maneuver || {};
   const on = st.name ? ` por ${st.name}` : '';
   const md = MOD[m.modifier] || '';
@@ -5604,6 +5620,12 @@ async function viewNavigate(v, id) {
   const osrm = (/router\.project-osrm\.org/.test(SETTINGS.osrm_url || '') || !SETTINGS.osrm_url ? 'https://routing.openstreetmap.de/routed-car' : SETTINGS.osrm_url).replace(/\/+$/, '');
   async function fetchRoute(p) {
     routeFrom = p; routeAt = Date.now();
+    if (SETTINGS.google_maps === '1') {
+      try {
+        const g = await GET(`/api/directions/nav?from=${p.lat},${p.lng}&to=${dest.lat},${dest.lng}`);
+        if (g.source === 'google') { route = g; return; }
+      } catch {}
+    }
     if (!osrm) { route = null; return; }
     try {
       const u = `${osrm}/route/v1/driving/${p.lng},${p.lat};${dest.lng},${dest.lat}?overview=full&geometries=geojson&steps=true`;
@@ -5629,7 +5651,14 @@ async function viewNavigate(v, id) {
     if (me) {
       $('#nDist').textContent = fmtDist(dist);
       $('#nEta').textContent = `${mins} min · llegada ${new Date(Date.now() + mins * 60000).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
-      const nx = steps[1] || steps[0];
+      // siguiente indicación: la primera maniobra que está delante del repartidor sobre el camino
+      let nx = steps[1] || steps[0];
+      if (route?.source === 'google' && steps.length > 1) {
+        const cs = route.geometry.coordinates;
+        const near = (pt) => { let bi = 0, bd = Infinity; for (let i = 0; i < cs.length; i++) { const d = (cs[i][0] - pt[0]) ** 2 + (cs[i][1] - pt[1]) ** 2; if (d < bd) { bd = d; bi = i; } } return bi; };
+        const meI = near([me.lng, me.lat]);
+        nx = steps.slice(1).find((st) => (st._i ??= near(st.maneuver.location)) > meI) || steps[steps.length - 1];
+      }
       if (nx) {
         const d = haversineM(me, { lat: nx.maneuver.location[1], lng: nx.maneuver.location[0] });
         $('#nInstr').textContent = stepText(nx); $('#nIco').textContent = stepIcon(nx); $('#nStepDist').textContent = `en ${fmtDist(d)}`;
@@ -5647,7 +5676,9 @@ async function viewNavigate(v, id) {
       if (!routeFrom) map.fitBounds([[p.lat, p.lng], [dest.lat, dest.lng]], { padding: [60, 60], maxZoom: 17 });
       else map.panTo([p.lat, p.lng], { animate: true });
     }
-    if (!routeFrom || haversineM(routeFrom, p) > 120 || Date.now() - routeAt > 60000) await fetchRoute(p);
+    // Google: se recalcula solo si se sale del camino (> 80 m) o cada 10 min; sin Google, como antes
+    const offRoute = route?.source === 'google' ? Math.min(...route.geometry.coordinates.map(([x, y]) => haversineM(p, { lat: y, lng: x }))) > 80 : false;
+    if (route?.source === 'google' ? offRoute || Date.now() - routeAt > 600000 : !routeFrom || haversineM(routeFrom, p) > 120 || Date.now() - routeAt > 60000) await fetchRoute(p);
     paint();
   };
   onPos.__nav = true;
@@ -6048,7 +6079,7 @@ outbox.flush();
 
 function baseTiles(map) {
   // Mosaicos servidos por nuestro servidor (caché de OpenStreetMap). Si nuestro servidor no responde, directo de OSM.
-  const own = L.tileLayer('/tiles/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  const own = L.tileLayer('/tiles/{z}/{x}/{y}.png' + (SETTINGS.google_tiles === '1' ? '?g=1' : ''), { maxZoom: 19, attribution: SETTINGS.google_tiles === '1' ? 'Mapa © Google' : '© OpenStreetMap' });
   let fails = 0;
   own.on('tileload', () => { fails = 0; });
   own.on('tileerror', () => {

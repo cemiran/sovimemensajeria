@@ -91,7 +91,7 @@
 
 function baseTiles(map) {
   // Mosaicos servidos por nuestro servidor (caché de OpenStreetMap). Si nuestro servidor no responde, directo de OSM.
-  const own = L.tileLayer('/tiles/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  const own = L.tileLayer('/tiles/{z}/{x}/{y}.png', { maxZoom: 19, attribution: 'Mapa © Google · © OpenStreetMap' });
   let fails = 0;
   own.on('tileload', () => { fails = 0; });
   own.on('tileerror', () => {
