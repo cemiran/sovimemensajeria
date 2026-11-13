@@ -182,7 +182,7 @@ app.post(
 );
 
 // ---------- Usuarios (administración) ----------
-const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes,
+const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode,
   u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
 
 app.get(
@@ -262,6 +262,7 @@ function createUser(b) {
       );
     const cd = b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(b.can_deliver) ? 1 : 0;
     if (cd) db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(Number(r.lastInsertRowid));
+    if (b.route_mode === 'dia') db.prepare("UPDATE users SET route_mode='dia' WHERE id=?").run(Number(r.lastInsertRowid));
     return { id: Number(r.lastInsertRowid), temp_password: b.password ? null : pwd };
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `El correo ${b.email} ya está registrado`);
@@ -315,6 +316,10 @@ app.put(
         String(b.name).trim(), String(b.email).trim(), b.role, b.phone || null, b.vehicle || null, Number(b.capacity) || 40, b.active,
         b.notes || null, u.id
       );
+      if (['continua', 'dia'].includes(req.body.route_mode) && req.body.route_mode !== u.route_mode) {
+        db.prepare('UPDATE users SET route_mode=? WHERE id=?').run(req.body.route_mode, u.id);
+        audit(req, 'usuario.tipo_ruta', `${u.name}: ${req.body.route_mode === 'dia' ? 'ruta por día (a medianoche se libera lo pendiente)' : 'ruta continua (lo pendiente sigue con él hasta terminar)'}`);
+      }
       if (req.body.can_deliver !== undefined || b.role === 'repartidor')
         db.prepare('UPDATE users SET can_deliver=? WHERE id=?').run(b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(req.body.can_deliver) ? 1 : 0, u.id);
     } catch (e) {
@@ -3610,6 +3615,36 @@ app.post('/api/routes/:id/close', auth(...STAFF), wrap((req, res) => {
   const reason = String(req.body?.reason || '').trim().slice(0, 200);
   const open = db.prepare("SELECT id, tracking_code, status FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id);
   const done = db.prepare("SELECT SUM(status='entregado') d, SUM(status='fallido') f FROM orders WHERE route_id=?").get(r.id);
+  const mode = req.body?.mode;
+  // pasar lo pendiente a otro repartidor (a su ruta de hoy o de la fecha elegida)
+  if (mode === 'driver') {
+    const drv = db.prepare("SELECT id, name FROM users WHERE id=? AND active=1 AND (role='repartidor' OR can_deliver=1)").get(Number(req.body.driver_id));
+    if (!drv) throw new HttpError(400, 'Elige el repartidor que continúa la ruta');
+    officeDriver(req, drv.id);
+    if (!open.length) throw new HttpError(400, 'La ruta no tiene paradas pendientes');
+    const d = date && date >= today() ? date : today();
+    // los ya cargados en la unidad del anterior se pasan también (el paquete se entrega físicamente al nuevo)
+    db.prepare(`UPDATE orders SET status='asignado', loaded_at=NULL WHERE id IN (${open.map((o) => o.id).join(',')}) AND status='cargado'`).run();
+    const out = assignOrdersTo(req, drv, open.map((o) => o.id), d);
+    const rest = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").get(r.id).c;
+    if (!rest) db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE id=?").run(r.id);
+    audit(req, 'rutas.pasar', `${r.name || 'Ruta ' + r.id}: ${out.assigned} pendiente(s) de ${r.dname || 'repartidor'} → ${drv.name} (${d})${reason ? ' · ' + reason : ''}`);
+    return res.json({ delivered: done.d || 0, failed: done.f || 0, returned: 0, moved: out.assigned, to: drv.name, date: d, skipped: out.skipped });
+  }
+  // cancelar lo pendiente (regresan existencias y se liberan los S/N)
+  if (mode === 'cancel') {
+    if (req.user.role !== 'admin') throw new HttpError(403, 'Solo el administrador cancela pedidos');
+    tx(() => {
+      for (const o of open) {
+        releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado al cerrar la ruta`);
+        db.prepare(`UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL, notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`)
+          .run(` | Cancelado al cerrar la ruta ${today()} (${r.dname || 'repartidor'})${reason ? ': ' + reason : ''}`, o.id);
+      }
+      db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')), started_at=COALESCE(started_at, datetime('now')) WHERE id=?").run(r.id);
+    });
+    audit(req, 'rutas.cerrar', `${r.name || 'Ruta ' + r.id}: ${open.length} pendiente(s) CANCELADOS${reason ? ' · ' + reason : ''}`);
+    return res.json({ delivered: done.d || 0, failed: done.f || 0, returned: 0, cancelled: open.length });
+  }
   tx(() => {
     for (const o of open)
       db.prepare(`UPDATE orders SET status='pendiente', route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL,
@@ -3650,7 +3685,7 @@ function releaseOverdue() {
     const routes = db.prepare("SELECT COUNT(*) n FROM routes WHERE date < ? AND status IN ('planificada','en_curso')").get(t).n;
     if (!rows.length && !routes) return;
     // sin entregar (ni intentados) con repartidor activo: pasan a la ruta de HOY del mismo repartidor
-    const active = (id) => id && db.prepare('SELECT 1 FROM users WHERE id=? AND active=1 AND deleted_at IS NULL').get(id);
+    const active = (id) => id && db.prepare("SELECT 1 FROM users WHERE id=? AND active=1 AND deleted_at IS NULL AND COALESCE(route_mode,'continua') <> 'dia'").get(id);
     const carry = new Map();
     for (const o of rows) if (o.status !== 'fallido' && active(o.driver_id)) { if (!carry.has(o.driver_id)) carry.set(o.driver_id, []); carry.get(o.driver_id).push(o); }
     const free = rows.filter((o) => !(o.status !== 'fallido' && active(o.driver_id)));

@@ -1753,7 +1753,7 @@ async function routeDetail(id) {
       </tbody></table></div>
     </div>`, {
     wide: true,
-    footer: `${r.status !== 'completada' && r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? `<button class="btn bad" id="rclose" title="El repartidor ya no sigue: se cierra como está y lo que falta regresa a pendientes">${icon('x')} Cerrar ruta</button>` : ''}${r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? '' : '<button class="btn bad" id="rdel">Eliminar ruta</button>'}<button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
+    footer: `${r.status !== 'completada' && r.stops.some((x) => ['asignado', 'cargado'].includes(x.status)) ? `<button class="btn bad" id="rclose" title="Reprogramar, liberar, pasar a otro repartidor o cancelar lo que falta">${icon('x')} Cerrar ruta</button>` : ''}${r.stops.some((x) => ['entregado', 'fallido'].includes(x.status)) ? '' : '<button class="btn bad" id="rdel">Eliminar ruta</button>'}<button class="btn" id="rxls">${icon('download')} Excel</button><button class="btn" id="ropt">Re-optimizar</button><a class="btn" target="_blank" href="${gmapsUrl(r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status)))}">${icon('nav')} Google Maps</a><button class="btn primary" data-close>Cerrar</button>`,
     onClose: () => render(),
   });
   const map = makeMap($('#rdmap', m.el));
@@ -1769,6 +1769,7 @@ async function routeDetail(id) {
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
   $('#ropt', m.el).onclick = async () => { const o = await POST(`/api/routes/${r.id}/optimize`); toast(`Re-optimizada: ${o.distance_km} km`, 'ok'); m.el.remove(); routeDetail(r.id); };
+  const __drvs = drivers;
   $('#rclose', m.el)?.addEventListener('click', () => {
     const left = r.stops.filter((x) => ['asignado', 'cargado'].includes(x.status));
     const del = r.stops.filter((x) => x.status === 'entregado').length, fail = r.stops.filter((x) => x.status === 'fallido').length;
@@ -1781,15 +1782,20 @@ async function routeDetail(id) {
       ${loaded ? `<div class="offline-bar">${loaded} paquete(s) ya estaban cargados en la unidad: recógelos o regístralos de vuelta en el almacén.</div>` : ''}
       <fieldset class="ch-line"><legend>¿Qué hacer con las ${left.length} sin visitar?</legend>
         <label class="row" style="gap:8px"><input type="radio" name="mode" value="re" checked /> <span class="grow">Reprogramar para</span><input type="date" name="date" value="${tom}" style="width:auto" /></label>
-        <label class="row" style="gap:8px"><input type="radio" name="mode" value="keep" /> <span>Cerrar sin reprogramar <small class="muted">(quedan pendientes con su fecha actual, para asignarlas después)</small></span></label>
+        <label class="row" style="gap:8px"><input type="radio" name="mode" value="keep" /> <span>Liberarlas <small class="muted">(quedan pendientes, sin repartidor, para asignarlas a quien elijas)</small></span></label>
+        <label class="row" style="gap:8px"><input type="radio" name="mode" value="driver" /> <span class="grow">Pasarlas a</span><select name="driver_id" style="width:auto;max-width:190px"><option value="">Repartidor…</option>${(__drvs || []).filter((x) => x.id !== r.driver_id).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select></label>
+        ${store.user.role === 'admin' ? `<label class="row" style="gap:8px"><input type="radio" name="mode" value="cancel" /> <span>Cancelarlas <small class="muted">(el pedido se cancela; regresan existencias y S/N)</small></span></label>` : ''}
       </fieldset>
       <label class="f">Motivo (opcional)<input name="reason" placeholder="Ej. el repartidor se retiró por enfermedad" /></label>
     </form>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn bad" id="rcGo">Cerrar ruta</button>' });
     $('#rcGo', d.el).onclick = async () => {
       const f = $('#rcF', d.el);
+      const md = f.mode.value;
+      if (md === 'driver' && !f.driver_id.value) return toast('Elige a quién pasarle las paradas', 'bad');
+      if (md === 'cancel' && !(await confirmDlg(`¿Cancelar ${left.length} pedido(s)? Esto no se puede deshacer desde aquí.`))) return;
       try {
-        const x = await POST(`/api/routes/${r.id}/close`, { date: f.mode.value === 're' ? f.date.value : null, reason: f.reason.value });
-        toast(`Ruta cerrada: ${x.delivered} entregados · ${x.returned} regresan a pendientes${x.date ? ' para el ' + x.date : ''}`, 'ok');
+        const x = await POST(`/api/routes/${r.id}/close`, { mode: md, driver_id: f.driver_id.value, date: md === 're' ? f.date.value : null, reason: f.reason.value });
+        toast(md === 'driver' ? `${x.moved} parada(s) pasaron a la ruta de ${x.to} (${x.date})${x.skipped?.length ? ` · ${x.skipped.length} no se movieron` : ''}` : md === 'cancel' ? `${x.cancelled} pedido(s) cancelados` : `Ruta cerrada: ${x.delivered} entregados · ${x.returned} regresan a pendientes${x.date ? ' para el ' + x.date : ''}`, 'ok');
         d.close(); m.close(); render();
       } catch (er) { toast(er.message, 'bad'); }
     };
@@ -4395,7 +4401,11 @@ function userFields(u) {
     <label class="row staff-only" style="gap:8px"><input type="checkbox" name="can_deliver" ${u.can_deliver ? 'checked' : ''} /> <span><b>También reparte</b><br><small class="muted">Supervisor o despachador que además entrega: aparece en las listas de repartidores y puede cambiar a modo repartidor en la app.</small></span></label>
     <fieldset class="driver-only"><legend>${icon('truck')} Datos del vehículo</legend><div class="grid g2">
       <label class="f">Vehículo / placas<input name="vehicle" value="${esc(u.vehicle)}" placeholder="Moto · ABC-123" /></label>
-      <label class="f">Capacidad (paquetes)<input type="number" min="1" name="capacity" value="${u.capacity || 30}" /></label></div></fieldset>
+      <label class="f">Capacidad (paquetes)<input type="number" min="1" name="capacity" value="${u.capacity || 30}" /></label></div>
+      <label class="f">Tipo de ruta<select name="route_mode">
+        <option value="continua" ${u.route_mode !== 'dia' ? 'selected' : ''}>Continua: lo que no entregue sigue con él al día siguiente, hasta terminar</option>
+        <option value="dia" ${u.route_mode === 'dia' ? 'selected' : ''}>Por día: a medianoche lo no entregado se libera para asignarlo a quien elijas</option></select>
+        <small class="muted">En cualquier momento puedes pasar su ruta a otro repartidor, quitarle paradas, liberarlas o cancelarlas desde Rutas → la ruta → Cerrar ruta.</small></label></fieldset>
     <label class="f">Notas internas<textarea name="notes" placeholder="Turno, zona, contacto de emergencia…">${esc(u.notes)}</textarea></label>`;
 }
 function wireRole(f) {

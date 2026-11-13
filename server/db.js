@@ -326,6 +326,7 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_customers_ext ON customers(external_id)'
 addCols('orders', [['shipment_type', "TEXT NOT NULL DEFAULT 'general'"], ['temp_min', 'REAL'], ['temp_max', 'REAL'], ['requires_seal', 'INTEGER NOT NULL DEFAULT 0'], ['seal_number', 'TEXT']]);
 addCols('evidences', [['compliance_json', 'TEXT']]);
 addCols('orders', [['retry_at', 'TEXT']]);
+addCols('users', [['route_mode', "TEXT NOT NULL DEFAULT 'continua'"]]);
 
 const moreDefaults = {
   public_url: '',
