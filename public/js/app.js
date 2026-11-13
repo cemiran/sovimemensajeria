@@ -1457,7 +1457,58 @@ function customerForm(c, done) {
   if ($('#schedBody', m.el)) (async () => {
     const box = $('#schedBody', m.el);
     const open = (c.orders || []).filter((o) => ['pendiente', 'asignado', 'cargado', 'fallido'].includes(o.status));
-    if (!open.length) { box.innerHTML = '<small class="muted">Este cliente no tiene pedidos abiertos. Crea uno en Pedidos → Nuevo pedido.</small>'; return; }
+    // pedidos del cliente + crear uno nuevo con el producto por número de serie
+    const extra = async () => {
+      const all = (c.orders || []).filter((o) => o.status !== 'cancelado');
+      const [prods, drvs] = await Promise.all([GET('/api/products?limit=500').then((r) => r.rows || r).catch(() => []), GET('/api/users?role=repartidor').then((r) => (Array.isArray(r) ? r : r.rows || []).filter((d) => d.active)).catch(() => [])]);
+      const admin = store.user.role === 'admin';
+      box.insertAdjacentHTML('beforeend', `
+        ${all.length ? `<div style="margin-top:10px"><b>Pedidos de este cliente</b>${all.map((o) => `<div class="row between" style="gap:8px;padding:5px 0;border-top:1px solid var(--border)"><span class="grow"><b class="mono">${esc(o.tracking_code)}</b> ${badge(o.status)} <small class="muted">${esc(o.scheduled_date || '')}</small></span><button type="button" class="btn sm" data-oopen="${o.id}">${icon(admin ? 'edit' : 'box')} ${admin ? 'Abrir y editar' : 'Abrir'}</button></div>`).join('')}</div>` : ''}
+        <div class="card" style="margin-top:10px;padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>${icon('plus')} Nuevo pedido con número de serie</b>
+          <div class="row" style="gap:6px;margin-top:6px"><input id="npSn" class="grow mono" placeholder="S/N del equipo (escribe parte o completo)" autocomplete="off" style="text-transform:uppercase" /><button type="button" class="btn" id="npScan">${icon('scan')}</button></div>
+          <div id="npRes" class="stack" style="gap:4px;margin-top:4px"></div>
+          <div class="grid g3" style="margin-top:6px"><label class="f">Producto<select id="npP">${prods.map((p) => `<option value="${p.id}" data-s="${p.serialized ? 1 : 0}" ${p.serialized ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+            <label class="f">Fecha<input type="date" id="npD" value="${today()}" /></label>
+            <label class="f">Repartidor<select id="npR"><option value="">— Sin asignar —</option>${drvs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></label></div>
+          ${admin ? `<label class="row" style="gap:6px;margin-top:6px"><input type="checkbox" id="npDel" /> Ya se entregó (registrar entrega)</label>
+            <label class="f" id="npRecBox" hidden>Recibió<input id="npRec" value="${esc(c.name || '')}" /></label>` : ''}
+          <button type="button" class="btn primary block" id="npGo" style="margin-top:8px">${icon('check')} Crear pedido</button></div>`);
+      $$('[data-oopen]', box).forEach((b) => (b.onclick = () => { m.close(); openOrder(Number(b.dataset.oopen)); }));
+      $('#npDel', box)?.addEventListener('change', (e) => { $('#npRecBox', box).hidden = !e.target.checked; });
+      // buscar S/N disponible por cualquier parte del número
+      let t;
+      const pickSn = (x) => { $('#npSn', box).value = x.serial; $('#npRes', box).innerHTML = `<small class="ok-txt">✓ ${esc(x.serial)} · ${esc(x.product_name || '')}${x.holder_name ? ' · lo trae ' + esc(x.holder_name) : x.warehouse_name ? ' · ' + esc(x.warehouse_name) : ''}</small>`; if (x.product_id) $('#npP', box).value = x.product_id; };
+      $('#npSn', box).oninput = (e) => {
+        clearTimeout(t);
+        const q = e.target.value.trim().toUpperCase();
+        if (q.length < 3) { $('#npRes', box).innerHTML = ''; return; }
+        t = setTimeout(async () => {
+          const r = await GET(`/api/serials?status=disponible&q=${encodeURIComponent(q)}&limit=12`).catch(() => ({ rows: [] }));
+          $('#npRes', box).innerHTML = r.rows.length ? r.rows.map((x, i) => `<button type="button" class="btn sm block" data-npk="${i}" style="justify-content:space-between"><span class="mono">${esc(x.serial)}</span><small class="muted">${esc(x.holder_name ? 'lo trae ' + x.holder_name : x.open_pool ? 'abierto' : x.warehouse_name || 'almacén')}</small></button>`).join('')
+            : '<small class="muted">No hay equipos disponibles con ese número (si es nuevo, escríbelo completo: se registra al crear el pedido).</small>';
+          $$('[data-npk]', box).forEach((b) => (b.onclick = () => pickSn(r.rows[Number(b.dataset.npk)])));
+        }, 250);
+      };
+      $('#npScan', box).onclick = () => openScanner({ title: 'Escanear S/N', onCode: async (code) => { $('#npSn', box).value = String(code).trim().toUpperCase(); $('#npSn', box).dispatchEvent(new Event('input')); return 'leído'; } });
+      $('#npGo', box).onclick = async (e) => {
+        const btn = e.currentTarget;
+        const sn = $('#npSn', box).value.trim().toUpperCase();
+        const pid = Number($('#npP', box).value), ser = $('#npP', box).selectedOptions[0]?.dataset.s === '1';
+        if (ser && !sn) return toast('Escribe o escanea el número de serie', 'bad');
+        const delivered = $('#npDel', box)?.checked;
+        const d = $('#npD', box).value || today(), r = $('#npR', box).value;
+        btn.disabled = true;
+        try {
+          const o = await POST('/api/orders', { customer_id: c.id, items: [{ product_id: pid, qty: 1 }], scheduled_date: d });
+          if (sn) await POST(`/api/orders/${o.id}/serials`, { serial: sn });
+          if (delivered) await POST('/api/orders/bulk-status', { status: 'entregado', order_ids: [o.id], receiver_name: $('#npRec', box).value.trim() || c.name, date: d });
+          else if (r) await POST('/api/routes/assign', { driver_id: r, date: d, order_ids: [o.id] });
+          toast(`Pedido ${o.tracking_code} creado${sn ? ' con S/N ' + sn : ''}${delivered ? ' y registrado como entregado' : r ? ' y asignado' : ''}`, 'ok');
+          m.close(); render(); customerForm(await GET('/api/customers/' + c.id), done);
+        } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+      };
+    };
+    if (!open.length) { box.innerHTML = '<small class="muted">Este cliente no tiene pedidos abiertos.</small>'; extra(); return; }
     const drivers = (await GET('/api/users?role=repartidor').catch(() => [])).filter((d) => d.active);
     box.innerHTML = `${open.length > 1 ? `<label class="f">Pedido<select id="scO">${open.map((o) => `<option value="${o.id}">${esc(o.tracking_code)} · ${STATUS[o.status]}</option>`).join('')}</select></label>` : `<p style="margin:0 0 6px"><b class="mono">${esc(open[0].tracking_code)}</b> · ${badge(open[0].status)}</p>`}
       <div class="grid g3"><label class="f">Día de entrega<input type="date" id="scD" /></label><label class="f">Hora acordada<input type="time" id="scT" /></label>
@@ -1475,6 +1526,7 @@ function customerForm(c, done) {
     showSt();
     $('#scO', box)?.addEventListener('change', showSt);
     $('#scChg', box).onclick = () => statusPicker(sched.o, async () => { m.close(); render(); const c2 = await GET('/api/customers/' + c.id); customerForm(c2, done); });
+    extra();
   })();
   const applySchedule = async () => {
     if (!sched) return '';
