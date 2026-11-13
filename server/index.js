@@ -1404,6 +1404,106 @@ app.get('/api/my/available', auth('repartidor'), wrap((req, res) => {
     plain: prods.filter((p) => !p.serialized).map((p) => ({ product_id: p.id, name: p.name, sku: p.sku, unit: p.unit, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
   });
 }));
+// ---------- Edición completa del pedido (administrador) ----------
+const adminOrder = (req) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(req.params.id));
+  if (!o) throw new HttpError(404, 'Pedido no encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+  return o;
+};
+const resendSheet = (orderId) => db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(orderId);
+app.put('/api/orders/:id/edit', auth('admin'), wrap((req, res) => {
+  const o = adminOrder(req);
+  const b = req.body || {};
+  const ch = [];
+  const set = (col, v, label) => { if (v === undefined) return; if (String(v ?? '') !== String(o[col] ?? '')) { db.prepare(`UPDATE orders SET ${col}=? WHERE id=?`).run(v === '' ? null : v, o.id); ch.push(`${label}: ${o[col] ?? '—'} → ${v || '—'}`); } };
+  if (b.scheduled_date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(b.scheduled_date)) throw new HttpError(400, 'Fecha inválida');
+  set('scheduled_date', b.scheduled_date, 'fecha');
+  if (b.priority !== undefined) set('priority', b.priority === 'alta' ? 'alta' : 'normal', 'prioridad');
+  if (b.notes !== undefined) set('notes', String(b.notes).slice(0, 500), 'notas');
+  if (b.cod_amount !== undefined) set('cod_amount', Number(b.cod_amount) || 0, 'cobro');
+  if (b.appointment_time !== undefined) set('appointment_time', /^\d{2}:\d{2}$/.test(b.appointment_time) ? b.appointment_time : '', 'hora acordada');
+  if (ch.length) { audit(req, 'pedidos.editar', `${o.tracking_code}: ${ch.join('; ')}`.slice(0, 500)); if (o.status === 'entregado') resendSheet(o.id); }
+  res.json(loadOrder(o.id));
+}));
+// agregar producto al pedido (también ya entregado), opcionalmente con su S/N
+app.post('/api/orders/:id/items', auth('admin'), wrap((req, res) => {
+  const o = adminOrder(req);
+  if (o.status === 'cancelado') throw new HttpError(409, 'El pedido está cancelado');
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(req.body?.product_id));
+  if (!p) throw new HttpError(400, 'Elige el producto');
+  const qty = Math.max(1, Math.trunc(Number(req.body?.qty) || 1));
+  const serials = [].concat(req.body?.serials || req.body?.serial || []).map((x) => String(x || '').trim()).filter(Boolean);
+  if (serials.length > qty) throw new HttpError(400, 'Hay más números de serie que piezas');
+  tx(() => {
+    const it = db.prepare('SELECT * FROM order_items WHERE order_id=? AND product_id=?').get(o.id, p.id);
+    if (it) db.prepare('UPDATE order_items SET qty = qty + ? WHERE order_id=? AND product_id=?').run(qty, o.id, p.id);
+    else db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(o.id, p.id, qty);
+    if ((db.prepare('SELECT stock FROM products WHERE id=?').get(p.id)?.stock || 0) >= qty) moveStock(p.id, 'salida', qty, `Pedido ${o.tracking_code} (agregado por administración)`, req.user.id);
+    for (const sn of serials) assignSerial(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id), sn, req.user);
+  });
+  audit(req, 'pedidos.producto', `${o.tracking_code}: + ${qty} × ${p.name}${serials.length ? ' (S/N ' + serials.join(', ') + ')' : ''}`);
+  if (o.status === 'entregado') resendSheet(o.id);
+  res.json(loadOrder(o.id));
+}));
+// cambiar la cantidad de un producto del pedido (0 = quitarlo)
+app.put('/api/orders/:id/items/:pid', auth('admin'), wrap((req, res) => {
+  const o = adminOrder(req);
+  const it = db.prepare('SELECT i.*, p.name FROM order_items i JOIN products p ON p.id=i.product_id WHERE i.order_id=? AND i.product_id=?').get(o.id, Number(req.params.pid));
+  if (!it) throw new HttpError(404, 'Ese producto no está en el pedido');
+  const qty = Math.max(0, Math.trunc(Number(req.body?.qty)));
+  const sn = db.prepare('SELECT COUNT(*) n FROM serials WHERE order_id=? AND product_id=?').get(o.id, it.product_id).n;
+  if (qty < sn) throw new HttpError(409, `Este pedido tiene ${sn} S/N de ${it.name}: quita o corrige primero los números de serie`);
+  tx(() => {
+    if (qty === 0) db.prepare('DELETE FROM order_items WHERE order_id=? AND product_id=?').run(o.id, it.product_id);
+    else db.prepare('UPDATE order_items SET qty=? WHERE order_id=? AND product_id=?').run(qty, o.id, it.product_id);
+    const diff = qty - it.qty;
+    if (diff < 0) moveStock(it.product_id, 'devolucion', -diff, `Pedido ${o.tracking_code} (ajuste de administración)`, req.user.id);
+    else if (diff > 0 && (db.prepare('SELECT stock FROM products WHERE id=?').get(it.product_id)?.stock || 0) >= diff) moveStock(it.product_id, 'salida', diff, `Pedido ${o.tracking_code} (ajuste de administración)`, req.user.id);
+  });
+  audit(req, 'pedidos.producto', `${o.tracking_code}: ${it.name} ${it.qty} → ${qty}`);
+  res.json(loadOrder(o.id));
+}));
+// datos de la recepción (quién recibió, fecha y hora, notas)
+app.put('/api/evidences/:id', auth('admin'), wrap((req, res) => {
+  const e = db.prepare('SELECT e.*, o.tracking_code, o.customer_id FROM evidences e JOIN orders o ON o.id=e.order_id WHERE e.id=?').get(Number(req.params.id));
+  if (!e) throw new HttpError(404, 'Recepción no encontrada');
+  if (!officeOrders(req, [e.order_id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+  const b = req.body || {};
+  const ch = [];
+  const set = (col, v, label) => { if (v === undefined) return; v = String(v ?? '').trim().slice(0, 300); if (v !== String(e[col] ?? '')) { db.prepare(`UPDATE evidences SET ${col}=? WHERE id=?`).run(v || null, e.id); ch.push(`${label}: ${e[col] || '—'} → ${v || '—'}`); } };
+  set('receiver_name', b.receiver_name, 'recibió');
+  set('receiver_relation', b.receiver_relation, 'parentesco');
+  set('receiver_id_doc', b.receiver_id_doc, 'identificación');
+  set('notes', b.notes, 'notas');
+  set('reason', b.reason, 'motivo');
+  if (b.created_at) {
+    const d = new Date(b.created_at);
+    if (isNaN(d)) throw new HttpError(400, 'Fecha y hora inválidas');
+    const iso = d.toISOString().replace('T', ' ').slice(0, 19);
+    if (iso !== e.created_at) {
+      db.prepare('UPDATE evidences SET created_at=? WHERE id=?').run(iso, e.id);
+      if (e.result === 'entregado') db.prepare('UPDATE orders SET delivered_at=? WHERE id=?').run(iso, e.order_id);
+      db.prepare("UPDATE serials SET delivered_at=? WHERE order_id=? AND status='entregado'").run(iso, e.order_id);
+      ch.push(`fecha: ${e.created_at} → ${iso}`);
+    }
+  }
+  if (ch.length) { audit(req, 'recepcion.editar', `${e.tracking_code}: ${ch.join('; ')}`.slice(0, 500)); db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE evidence_id=? AND status<>'desactivado'").run(e.id); }
+  res.json(loadOrder(e.order_id));
+}));
+// Repartidor: S/N disponibles para entregar, buscando por cualquier parte del número (los suyos primero)
+app.get('/api/my/serials', auth('repartidor'), wrap((req, res) => {
+  const me = req.user;
+  const q = normSerial(req.query.q || '').replace(/[^A-Z0-9]/g, '');
+  const offs = new Set([me.office, req.query.order ? customerOffice(db.prepare('SELECT customer_id FROM orders WHERE id=?').get(Number(req.query.order))?.customer_id) : null].filter(Boolean).map(Number));
+  const rows = db.prepare(`SELECT s.serial, s.product_id, s.holder_id, s.open_pool, s.warehouse_id, p.name product, u.name holder, w.name wname
+      FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN users u ON u.id = s.holder_id LEFT JOIN warehouses w ON w.id = s.warehouse_id
+      WHERE s.status='disponible' AND REPLACE(REPLACE(s.serial,'-',''),' ','') LIKE ? ORDER BY (s.holder_id = ?) DESC, s.open_pool DESC, s.serial LIMIT 300`).all(`%${q}%`, me.id);
+  const ok = rows.filter((s) => s.holder_id === me.id || s.open_pool || (!s.holder_id && (!s.warehouse_id || !offs.size || offs.has(Number(s.warehouse_id))))
+    || (s.holder_id && offs.has(Number(userOffice(s.holder_id)))));
+  res.json(ok.slice(0, 40).map((s) => ({ serial: s.serial, product: s.product, product_id: s.product_id,
+    where: s.holder_id === me.id ? 'tuyo' : s.holder_id ? `lo trae ${s.holder}` : s.open_pool ? 'abierto' : s.wname || 'almacén' })));
+}));
 // Pedidos del cliente que el repartidor puede reactivar / tomar para entregar ahora (de su oficina)
 app.get('/api/my/customer-orders/:cid', auth('repartidor'), wrap((req, res) => {
   const c = db.prepare('SELECT id FROM customers WHERE id=?').get(Number(req.params.cid));

@@ -846,6 +846,7 @@ function shell(active, content) {
     <aside class="side">
       <a class="side-logo" href="#/${driver ? 'my' : 'dashboard'}">${logo()}</a>
       ${canDeliver() ? `<button class="btn block ${driver ? '' : 'primary'}" id="modeSw2" style="margin:0 10px 10px;width:calc(100% - 20px)">${driver ? '⇄ Volver a modo supervisor' : `${icon('truck')} Modo repartidor`}</button>` : ''}
+      ${driver ? '' : `<form class="qs" id="qsF" role="search"><input id="qsIn" type="search" placeholder="Buscar S/N, guía, cliente o tel." autocomplete="off" aria-label="Búsqueda rápida" /></form>`}
       <nav class="nav">${groups.map(([g, items]) => `<div class="nav-group">${esc(g)}</div>${items.map(([k, l, i]) => `<a href="#/${k}" class="${k === active ? 'active' : ''}">${icon(i)}${l}</a>`).join('')}`).join('')}</nav>
       <a class="who ${active === 'profile' ? 'active' : ''}" href="#/profile" title="Mi perfil">${avatar(u)}<span class="grow"><b>${esc(u.name)}</b><small>${ROLE[u.role]}</small></span>${icon('chev')}</a>
     </aside>
@@ -854,6 +855,7 @@ function shell(active, content) {
         <a class="appbar-logo" href="#/${driver ? 'my' : 'dashboard'}">${logo('sm')}</a>
         <span class="appbar-title">${driver ? '<i class="gps-dot" title="Estado del GPS"></i>' : ''}${esc(title)}</span>
         ${canDeliver() ? `<button class="btn sm" id="modeSw" title="Cambiar de modo">${driver ? '⇄ Supervisor' : '⇄ Repartir'}</button>` : ''}
+        ${driver ? '' : `<button class="btn sm ghost" id="qsBtn" aria-label="Búsqueda rápida">${icon('search')}</button>`}
         <a class="appbar-av" href="#/profile" aria-label="Mi perfil">${avatar(u)}</a>
       </header>
       <main class="main" id="view">${content || ''}</main>
@@ -862,6 +864,12 @@ function shell(active, content) {
   <nav class="bottomnav">${mobile.map(([k, l, i]) => `<a href="#/${k}" class="${k === active ? 'active' : ''}">${icon(i)}<span>${l}</span></a>`).join('')}
     ${driver ? '' : `<button class="${moreActive ? 'active' : ''}" id="moreBtn">${icon('more')}<span>Más</span></button>`}</nav>`;
   $('#moreBtn')?.addEventListener('click', () => moreSheet(groups, active));
+  $('#qsF')?.addEventListener('submit', (e) => { e.preventDefault(); const q = $('#qsIn').value.trim(); if (q) quickFind(q); });
+  $('#qsBtn')?.addEventListener('click', () => {
+    const m = modal('Búsqueda rápida', `<form id="qsM" class="row"><input id="qsMIn" class="grow" type="search" placeholder="S/N, guía, cliente o teléfono" autocomplete="off" /><button class="btn primary">${icon('search')}</button></form>`);
+    setTimeout(() => $('#qsMIn', m.el)?.focus(), 80);
+    $('#qsM', m.el).onsubmit = (e) => { e.preventDefault(); const q = $('#qsMIn', m.el).value.trim(); if (q) { m.close(); quickFind(q); } };
+  });
   $('#modeSw')?.addEventListener('click', () => setMode(!driver));
   $('#modeSw2')?.addEventListener('click', () => setMode(!driver));
   return $('#view');
@@ -1221,10 +1229,11 @@ async function orderDetail(id) {
     footer: `${staff && ['fallido', 'pendiente', 'asignado'].includes(o.status) ? '<button class="btn" id="resch">Reprogramar</button>' : ''}
              ${staff && o.status !== 'cancelado' && (o.status !== 'entregado' || store.user.role === 'admin') ? '<button class="btn" id="chgSt">Cambiar estado</button>' : ''}
              ${staff && !['entregado', 'cancelado'].includes(o.status) ? '<button class="btn bad" id="cancel">Cancelar pedido</button>' : ''}
-             <button class="btn" id="print">Imprimir etiqueta</button><button class="btn primary" data-close>Cerrar</button>`,
+             ${store.user.role === 'admin' && !driverMode() ? `<button class="btn" id="editAll">${icon('edit')} Editar todo</button>` : ''}<button class="btn" id="print">Imprimir etiqueta</button><button class="btn primary" data-close>Cerrar</button>`,
   });
   try { JsBarcode($('#bc', m.el), o.tracking_code, { format: 'CODE128', height: 60, fontSize: 16, margin: 4 }); } catch {}
   $('#print', m.el).onclick = () => printEl($('#lbl', m.el));
+  $('#editAll', m.el)?.addEventListener('click', () => { m.close(); orderEditor(o.id); });
   $('#snAssign', m.el)?.addEventListener('click', () => ensureSerials(o, () => { m.close(); orderDetail(o.id); }));
   $('#snManual', m.el)?.addEventListener('click', () => { m.close(); assignSerialManual(o); });
   // la oficina agrega la foto de la recepción (p. ej. la que mandó el repartidor)
@@ -2340,6 +2349,96 @@ async function bulkAssign(v, kind) {
   v.bulkPicked = picked;
 }
 
+// ---------- Búsqueda rápida: una búsqueda abre el pedido ----------
+if (!window.__qsKey) {
+  window.__qsKey = true;
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '') && $('#qsIn')) { e.preventDefault(); $('#qsIn').focus(); }
+  });
+}
+const openOrder = (id) => (store.user.role === 'admin' && !driverMode() ? orderEditor(id) : orderDetail(id));
+async function quickFind(q) {
+  const r = await GET(`/api/orders?limit=20&date=&q=${encodeURIComponent(q)}`).catch(() => ({ rows: [] }));
+  if (r.rows.length === 1) return openOrder(r.rows[0].id);
+  if (!r.rows.length) {
+    const c = await GET(`/api/customers?limit=10&q=${encodeURIComponent(q)}`).catch(() => ({ rows: [] }));
+    if (!c.rows.length) return toast(`Sin resultados para "${q}"`, 'bad');
+    const m = modal(`Clientes · "${esc(q)}"`, `<p class="muted" style="margin-top:0">No hay pedidos con esa búsqueda; estos clientes coinciden:</p>${c.rows.map((x) => `<button class="live-row" data-cu="${x.id}" style="width:100%;text-align:left"><span class="grow"><b>${esc(x.name)}</b><br><small class="muted">${esc(x.address || '')} · ${esc(x.city || '')}</small></span></button>`).join('')}`);
+    $$('[data-cu]', m.el).forEach((b) => (b.onclick = async () => { m.close(); customerForm(await GET('/api/customers/' + b.dataset.cu), () => render()); }));
+    return;
+  }
+  const m = modal(`${r.total} pedidos · "${esc(q)}"`, r.rows.map((o) => `<button class="live-row" data-oq="${o.id}" style="width:100%;text-align:left"><span class="grow"><b class="mono">${esc(o.tracking_code)}</b> ${badge(o.status)}<br><small>${esc(o.customer_name)}</small>${o.sn_list ? `<br><small class="mono muted">S/N ${esc(o.sn_list)}</small>` : ''}<br><small class="muted">${esc(o.address || '')} · ${esc(o.scheduled_date || '')}</small></span></button>`).join(''));
+  $$('[data-oq]', m.el).forEach((b) => (b.onclick = () => { m.close(); openOrder(Number(b.dataset.oq)); }));
+}
+// ---------- Editor completo del pedido (administrador): cliente, pedido, productos con S/N y recepción ----------
+async function orderEditor(id) {
+  const [o, prods] = await Promise.all([GET('/api/orders/' + id), GET('/api/products?limit=500').then((r) => r.rows || r).catch(() => [])]);
+  const c = await GET('/api/customers/' + o.customer_id);
+  const ev = o.evidences?.[0];
+  const toLocal = (u) => { if (!u) return ''; const d = new Date(String(u).replace(' ', 'T') + 'Z'); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const snOf = (pid) => o.serials.filter((x) => x.product_id === pid);
+  const m = modal(`✎ Pedido ${o.tracking_code}`, `<form id="oeF" class="stack">
+    <div class="row between"><div>${badge(o.status)} <b>${esc(o.customer_name)}</b>${o.driver_name ? ` <small class="muted">· ${esc(o.driver_name)}</small>` : ''}</div>
+      <div class="row" style="gap:6px"><button type="button" class="btn sm" id="oeSt">Cambiar estado</button><button type="button" class="btn sm" id="oeDet">Ver detalle</button></div></div>
+    <fieldset class="ch-line"><legend>Cliente</legend>
+      <div class="grid g2"><label class="f">Nombre<input name="c_name" value="${esc(c.name)}" /></label><label class="f">Teléfono Telnor<input name="c_external_id" value="${esc(c.external_id || '')}" /></label>
+      <label class="f">Móvil<input name="c_phone" value="${esc(c.phone || '')}" /></label><label class="f">Adicional<input name="c_phone_alt" value="${esc(c.phone_alt || '')}" /></label></div>
+      <label class="f">Dirección<input name="c_address" value="${esc(c.address || '')}" /></label>
+      <div class="grid g3"><label class="f">Colonia<input name="c_colonia" value="${esc(c.colonia || '')}" /></label><label class="f">Ciudad<input name="c_city" value="${esc(c.city || '')}" /></label><label class="f">Referencias<input name="c_reference" value="${esc(c.reference || '')}" /></label></div>
+    </fieldset>
+    <fieldset class="ch-line"><legend>Pedido</legend>
+      <div class="grid g3"><label class="f">Fecha programada<input type="date" name="o_scheduled_date" value="${esc(o.scheduled_date || '')}" /></label>
+      <label class="f">Prioridad<select name="o_priority"><option value="normal">Normal</option><option value="alta" ${o.priority === 'alta' ? 'selected' : ''}>Urgente</option></select></label>
+      <label class="f">Hora acordada<input type="time" name="o_appointment_time" value="${esc(o.appointment_time || '')}" /></label></div>
+      <label class="f">Notas<input name="o_notes" value="${esc(o.notes || '')}" /></label>
+    </fieldset>
+    <fieldset class="ch-line"><legend>Productos${o.status === 'entregado' ? ' entregados' : ''}</legend>
+      ${o.items.length ? o.items.map((it) => `<div class="row between" style="gap:8px;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span class="grow"><b>${esc(it.name)}</b>${it.serialized ? `<br>${snOf(it.product_id).map((x) => `<span class="chip mono">${esc(x.serial)}</span>`).join(' ') || '<small class="muted">sin S/N</small>'}` : ''}</span>
+        <label class="row" style="gap:4px">Cant.<input type="number" min="0" value="${it.qty}" data-iq="${it.product_id}" style="width:70px" /></label>
+        ${it.serialized && snOf(it.product_id).length < it.qty ? `<button type="button" class="btn sm" data-isn="${it.product_id}">+ S/N</button>` : ''}</div>`).join('') : '<p class="muted" style="margin:0">Sin productos</p>'}
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"><select id="oePr" class="grow">${prods.map((p) => `<option value="${p.id}" data-s="${p.serialized ? 1 : 0}">${esc(p.name)}${p.serialized ? ' (con S/N)' : ''}</option>`).join('')}</select>
+        <input type="number" id="oeQty" min="1" value="1" style="width:70px" aria-label="Cantidad" />
+        <input id="oeSn" class="mono" placeholder="S/N (si lleva)" autocomplete="off" style="text-transform:uppercase;max-width:200px" />
+        <button type="button" class="btn primary" id="oeAdd">${icon('plus')} Agregar</button></div>
+      <small class="muted">${o.status === 'entregado' ? 'El pedido ya está entregado: lo que agregues queda como entregado a este cliente y se actualiza la hoja de Google.' : 'Lo que agregues se suma al pedido.'}</small>
+    </fieldset>
+    ${ev ? `<fieldset class="ch-line"><legend>Recepción (${ev.result === 'entregado' ? 'entregado' : 'no entregado'})</legend>
+      <div class="grid g3"><label class="f">${ev.result === 'entregado' ? 'Recibió' : 'Motivo'}<input name="e_${ev.result === 'entregado' ? 'receiver_name' : 'reason'}" value="${esc(ev.result === 'entregado' ? ev.receiver_name || '' : ev.reason || '')}" /></label>
+      ${ev.result === 'entregado' ? `<label class="f">Parentesco<input name="e_receiver_relation" value="${esc(ev.receiver_relation || '')}" /></label><label class="f">Identificación<input name="e_receiver_id_doc" value="${esc(ev.receiver_id_doc || '')}" /></label>` : ''}
+      <label class="f">Fecha y hora<input type="datetime-local" name="e_created_at" value="${toLocal(ev.created_at)}" /></label></div>
+      <label class="f">Notas de la recepción<input name="e_notes" value="${esc(ev.notes || '')}" /></label></fieldset>` : ''}
+  </form>`, { wide: true, footer: '<button class="btn" data-close>Cerrar</button><button class="btn primary" id="oeSave">Guardar cambios</button>' });
+  const f = $('#oeF', m.el);
+  const reopen = () => { m.close(); orderEditor(id); };
+  $('#oeDet', m.el).onclick = () => { m.close(); orderDetail(id); };
+  $('#oeSt', m.el).onclick = () => { m.close(); statusPicker(o, () => orderEditor(id)); };
+  // productos: cambios inmediatos
+  $$('[data-iq]', m.el).forEach((inp) => (inp.onchange = async () => {
+    try { await api('PUT', `/api/orders/${id}/items/${inp.dataset.iq}`, { qty: Number(inp.value) }); toast('Cantidad actualizada', 'ok'); reopen(); } catch (e) { toast(e.message, 'bad'); }
+  }));
+  $$('[data-isn]', m.el).forEach((b) => (b.onclick = () => { m.close(); assignSerialManual(o); }));
+  $('#oeAdd', m.el).onclick = async () => {
+    const pid = Number($('#oePr', m.el).value), qty = Number($('#oeQty', m.el).value) || 1;
+    const sn = $('#oeSn', m.el).value.trim().toUpperCase();
+    const ser = $('#oePr', m.el).selectedOptions[0]?.dataset.s === '1';
+    if (ser && !sn && !(await confirmDlg('Este producto lleva número de serie y no escribiste ninguno. ¿Agregarlo sin S/N?'))) return;
+    try { await POST(`/api/orders/${id}/items`, { product_id: pid, qty, serials: sn ? sn.split(/[\s,]+/).filter(Boolean) : [] }); toast('Producto agregado', 'ok'); render(); reopen(); } catch (e) { toast(e.message, 'bad'); }
+  };
+  // guardar cliente, pedido y recepción (solo lo que cambió)
+  $('#oeSave', m.el).onclick = async () => {
+    const d = Object.fromEntries(new FormData(f));
+    const pick = (pre) => Object.fromEntries(Object.entries(d).filter(([k]) => k.startsWith(pre)).map(([k, v]) => [k.slice(pre.length), v]));
+    try {
+      const cu = pick('c_'), cuCh = Object.fromEntries(Object.entries(cu).filter(([k, v]) => String(v) !== String(c[k] ?? '')));
+      if (Object.keys(cuCh).length) await api('PUT', '/api/customers/' + o.customer_id, cuCh);
+      await api('PUT', `/api/orders/${id}/edit`, pick('o_'));
+      if (ev) { const e = pick('e_'); if (e.created_at) e.created_at = new Date(e.created_at).toISOString(); await api('PUT', '/api/evidences/' + ev.id, e); }
+      toast('Cambios guardados', 'ok'); m.close(); render();
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  setTimeout(() => f.c_name?.focus(), 80);
+}
 // Cambiar el estado de un pedido desde cualquier pantalla: elegir el estado y luego sus datos (motivo, quién recibió…)
 function statusPicker(order, onDone) {
   const admin = store.user.role === 'admin';
@@ -5450,6 +5549,9 @@ async function viewDeliver(v, id, mode) {
     <div><b>${esc(o.customer_name)}</b> · <span class="mono">${esc(o.tracking_code)}</span><br><small>${esc(o.address)}</small><div class="tels">${phonesLine(o)}</div>
       ${o.items.length ? `<br><small class="muted">${o.items.map((i) => `${i.qty}× ${esc(i.name)}`).join(', ')}</small>` : ''}
       ${o.cod_amount && !isFail ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(o.cod_amount)} al cliente</div>` : ''}</div>
+    ${!isFail && (o.serial_needs || []).some((n) => n.missing) ? `<div class="card" id="snFind" style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>${icon('search')} Busca el S/N del equipo que entregas</b>
+      <input id="snQ" class="mono" inputmode="text" placeholder="Escribe 3 o más caracteres (ej. 3E15)" autocomplete="off" style="text-transform:uppercase;margin-top:6px" />
+      <div id="snRes" class="stack" style="gap:4px;margin-top:6px"></div><small class="muted">También puedes tocar <b>Verificar</b> para escanearlo.</small></div>` : ''}
     <div class="row between" id="verifyRow"><span id="verifyTxt">${verified ? '✅ Paquete verificado por escaneo' : '⚠️ Escanea la etiqueta para verificar el paquete'}</span>${verified ? '' : `<button class="btn sm" id="verify">${icon('scan')} Verificar</button>`}</div>
     ${isFail ? `
       <label class="f">Motivo <b class="req">*</b><select id="reason"><option value="">Selecciona…</option>${FAIL_REASONS.map((r) => `<option>${r}</option>`).join('')}</select></label>` : `
@@ -5479,6 +5581,30 @@ async function viewDeliver(v, id, mode) {
     $('#photoPrev').src = photo;
     $('#photoPrev').hidden = false;
   };
+  // Buscar el S/N por cualquier parte del número y elegirlo con un toque
+  let snT;
+  const snPick = async (sn) => {
+    try {
+      const r = await POST(`/api/orders/${o.id}/serials`, { serial: sn });
+      o.serials = r.serials; o.serial_needs = (o.serial_needs || []).map((x) => ({ ...x, missing: r.missing }));
+      verified = true;
+      $('#verifyRow').innerHTML = `<span>✅ S/N <b class="mono">${esc(r.serial)}</b> asignado a este pedido</span>`;
+      if (!r.missing) $('#snFind')?.remove(); else { $('#snQ').value = ''; $('#snRes').innerHTML = `<small>Faltan ${r.missing}</small>`; }
+      toast(`S/N ${r.serial} asignado`, 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  $('#snQ')?.addEventListener('input', (e) => {
+    clearTimeout(snT);
+    const q = e.target.value.trim();
+    if (q.length < 3) { $('#snRes').innerHTML = ''; return; }
+    snT = setTimeout(async () => {
+      const list = await GET(`/api/my/serials?q=${encodeURIComponent(q)}&order=${o.id}`).catch(() => []);
+      const hl = (sn) => { const i = sn.toUpperCase().indexOf(q.toUpperCase()); return i < 0 ? esc(sn) : `${esc(sn.slice(0, i))}<mark>${esc(sn.slice(i, i + q.length))}</mark>${esc(sn.slice(i + q.length))}`; };
+      $('#snRes').innerHTML = list.length ? list.map((x) => `<button type="button" class="btn block" data-snp="${esc(x.serial)}" style="justify-content:space-between;text-align:left"><span class="mono" style="font-size:16px">${hl(x.serial)}</span><small class="muted">${esc(x.where)}</small></button>`).join('')
+        : `<small class="muted">No hay equipos disponibles con "${esc(q)}". Revisa el número o escríbelo completo y toca Verificar.</small>`;
+      $$('[data-snp]', $('#snRes')).forEach((b) => (b.onclick = () => snPick(b.dataset.snp)));
+    }, 250);
+  });
   // Verificar: la guía del paquete o el S/N del módem (si es un S/N disponible, se asigna a este pedido)
   $('#verify')?.addEventListener('click', () => openScanner({ title: 'Verificar paquete', hint: 'Escanea la guía o el número de serie del módem', onCode: async (c) => {
     const code = String(c).trim();
