@@ -3072,6 +3072,22 @@ app.post(
   })
 );
 
+// Para registrar "Cliente ausente", "Rechazado", "Dirección incorrecta" u "Otro" el repartidor debe estar en el domicilio
+// (o cerca, si el pin es aproximado). Así el intento es real y no un cierre a distancia.
+const PRESENCE_REASONS = ['Cliente ausente', 'Rechazado por cliente', 'Dirección incorrecta', 'Otro'];
+function presenceCheck(o, b, reason) {
+  if (reason === 'Reprogramado por cliente') throw new HttpError(400, 'Si el cliente pidió otra fecha, usa "Reprogramar" e indica el día: no cuenta como entrega fallida');
+  if (!PRESENCE_REASONS.includes(reason)) return;
+  if (reason === 'Cliente ausente' && !b.photo) throw new HttpError(400, 'Toma la foto de la fachada: es la prueba de que estuviste en el domicilio');
+  if (reason === 'Cliente ausente' && !b.contacted) throw new HttpError(400, 'Antes de registrar "Cliente ausente" llama o envía mensaje al cliente');
+  const lat = Number(b.lat), lng = Number(b.lng);
+  if (b.lat == null || !Number.isFinite(lat) || !Number.isFinite(lng)) { if (!b.photo) throw new HttpError(400, 'Sin GPS: toma la foto del domicilio para registrar el intento'); return; }
+  const c = db.prepare('SELECT c.lat, c.lng, c.geo_quality FROM customers c WHERE c.id=?').get(o.customer_id);
+  if (!c || c.lat == null || c.geo_quality === 'ciudad') return;
+  const lim = APPROX_GEO.includes(c.geo_quality) ? 2000 : reason === 'Dirección incorrecta' ? 1000 : Number(getSettings().fail_geofence_m) || 300;
+  const d = haversine({ lat, lng }, c) * 1000;
+  if (d > lim) throw new HttpError(400, `Estás a ${d >= 1000 ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m'} del domicilio. Para registrar "${reason}" debes llegar al domicilio (máx. ${lim} m). Si el cliente pidió otro día, usa "Reprogramar".`);
+}
 function registerEvidence(req, result) {
   const o = db.prepare(`SELECT o.*, c.lat clat, c.lng clng FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?`).get(req.params.id);
   if (!o) throw new HttpError(404, 'No encontrado');
@@ -3090,6 +3106,7 @@ function registerEvidence(req, result) {
     if (!b.photo && !b.signature) throw new HttpError(400, 'Se requiere foto o firma como evidencia');
   }
   if (result === 'fallido' && !b.reason) throw new HttpError(400, 'Indica el motivo');
+  if (result === 'fallido' && !counter && req.user.role === 'repartidor') presenceCheck(o, b, b.reason);
   if (result === 'entregado' && missingSerialCount(o.id)) throw serialsRequiredError(o);
   const comp = deliveryCompliance(o, req.user, b);
   if (result === 'entregado') {
@@ -3167,6 +3184,52 @@ app.post('/api/orders/:id/location', auth(), wrap((req, res) => {
   res.json({ ok: true, geo_quality: q });
 }));
 app.post('/api/orders/:id/fail', auth(), wrap((req, res) => res.json(registerEvidence(req, 'fallido'))));
+// El cliente pidió otra fecha u hora: no es entrega fallida. Hoy → se queda en la ruta con la hora acordada; otro día → queda libre para esa fecha
+app.post('/api/orders/:id/client-reschedule', auth(), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (!canSee(req.user, o)) throw new HttpError(403, 'Sin permiso');
+  if (!['asignado', 'cargado', 'pendiente', 'fallido'].includes(o.status)) throw new HttpError(409, `El pedido ya está "${o.status}"`);
+  const b = req.body || {};
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
+  if (!date || date < today()) throw new HttpError(400, 'Indica la nueva fecha (hoy o después)');
+  const time = /^\d{2}:\d{2}$/.test(b.time || '') ? b.time : null;
+  const who = req.user.name;
+  const note = `Cliente pidió ${date === today() ? 'otra hora' : 'otra fecha'}: ${date}${time ? ' ' + time : ''} (${who}${b.notes ? ': ' + String(b.notes).slice(0, 200) : ''})`;
+  const addNote = "notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?)";
+  tx(() => {
+    if (date === today() && o.route_id && ['asignado', 'cargado'].includes(o.status)) {
+      const mx = db.prepare('SELECT COALESCE(MAX(stop_seq),0) m FROM orders WHERE route_id=? AND stop_seq < 999').get(o.route_id).m;
+      db.prepare(`UPDATE orders SET appointment_time=COALESCE(?, appointment_time), stop_seq=?, eta=COALESCE(?, eta), ${addNote} WHERE id=?`).run(time, mx + 1, time, note, o.id);
+    } else {
+      db.prepare(`UPDATE orders SET status='pendiente', scheduled_date=?, appointment_time=?, route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, ${addNote} WHERE id=?`).run(date, time, note, o.id);
+      if (o.route_id) {
+        const pending = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").get(o.route_id).c;
+        if (!pending) db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE id=? AND status IN ('planificada','en_curso')").run(o.route_id);
+      }
+    }
+  });
+  audit(req, 'pedido.reprogramado_cliente', `${o.tracking_code}: ${note}`);
+  res.json({ ok: true, same_day: date === today(), order: loadOrder(o.id) });
+}));
+// Cliente ausente: dejar la parada para más tarde hoy (una vez por día), en lugar de cerrarla como fallida
+app.post('/api/orders/:id/retry-later', auth(), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (!canSee(req.user, o)) throw new HttpError(403, 'Sin permiso');
+  if (!['asignado', 'cargado'].includes(o.status) || !o.route_id) throw new HttpError(409, 'Solo pedidos en una ruta activa');
+  if (String(o.retry_at || '').slice(0, 10) === today()) throw new HttpError(409, 'Ya lo dejaste para más tarde hoy. Si sigue sin estar, registra "Cliente ausente".');
+  const b = req.body || {};
+  if (req.user.role === 'repartidor') presenceCheck(o, { ...b, contacted: true, photo: b.photo || 'x' }, 'Cliente ausente');
+  const dist = b.lat != null && o.customer_id ? (() => { const c = db.prepare('SELECT lat, lng FROM customers WHERE id=?').get(o.customer_id); return c?.lat != null ? Math.round(haversine({ lat: Number(b.lat), lng: Number(b.lng) }, c) * 1000) : null; })() : null;
+  const now = new Date();
+  const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const mx = db.prepare('SELECT COALESCE(MAX(stop_seq),0) m FROM orders WHERE route_id=? AND stop_seq < 999').get(o.route_id).m;
+  db.prepare(`UPDATE orders SET retry_at=?, stop_seq=?, notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?`)
+    .run(`${today()} ${hhmm}`, mx + 1, `Ausente ${hhmm}${dist != null ? ` (a ${dist} m)` : ''}: se reintenta más tarde`, o.id);
+  audit(req, 'pedido.reintento', `${o.tracking_code}: ausente a las ${hhmm}, pasa al final de la ruta`);
+  res.json({ ok: true });
+}));
 // El repartidor inició la navegación hacia esta parada: avisa al cliente una sola vez
 app.post(
   '/api/orders/:id/arriving',
@@ -3493,7 +3556,9 @@ function assignOrdersTo(req, drv, ids, date) {
       return out;
     });
     audit(req, 'pedidos.asignar', `${take.length} pedidos → ${drv.name} (${date})`);
-    return { assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0 };
+    const rt = db.prepare('SELECT est_minutes FROM routes WHERE id=?').get(result.route_id);
+    const wd = Number(getSettings().workday_minutes) || 540;
+    return { assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0, est_minutes: rt?.est_minutes || 0, over_workday: (rt?.est_minutes || 0) > wd ? Math.round(((rt.est_minutes - wd) / 60) * 10) / 10 : 0 };
   }
 }
 // Programar fecha en bloque: sin repartidor solo cambia la fecha; con repartidor pasan a su ruta de ese día

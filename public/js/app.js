@@ -1629,7 +1629,7 @@ async function viewRoutes(v) {
       const done = r.delivered + r.failed;
       return `<div class="card" style="border-left:5px solid ${ROUTE_COLORS[i % ROUTE_COLORS.length]}">
         <div class="row between"><b>${esc(r.driver_name || 'Sin repartidor')}</b>${badge(r.status)}</div>
-        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num">⏱️ ${fmtN(r.est_minutes / 60, 1)} h</small>${r.original_distance_km ? (() => { const sv = ((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100; return sv >= 0.5 ? `<small class="num" style="color:var(--ok)" title="Ahorro contra el orden original">−${fmtN(sv, 0)}%</small>` : sv <= -0.5 ? `<small class="num" style="color:var(--warn)" title="Más km que el plan original: se agregaron o movieron paradas">+${fmtN(-sv, 0)}%</small>` : ''; })() : ''}</div>
+        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num" ${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? `style="color:var(--bad);font-weight:700" title="Excede la jornada de ${fmtN((Number(SETTINGS.workday_minutes) || 540) / 60, 1)} h: reparte paradas con otro repartidor u otro día"` : ''}>⏱️ ${fmtN(r.est_minutes / 60, 1)} h${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? ' ⚠️' : ''}</small>${r.original_distance_km ? (() => { const sv = ((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100; return sv >= 0.5 ? `<small class="num" style="color:var(--ok)" title="Ahorro contra el orden original">−${fmtN(sv, 0)}%</small>` : sv <= -0.5 ? `<small class="num" style="color:var(--warn)" title="Más km que el plan original: se agregaron o movieron paradas">+${fmtN(-sv, 0)}%</small>` : ''; })() : ''}</div>
         <div class="progress"><i style="width:${r.stops ? (r.delivered / r.stops) * 100 : 0}%;background:var(--ok)"></i><i style="width:${r.stops ? (r.failed / r.stops) * 100 : 0}%;background:var(--bad)"></i></div>
         <div class="row between" style="margin-top:8px"><small class="muted">${done}/${r.stops} visitadas · ${r.loaded} en vehículo</small><button class="btn sm" data-route="${r.id}">Ver detalle</button></div></div>`;
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
@@ -2365,6 +2365,7 @@ async function bulkAssign(v, kind) {
         try {
           const r = await POST('/api/routes/assign', { driver_id: did, date: d, order_ids: picked() });
           toast(`${r.assigned} pedido(s) agregados a la ruta de ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}`, r.skipped.length ? '' : 'ok');
+          if (r.over_workday) toast(`⚠️ La ruta de ${r.driver} ya suma ~${fmtN(r.est_minutes / 60, 1)} h: excede la jornada por ${r.over_workday} h`, 'bad');
           bulkAssign.__routes = null; render();
         } catch (er) { toast(er.message, 'bad'); rsel.value = ''; }
       };
@@ -2413,6 +2414,7 @@ async function bulkAssign(v, kind) {
         const r = await POST('/api/routes/assign', body);
         if (Number(drv.value) === store.user.id && !store.user.can_deliver) { store.user = { ...store.user, can_deliver: 1 }; setTimeout(() => toast('Te asignaste pedidos: usa el botón "Modo repartidor" para verlos en tu ruta y entregarlos', ''), 1500); }
         toast(`${r.assigned} pedido(s) asignados a ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}${r.unlocated ? ` · ${r.unlocated} sin ubicación en el mapa` : ''}`, r.skipped.length ? '' : 'ok');
+        if (r.over_workday) toast(`⚠️ La ruta de ${r.driver} ya suma ~${fmtN(r.est_minutes / 60, 1)} h: excede la jornada por ${r.over_workday} h. Pasa pedidos a otro repartidor u otro día.`, 'bad');
         if (r.skipped.length) {
           const m = modal('Pedidos que no se movieron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
           void m;
@@ -4718,6 +4720,9 @@ async function viewSettings(v) {
       <h2>Evidencia de recepción</h2>
       <label class="switch"><input type="checkbox" name="require_signature" ${s.require_signature === '1' ? 'checked' : ''} /><span></span><div><b>Firma obligatoria</b><br><small class="muted">Quien recibe firma en la pantalla del teléfono o en el mostrador.</small></div></label>
       <label class="switch"><input type="checkbox" name="require_photo" ${s.require_photo === '1' ? 'checked' : ''} /><span></span><div><b>Fotografía obligatoria</b><br><small class="muted">Foto del paquete entregado con fecha y hora impresas.</small></div></label>
+      <h2 style="margin-top:8px">Intentos y jornada</h2>
+      <div class="grid g2"><label class="f">Distancia máxima al domicilio para registrar un fallo (m)<input type="number" name="fail_geofence_m" min="50" max="5000" value="${esc(s.fail_geofence_m || '300')}" /><small class="muted">"Cliente ausente", "Rechazado" u "Otro" solo se registran en el domicilio. Con pin aproximado se permiten hasta 2 km.</small></label>
+      <label class="f">Jornada del repartidor (horas)<input type="number" name="workday_h" min="4" max="14" step="0.5" value="${(Number(s.workday_minutes) || 540) / 60}" /><small class="muted">Las rutas que pasen de esto se marcan en rojo al asignar.</small></label></div>
       <h2 style="margin-top:8px">Navegación del repartidor</h2>
       <label class="f">Servidor de rutas (OSRM)<input name="osrm_url" value="${esc(s.osrm_url)}" placeholder="https://router.project-osrm.org" />
         <small class="muted">Traza el camino por calles e indicaciones paso a paso. El servidor público de demostración sirve para pruebas; para producción usa uno propio. Déjalo vacío para usar línea recta.</small></label>
@@ -4725,7 +4730,7 @@ async function viewSettings(v) {
     $('#ef').onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
-      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim() });
+      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim(), fail_geofence_m: f.fail_geofence_m.value, workday_minutes: String(Math.round(Number(f.workday_h.value || 9) * 60)) });
       toast('Guardado', 'ok');
     };
   }
@@ -5455,7 +5460,7 @@ async function viewMyRoute(v) {
       <div class="row between"><span class="addr">${esc(s.customer_name)}</span><span class="num muted">${esc(s.eta || '')}</span></div>
       <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}${geoChk(s.geo_quality) && actionable ? `${geoWarn(s.geo_quality)}<br>` : ''}<div class="tels">${phonesLine(s)}</div>
       <small class="muted">${esc(s.tracking_code)} ${s.appointment_time ? `· <b>⏰ ${esc(s.appointment_time)}</b>` : s.window_start ? `· recibe ${s.window_start}–${s.window_end}` : ''} ${s.cod_amount ? `· <b style="color:var(--warn)">Cobrar ${money(s.cod_amount)}</b>` : ''}</small>
-      ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
+      ${s.priority === 'alta' ? ' <span class="badge b-alta">Urgente</span>' : ''} ${String(s.retry_at || '').slice(0, 10) === today() && actionable ? `<span class="badge b-cargado" title="Estaba ausente a las ${esc(String(s.retry_at).slice(11, 16))}">🔁 Reintento</span>` : ''} ${q ? '<span class="badge b-cargado">En cola</span>' : badge(s.status)}
       ${actionable ? `<div class="acts">
         ${s.lat != null || s.address ? `<a class="btn sm" data-nav="${s.id}" href="#/nav/${s.id}">${icon('nav')} Navegar</a>` : ''}
         ${s.customer_phone ? `<a class="btn sm" href="tel:${esc(s.customer_phone)}" aria-label="Llamar">${icon('phone')}</a><a class="btn sm" target="_blank" rel="noopener" href="${esc(waLink(s.customer_phone, arrivingText(s)))}">${icon('chat')}</a>${smsBtn(s)}` : ''}${s.customer_phone_alt ? `<a class="btn sm" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional">${icon('phone')}2</a>` : ''}
@@ -5735,7 +5740,13 @@ async function viewDeliver(v, id, mode) {
       <div id="snRes" class="stack" style="gap:4px;margin-top:6px"></div><small class="muted">También puedes tocar <b>Verificar</b> para escanearlo.</small></div>` : ''}
     <div class="row between" id="verifyRow"><span id="verifyTxt">${verified ? '✅ Paquete verificado por escaneo' : '⚠️ Escanea la etiqueta para verificar el paquete'}</span>${verified ? '' : `<button class="btn sm" id="verify">${icon('scan')} Verificar</button>`}</div>
     ${isFail ? `
-      <label class="f">Motivo <b class="req">*</b><select id="reason"><option value="">Selecciona…</option>${FAIL_REASONS.map((r) => `<option>${r}</option>`).join('')}</select></label>` : `
+      <label class="f">Motivo <b class="req">*</b><select id="reason"><option value="">Selecciona…</option>${FAIL_REASONS.map((r) => `<option>${r}</option>`).join('')}</select></label>
+      <div id="reBox" class="card stack" hidden style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>📅 El cliente pidió otro día u hora</b><small class="muted">No cuenta como entrega fallida. Si es hoy, la parada se queda en tu ruta con la hora acordada; si es otro día, queda lista para asignarse ese día.</small>
+        <div class="grid g2"><label class="f">Nuevo día<input type="date" id="reDate" min="${today()}" /></label><label class="f">Hora acordada (opcional)<input type="time" id="reTime" /></label></div></div>
+      <div id="ausBox" class="card stack" hidden style="padding:10px 12px"><b>Antes de cerrarlo como ausente</b><div class="tels">${phonesLine(o)}</div>
+        <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="contacted" style="width:22px;height:22px;flex:0 0 22px;margin:2px 0 0" /> <span>Llamé o envié mensaje al cliente y no respondió</span></label>
+        <button type="button" class="btn block" id="retryLater" style="white-space:normal;height:auto;line-height:1.3;padding:10px 12px;flex-direction:column"><b>🔁 Reintentar más tarde hoy</b><small class="muted">La parada pasa al final de tu ruta</small></button>
+        <small class="muted">Para registrarlo como ausente debes estar en el domicilio y tomar la foto de la fachada.</small></div>` : `
       <div class="grid g3"><label class="f">Nombre de quien recibe <b class="req">*</b><input id="rname" value="${esc(o.customer_name)}" autocomplete="off" /></label>
       <label class="f">Relación<select id="rrel"><option>Titular</option><option>Familiar</option><option>Vecino</option><option>Recepción / vigilancia</option><option>Otro</option></select></label>
       <label class="f">Identificación<input id="rdoc" placeholder="INE, gafete… (opcional)" autocomplete="off" /></label></div>`}
@@ -5753,6 +5764,20 @@ async function viewDeliver(v, id, mode) {
   if (pos) showPos(); else getPosition().then((p) => { pos = p; showPos(); });
   const sig = isFail ? null : signaturePad($('#sig'));
   const getComp = isFail ? () => ({}) : wireCompliance(v, o);
+  // motivo: reprogramar (con fecha) o ausente (llamar, reintentar más tarde o registrar con foto en el domicilio)
+  const RE = 'Reprogramado por cliente';
+  $('#reason')?.addEventListener('change', (e) => {
+    const r = e.target.value;
+    $('#reBox').hidden = r !== RE;
+    $('#ausBox').hidden = r !== 'Cliente ausente';
+    $('#submit').textContent = r === RE ? '📅 Reprogramar entrega' : 'Registrar intento fallido';
+    $('#submit').className = r === RE ? 'btn primary lg block' : 'btn bad lg block';
+  });
+  $('#retryLater')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try { await POST(`/api/orders/${o.id}/retry-later`, { lat: pos?.lat ?? null, lng: pos?.lng ?? null }); toast('Listo: la parada pasó al final de tu ruta para reintentar más tarde', 'ok'); location.hash = '#/my'; }
+    catch (er) { b.disabled = false; toast(er.message, 'bad'); }
+  });
   $('#sig')?.addEventListener('pointerdown', () => ($('#sigHint').hidden = true));
   $('#sigClear')?.addEventListener('click', () => { sig.clear(); $('#sigHint').hidden = false; });
   $('#photo').onchange = async (e) => {
@@ -5814,6 +5839,22 @@ async function viewDeliver(v, id, mode) {
     if (isFail) {
       body.reason = $('#reason').value;
       if (!body.reason) return toast('Selecciona el motivo', 'bad');
+      if (body.reason === 'Reprogramado por cliente') {
+        const d = $('#reDate').value;
+        if (!d) return toast('Elige el nuevo día que pidió el cliente', 'bad');
+        btn.disabled = true;
+        try {
+          const r = await POST(`/api/orders/${o.id}/client-reschedule`, { date: d, time: $('#reTime').value, notes: $('#notes').value });
+          toast(r.same_day ? 'Hora acordada guardada: la parada sigue en tu ruta' : `Reprogramado para el ${d}`, 'ok');
+          location.hash = '#/my';
+        } catch (er) { btn.disabled = false; toast(er.message, 'bad'); }
+        return;
+      }
+      if (body.reason === 'Cliente ausente') {
+        if (!$('#contacted').checked) return toast('Primero llama o envía mensaje al cliente', 'bad');
+        if (!body.photo) return toast('Toma la foto de la fachada del domicilio', 'bad');
+        body.contacted = true;
+      }
     } else {
       body.receiver_name = $('#rname').value.trim();
       body.receiver_relation = $('#rrel').value;

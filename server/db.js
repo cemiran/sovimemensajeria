@@ -325,12 +325,15 @@ addCols('customers', [['external_id', 'TEXT'], ['phone_alt', 'TEXT'], ['colonia'
 db.exec('CREATE INDEX IF NOT EXISTS idx_customers_ext ON customers(external_id)');
 addCols('orders', [['shipment_type', "TEXT NOT NULL DEFAULT 'general'"], ['temp_min', 'REAL'], ['temp_max', 'REAL'], ['requires_seal', 'INTEGER NOT NULL DEFAULT 0'], ['seal_number', 'TEXT']]);
 addCols('evidences', [['compliance_json', 'TEXT']]);
+addCols('orders', [['retry_at', 'TEXT']]);
 
 const moreDefaults = {
   public_url: '',
   phone_country: '52',
   require_photo: '1',
   require_signature: '1',
+  fail_geofence_m: '300',
+  workday_minutes: '540',
   osrm_url: 'https://routing.openstreetmap.de/routed-car',
   notif_enabled: '1',
   notif_matrix: JSON.stringify({
