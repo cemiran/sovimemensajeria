@@ -1106,7 +1106,8 @@ function wireExecBoard(v) {
 // ================= STAFF: Pedidos =================
 async function viewOrders(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
-  const st = p.get('status') || '';
+  const stList = p.getAll('status').flatMap((x) => x.split(',')).filter(Boolean);
+  const st = stList.join(',');
   const date = p.get('date') ?? today();
   const dateTo = date ? p.get('date_to') || '' : '';
   const q = p.get('q') || '';
@@ -1126,7 +1127,9 @@ async function viewOrders(v) {
       <label class="row" style="gap:4px"><small class="muted">Desde</small><input type="date" name="date" value="${esc(date)}" style="max-width:160px" /></label>
       <label class="row" style="gap:4px"><small class="muted">Hasta</small><input type="date" name="date_to" value="${esc(dateTo || date)}" style="max-width:160px" /></label>
       <span class="row" style="gap:4px">${[['hoy', 'Hoy'], ['7', '7 días'], ['sem', 'Esta semana'], ['mes', 'Este mes']].map(([k, l]) => `<button type="button" class="btn sm ghost" data-rng="${k}">${l}</button>`).join('')}</span>
-      <select name="status" style="max-width:170px"><option value="">Todos los estados</option>${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((s) => `<option value="${s}" ${s === st ? 'selected' : ''}>${STATUS[s]}</option>`).join('')}</select>
+      <details class="multi-sel" id="stSel"><summary class="btn" title="Estados">${stList.length ? (stList.length === 1 ? STATUS[stList[0]] : stList.length + ' estados') : 'Todos los estados'}</summary>
+        <div class="multi-pop" style="width:240px"><div class="multi-list">${['pendiente', 'asignado', 'cargado', 'entregado', 'fallido', 'cancelado'].map((k) => `<label><input type="checkbox" name="status" value="${k}" ${stList.includes(k) ? 'checked' : ''} /> <span class="grow">${STATUS[k]}</span></label>`).join('')}</div>
+          <div class="row" style="gap:6px;margin-top:8px"><button type="button" class="btn sm ghost" id="stNone">Todos</button><button type="button" class="btn sm ghost" id="stOpen" title="Pendiente, asignado, cargado y no entregado">Abiertos</button><span class="grow"></span><button class="btn sm primary">Aplicar</button></div></div></details>
       ${accs.rows.length ? `<select name="account_id" style="max-width:190px"><option value="">Todos los mayoristas</option>${accs.rows.map((a) => `<option value="${a.id}" ${String(a.id) === acc ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}<option value="none" ${acc === 'none' ? 'selected' : ''}>Sin mayorista</option></select>` : ''}
       ${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === off ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}
       <select name="city" style="max-width:190px"><option value="">Todas las ciudades</option>${(await cityList).map((c) => `<option ${c.toLowerCase() === city.toLowerCase() ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
@@ -1147,6 +1150,9 @@ async function viewOrders(v) {
   $('#filt').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/orders?${new URLSearchParams(f)}`; };
   ['city', 'office_id'].forEach((n) => $(`#filt [name=${n}]`)?.addEventListener('change', () => { $$('#filt [name=colonia]').forEach((c) => (c.checked = false)); $('#filt').requestSubmit(); }));
   // varias colonias: buscar, marcar y Aplicar
+  $('#stNone')?.addEventListener('click', () => { $$('#filt [name=status]').forEach((c) => (c.checked = false)); $('#filt').requestSubmit(); });
+  $('#stOpen')?.addEventListener('click', () => { $$('#filt [name=status]').forEach((c) => (c.checked = ['pendiente', 'asignado', 'cargado', 'fallido'].includes(c.value))); $('#filt').requestSubmit(); });
+  document.addEventListener('click', (e) => { const d = $('#stSel'); if (d?.open && !d.contains(e.target)) d.open = false; });
   $('#colQ')?.addEventListener('input', (e) => { const t = e.target.value.toLowerCase().trim(); $$('#colSel .multi-list label').forEach((l) => (l.hidden = !!t && !l.dataset.t.includes(t))); });
   $('#colNone')?.addEventListener('click', () => { $$('#filt [name=colonia]').forEach((c) => (c.checked = false)); $('#filt').requestSubmit(); });
   document.addEventListener('click', (e) => { const d = $('#colSel'); if (d?.open && !d.contains(e.target)) d.open = false; });
@@ -2339,12 +2345,30 @@ async function bulkAssign(v, kind) {
         <input type="number" id="bkPer" min="1" placeholder="Por día" title="Pedidos por día (vacío = repartir parejo)" value="${prev.pd || ''}" style="width:90px" />
         <label class="row" style="gap:4px"><input type="checkbox" id="bkSun" ${prev.sun ? 'checked' : ''} /> Sin domingos</label></span>
       <button class="btn primary" id="bkGo">${icon('truck')} Asignar</button>
+      ${kind === 'customers' ? '' : `<select id="bkRoute" title="Agregar lo marcado a una ruta en curso"><option value="">Agregar a ruta en curso…</option></select>`}
       <button class="btn" id="bkSched" title="Cambia la fecha de entrega de lo marcado a la fecha elegida. Si ya tienen repartidor, pasan a su ruta de ese día">📅 Programar fecha</button>
       <span class="bulk-sep"></span>
       <select id="bkSt"><option value="">Cambiar estado…</option><option value="pendiente">Pendiente (quitar de ruta / reprogramar)</option><option value="fallido">Fallido (intento no exitoso)</option>${store.user.role === 'admin' ? '<option value="entregado">Entregado (registro manual)</option>' : ''}<option value="cancelado">Cancelado</option></select>
       <button class="btn" id="bkStGo">Aplicar</button>
       <button class="btn ghost" id="bkClr">Quitar selección</button>`;
     $('#bkStGo', bar).onclick = () => bulkStatus($('#bkSt', bar).value, kind, picked());
+    // rutas abiertas de hoy (y futuras): agregar lo marcado a la ruta de ese repartidor
+    if ($('#bkRoute', bar)) {
+      const rsel = $('#bkRoute', bar);
+      (bulkAssign.__routes ||= GET(`/api/routes?date=${today()}&date_to=${(() => { const d = new Date(); d.setDate(d.getDate() + 7); return d.toLocaleDateString('en-CA'); })()}`).then((rs) => rs.filter((r) => ['planificada', 'en_curso'].includes(r.status)).sort((a, b) => a.date.localeCompare(b.date) || (a.driver_name || '').localeCompare(b.driver_name || ''))).catch(() => []))
+        .then((rs) => { if (!rsel.isConnected) return; rsel.insertAdjacentHTML('beforeend', rs.map((r) => `<option value="${r.driver_id}|${r.date}">${esc(r.driver_name || 'Ruta')} · ${esc(r.date)} · ${r.stops} paradas${r.status === 'en_curso' ? ' (en curso)' : ''}</option>`).join('')); });
+      rsel.onchange = async () => {
+        if (!rsel.value) return;
+        const [did, d] = rsel.value.split('|');
+        const n = picked().length;
+        if (!(await confirmDlg(`¿Agregar ${n} pedido(s) a la ruta de ${rsel.selectedOptions[0].text.split(' · ')[0]} del ${d}? La ruta se reordena.`))) { rsel.value = ''; return; }
+        try {
+          const r = await POST('/api/routes/assign', { driver_id: did, date: d, order_ids: picked() });
+          toast(`${r.assigned} pedido(s) agregados a la ruta de ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}`, r.skipped.length ? '' : 'ok');
+          bulkAssign.__routes = null; render();
+        } catch (er) { toast(er.message, 'bad'); rsel.value = ''; }
+      };
+    }
     $('#bkSched', bar).onclick = async (e) => {
       const btn = e.currentTarget;
       const d = $('#bkDate', bar).value;

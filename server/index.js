@@ -3432,7 +3432,7 @@ function assignOrdersTo(req, drv, ids, date) {
     const mine = new Set(officeOrders(req, ids));
     for (const o of rows) {
       if (!mine.has(o.id)) skipped.push({ tracking_code: o.tracking_code, reason: 'es de otra oficina' });
-      else if (!['pendiente', 'asignado'].includes(o.status)) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
+      else if (!['pendiente', 'asignado', 'fallido'].includes(o.status) && !(o.status === 'cargado' && o.scheduled_date < today())) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
       else if (o.driver_id === drv.id && o.route_id && o.scheduled_date === date) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
       else take.push(o);
     }
@@ -3537,6 +3537,26 @@ app.post('/api/routes/:id/date', auth(...STAFF), wrap((req, res) => {
   audit(req, 'rutas.fecha', `${r.name || 'Ruta ' + r.id}: ${r.date} → ${date} (${out.assigned} pedidos)`);
   res.json(out);
 }));
+// Pedidos cuya fecha ya pasó sin entregarse: se sueltan de su ruta y repartidor.
+// Los no entregados conservan su estado (y su intento registrado); los que ni se intentaron vuelven a pendiente.
+function releaseOverdue() {
+  try {
+    const t = today();
+    const rows = db.prepare(`SELECT id, status, scheduled_date FROM orders WHERE scheduled_date < ?
+      AND (status IN ('asignado','cargado') OR (status='fallido' AND (route_id IS NOT NULL OR driver_id IS NOT NULL)))`).all(t);
+    const routes = db.prepare("SELECT COUNT(*) n FROM routes WHERE date < ? AND status IN ('planificada','en_curso')").get(t).n;
+    if (!rows.length && !routes) return;
+    tx(() => {
+      for (const o of rows) {
+        db.prepare(`UPDATE orders SET status=?, route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL,
+          notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?`)
+          .run(o.status === 'fallido' ? 'fallido' : 'pendiente', `${o.status === 'fallido' ? 'No entregado' : 'Sin entregar'} el ${o.scheduled_date}: liberado para reasignar`, o.id);
+      }
+      db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE date < ? AND status IN ('planificada','en_curso')").run(t);
+    });
+    if (rows.length) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('pedidos.liberar', `${rows.length} pedido(s) no exitosos en su fecha quedaron libres para reasignar`);
+  } catch (e) { console.error('releaseOverdue', e.message); }
+}
 // Programar varios pedidos en un rango de días para un repartidor: se reparten por cercanía, N por día
 app.post(
   '/api/routes/assign-range',
@@ -4507,6 +4527,9 @@ if (require.main === module) {
     process.exit(1);
   }
   notify.start();
+  // Pedidos no exitosos en su fecha programada: al día siguiente quedan libres (sin ruta ni repartidor) para reasignarlos
+  setTimeout(releaseOverdue, 15000);
+  setInterval(releaseOverdue, 30 * 60000).unref();
   // Resumen por oficina y ciudad en la hoja de Google (cada 15 min)
   const resumenTick = () => notify.pushResumen(resumenRows()).catch((e) => console.error('resumen sheet', e.message));
   setTimeout(resumenTick, 60000);
@@ -4515,4 +4538,5 @@ if (require.main === module) {
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }
+app.releaseOverdue = releaseOverdue;
 module.exports = app;

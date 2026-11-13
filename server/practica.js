@@ -13,5 +13,8 @@ for (const [k, v] of [['practice_mode', '1'], ['sheets_enabled', '0'], ['sheets_
 
 const app = require('./index');
 require('./notify').start();
+// pedidos no exitosos en su fecha: se liberan para reasignar (igual que en producción)
+setTimeout(app.releaseOverdue, 5000);
+setInterval(app.releaseOverdue, 30 * 60000).unref();
 // la geolocalización arranca sola con el servidor de producción; en práctica se llama al importar
 app.listen(Number(process.env.PORT), () => console.log(`COPIA DE PRÁCTICA en http://localhost:${process.env.PORT} (datos en data/practica)`));
