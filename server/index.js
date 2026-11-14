@@ -2331,6 +2331,7 @@ app.post(
     const seen = new Map();
     const created = [];
     let stockNeeded = 0;
+    let noStockOrders = 0;
     db.exec('BEGIN IMMEDIATE');
     try {
       rows.forEach((raw, i) => {
@@ -2381,7 +2382,9 @@ app.post(
                 if (accountId) P('UPDATE orders SET account_id=? WHERE id=?').run(accountId, oid);
                 if (product) {
                   P('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
-                  moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
+                  // sin existencia el pedido se crea igual (queda por surtir)
+                  if (P('SELECT stock FROM products WHERE id=?').get(product.id).stock >= qty) moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
+                  else noStockOrders++;
                   stockNeeded += qty;
                 }
                 out.order = code;
@@ -2408,7 +2411,7 @@ app.post(
     const n = (a) => results.filter((x) => x.action === a).length;
     const summary = { total: results.length, nuevos: n('nuevo'), actualizados: n('actualizado'), existentes: n('existente'), errores: n('error'),
       pedidos: results.filter((x) => x.order && !String(x.order).startsWith('ya tiene')).length,
-      sin_ubicacion: 0, stock_disponible: product ? db.prepare('SELECT stock FROM products WHERE id=?').get(product.id).stock : null, stock_necesario: stockNeeded };
+      sin_ubicacion: 0, stock_disponible: product ? db.prepare('SELECT stock FROM products WHERE id=?').get(product.id).stock : null, stock_necesario: stockNeeded, sin_inventario: noStockOrders };
     if (!dry) {
       summary.sin_ubicacion = db.prepare('SELECT COUNT(*) n FROM customers WHERE lat IS NULL').get().n;
       if (notifyNow) for (const id of created) notify.queueEvent('registrado', id);
@@ -2930,6 +2933,7 @@ app.post(
     const tmin = tnum(req.body.temp_min), tmax = tnum(req.body.temp_max);
     if (tmin != null && tmax != null && tmin > tmax) throw new HttpError(400, 'La temperatura mínima no puede ser mayor que la máxima');
     if (!customer_id) throw new HttpError(400, 'Selecciona un cliente');
+    const noStock = [];
     const id = tx(() => {
       const code = (tracking_code || '').trim() || genTracking();
       const r = db
@@ -2941,12 +2945,14 @@ app.post(
       for (const it of items) {
         const qty = Math.abs(Math.trunc(Number(it.qty))) || 1;
         db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, it.product_id, qty);
-        moveStock(it.product_id, 'salida', qty, `Pedido ${code}`, req.user.id);
+        // sin existencia suficiente el pedido se crea igual (queda por surtir); solo se descuenta lo que hay
+        if ((db.prepare('SELECT stock FROM products WHERE id=?').get(it.product_id)?.stock || 0) >= qty) moveStock(it.product_id, 'salida', qty, `Pedido ${code}`, req.user.id);
+        else noStock.push(db.prepare('SELECT name FROM products WHERE id=?').get(it.product_id)?.name || 'producto');
       }
       return oid;
     });
     notify.queueEvent('registrado', id);
-    res.status(201).json(loadOrder(id));
+    res.status(201).json({ ...loadOrder(id), without_stock: noStock });
   })
 );
 app.post(

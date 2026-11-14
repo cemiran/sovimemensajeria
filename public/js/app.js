@@ -1437,7 +1437,7 @@ async function orderForm(done) {
     try {
       const o = await POST('/api/orders', { account_id: $('#oacc', m.el).value || null, customer_id: customer.id, items: items.map(({ product_id, qty }) => ({ product_id, qty })), scheduled_date: $('#odate', m.el).value, priority: $('#oprio', m.el).value, cod_amount: $('#ocod', m.el).value, notes: $('#onotes', m.el).value, tracking_code: $('#ocode', m.el).value,
         shipment_type: $('#oship', m.el).value, temp_min: tempRange()[0], temp_max: tempRange()[1], requires_seal: $('#oreqseal', m.el).checked, seal_number: $('#oseal', m.el).value });
-      toast(`Pedido ${o.tracking_code} creado`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
+      toast(`Pedido ${o.tracking_code} creado${o.without_stock?.length ? ` sin inventario de ${o.without_stock.join(', ')} (queda por surtir)` : ''}`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
     } catch (e) { toast(e.message, 'bad'); }
   };
 }
@@ -3889,12 +3889,12 @@ function importCustomers(opts) {
   const ACT = { nuevo: ['Nuevo', 'ok'], actualizado: ['Actualizar', 'warn'], existente: ['Ya existe', ''], error: ['Error', 'off'] };
   const step3 = (rows, orders, r, done = false) => {
     const s = r.summary;
-    const shortStock = orders.product_id && s.stock_disponible != null && done === false && s.stock_disponible < 0;
+    const shortStock = false;
     body.innerHTML = `${done ? `<div class="info-bar" style="background:var(--ok-soft);color:var(--ok)">${icon('check')} <b>Importación terminada.</b> ${s.sin_ubicacion ? `Se están ubicando en el mapa ${s.sin_ubicacion} domicilio(s) en segundo plano (≈1 por segundo).` : ''}</div>` : `<div class="info-bar">${icon('info')} Vista previa: todavía no se ha guardado nada.</div>`}
       <div class="imp-sum"><div class="kpi card"><div class="label">Filas</div><div class="value">${s.total}</div></div><div class="kpi card"><div class="label">Nuevos</div><div class="value" style="color:var(--ok)">${s.nuevos}</div></div>
         <div class="kpi card"><div class="label">Actualizar</div><div class="value" style="color:var(--warn)">${s.actualizados}</div></div><div class="kpi card"><div class="label">Pedidos</div><div class="value">${s.pedidos}</div></div>
         <div class="kpi card"><div class="label">Errores</div><div class="value" style="color:${s.errores ? 'var(--bad)' : 'inherit'}">${s.errores}</div></div></div>
-      ${orders.create && orders.product_id ? `<small class="muted">Existencia del producto después de importar: <b>${s.stock_disponible}</b> (se usan ${s.stock_necesario}).</small>` : ''}
+      ${orders.create && orders.product_id ? `<small class="muted">Existencia del producto después de importar: <b>${s.stock_disponible}</b> (se usan ${s.stock_necesario - (s.sin_inventario || 0)}).</small>${s.sin_inventario ? `<div class="info-bar" style="margin-top:6px">📦 ${s.sin_inventario} pedido(s) se crean <b>sin inventario</b> (por surtir): el repartidor elige el equipo al entregar.</div>` : ''}` : ''}
       ${orders.create && !orders.notify ? '<small class="muted">🔕 No se avisará a los clientes al crear los pedidos.</small>' : ''}
       ${s.total > 300 ? `<small class="muted">Detalle: ${s.errores ? 'primero los errores, luego ' : ''}las primeras ${Math.min(300, r.results.length)} filas de ${s.total}.</small>` : ''}
       <div class="table-wrap" style="max-height:320px"><table><thead><tr><th>Fila</th><th>Cliente</th><th>Domicilio</th><th>Resultado</th><th>Pedido</th></tr></thead><tbody>
