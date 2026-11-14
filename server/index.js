@@ -1545,14 +1545,20 @@ app.post('/api/orders/:id/items', auth('admin'), wrap((req, res) => {
   const qty = Math.max(1, Math.trunc(Number(req.body?.qty) || 1));
   const serials = [].concat(req.body?.serials || req.body?.serial || []).map((x) => String(x || '').trim()).filter(Boolean);
   if (serials.length > qty) throw new HttpError(400, 'Hay más números de serie que piezas');
+  // si el pedido ya trae ese equipo sin S/N, el S/N llena esa pieza (no se agrega otra)
+  let add = qty;
   tx(() => {
     const it = db.prepare('SELECT * FROM order_items WHERE order_id=? AND product_id=?').get(o.id, p.id);
-    if (it) db.prepare('UPDATE order_items SET qty = qty + ? WHERE order_id=? AND product_id=?').run(qty, o.id, p.id);
+    if (it && p.serialized && serials.length) {
+      const have = db.prepare("SELECT COUNT(*) n FROM serials WHERE order_id=? AND product_id=? AND status IN ('asignado','entregado')").get(o.id, p.id).n;
+      add = Math.max(0, qty - Math.max(0, it.qty - have));
+    }
+    if (it) { if (add) db.prepare('UPDATE order_items SET qty = qty + ? WHERE order_id=? AND product_id=?').run(add, o.id, p.id); }
     else db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(o.id, p.id, qty);
-    takeStock(o.id, p.id, qty, o.tracking_code, req.user.id, ' (agregado por administración)', { force: o.status === 'entregado' });
+    if (add) takeStock(o.id, p.id, add, o.tracking_code, req.user.id, ' (agregado por administración)', { force: o.status === 'entregado' });
     for (const sn of serials) assignSerial(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id), sn, req.user);
   });
-  audit(req, 'pedidos.producto', `${o.tracking_code}: + ${qty} × ${p.name}${serials.length ? ' (S/N ' + serials.join(', ') + ')' : ''}`);
+  audit(req, 'pedidos.producto', add ? `${o.tracking_code}: + ${add} × ${p.name}${serials.length ? ' (S/N ' + serials.join(', ') + ')' : ''}` : `${o.tracking_code}: S/N ${serials.join(', ')} de ${p.name} (la pieza ya estaba en el pedido)`);
   if (o.status === 'entregado') resendSheet(o.id);
   res.json(loadOrder(o.id));
 }));
