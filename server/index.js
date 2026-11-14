@@ -2734,7 +2734,7 @@ app.get(
 
 // ---------- Pedidos ----------
 const ORDER_SELECT = `
-  SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.external_id telnor_phone, c.address, c.reference address_reference, c.city customer_city, c.colonia customer_colonia,
+  SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.external_id telnor_phone, c.address, c.reference address_reference, c.city customer_city, c.colonia customer_colonia, c.zip customer_zip,
          c.lat, c.lng, c.geo_quality, c.window_start, c.window_end, u.name driver_name, (SELECT name FROM accounts WHERE id = o.account_id) account_name
   FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id`;
 
@@ -2756,7 +2756,8 @@ function canSee(user, order) {
 }
 // Ordena pedidos por ciudad y, dentro de cada ciudad, por cercanía (vecino más cercano desde su oficina):
 // los renglones seguidos quedan juntos en el mapa y al seleccionarlos se arma una ruta compacta.
-function geoSort(rows) {
+const zipOf = (z) => String(z || '').replace(/\D/g, '').slice(0, 5);
+function geoSort(rows, by = 'colonia') {
   const groups = new Map();
   for (const r of rows) {
     const k = canonCity(r.customer_city || '') || 'Sin ciudad';
@@ -2774,8 +2775,8 @@ function geoSort(rows) {
     const d2 = (a, b) => ((a.lng - b.lng) * kx) ** 2 + (a.lat - b.lat) ** 2;
     // colonias de la ciudad: se recorren en orden de cercanía (desde la oficina) y dentro de cada una, pedido por pedido
     const cols = new Map();
-    const colName = (r) => String(r.customer_colonia || '').replace(/\s+/g, ' ').trim() || 'Sin colonia';
-    for (const r of geo) { const k = colKey(colName(r)) || 'sin colonia'; if (!cols.has(k)) cols.set(k, { name: colName(r), rows: [] }); const g = cols.get(k); if (colName(r).length < g.name.length) g.name = colName(r); g.rows.push(r); }
+    const colName = by === 'cp' ? (r) => (zipOf(r.customer_zip) ? 'CP ' + zipOf(r.customer_zip) : 'Sin código postal') : (r) => String(r.customer_colonia || '').replace(/\s+/g, ' ').trim() || 'Sin colonia';
+    for (const r of geo) { const k = by === 'cp' ? colName(r) : colKey(colName(r)) || 'sin colonia'; if (!cols.has(k)) cols.set(k, { name: colName(r), rows: [] }); const g = cols.get(k); if (colName(r).length < g.name.length) g.name = colName(r); g.rows.push(r); }
     const pend = [...cols.values()].map((c) => ({ ...c, lat: c.rows.reduce((a, r) => a + r.lat, 0) / c.rows.length, lng: c.rows.reduce((a, r) => a + r.lng, 0) / c.rows.length }));
     let i = 0;
     while (pend.length) {
@@ -2847,6 +2848,8 @@ app.get(
       const ids = db.prepare(`SELECT DISTINCT colonia FROM customers WHERE colonia IS NOT NULL`).all().map((r) => r.colonia).filter((x) => keys.has(colKey(x)));
       if (ids.length) { where.push(`c.colonia IN (${ids.map(() => '?').join(',')})`); args.push(...ids); } else where.push('0');
     }
+    const zipQ = [].concat(req.query.zip || []).flatMap((x) => String(x).split(/[,\s]+/)).map(zipOf).filter(Boolean);
+    if (zipQ.length) { where.push(`substr(replace(COALESCE(c.zip,''),' ',''),1,5) IN (${zipQ.map(() => '?').join(',')})`); args.push(...zipQ); }
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
@@ -2858,9 +2861,25 @@ app.get(
     const rows = db.prepare(`${ORDER_SELECT} ${w} ORDER BY o.scheduled_date DESC, o.route_id, o.stop_seq, o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
     const snq = db.prepare("SELECT GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id = ?");
     for (const r of rows) r.sn_list = snq.get(r.id).l;
-    res.json({ total, rows: req.query.sort === 'geo' ? geoSort(rows) : rows });
+    res.json({ total, rows: req.query.sort === 'geo' ? geoSort(rows) : req.query.sort === 'cp' ? geoSort(rows, 'cp') : rows });
   })
 );
+app.get('/api/orders/zips', auth(...STAFF), wrap((req, res) => {
+  const where = ["TRIM(COALESCE(c.zip,'')) <> ''", "o.status <> 'cancelado'"];
+  const args = [];
+  const off = req.user.office || Number(req.query.office_id) || null;
+  if (off) { where.push(`${OFFICE_OF('c')} = ?`); args.push(off); }
+  if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
+  if (req.query.open === '1') where.push("o.status IN ('pendiente','asignado','cargado','fallido')");
+  const rows = db.prepare(`SELECT c.zip, c.colonia, c.city, COUNT(*) n FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${where.join(' AND ')} GROUP BY c.zip, c.colonia, c.city`).all(...args);
+  const m = new Map();
+  for (const r of rows) {
+    const z = zipOf(r.zip); if (!z) continue;
+    const x = m.get(z) || { zip: z, city: r.city, n: 0, cols: new Map() };
+    x.n += r.n; if (r.colonia) x.cols.set(r.colonia, (x.cols.get(r.colonia) || 0) + r.n); m.set(z, x);
+  }
+  res.json([...m.values()].map((x) => ({ zip: x.zip, city: x.city, n: x.n, colonias: [...x.cols.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map((c) => c[0]) })).sort((a, b) => a.zip.localeCompare(b.zip)));
+}));
 app.get('/api/orders/colonias', auth(...STAFF), wrap((req, res) => {
   const where = ["TRIM(COALESCE(c.colonia,'')) <> ''"];
   const args = [];
