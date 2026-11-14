@@ -237,6 +237,22 @@ async function afterCustomerMoved(s, onEdit) {
   }
   onEdit();
 }
+// El cliente sí lo quiere: el pedido no entregado regresa a la ruta de hoy del mismo repartidor (o de otro)
+async function reactivateOrder(o, after) {
+  const drivers = await GET('/api/users?role=repartidor&active=1').catch(() => []);
+  const did = o.driver_id || o.evidences?.find((e) => e.result === 'fallido')?.driver_id;
+  const d = modal('El cliente sí lo quiere', `<form id="raF" class="stack">
+    <p style="margin:0"><b>${esc(o.customer_name || '')}</b> · ${esc(o.tracking_code)}<br><small class="muted">Regresa como parada pendiente a la ruta de hoy. El intento anterior queda en el historial, marcado como reactivado.</small></p>
+    <label class="f">Repartidor<select name="driver_id">${drivers.map((x) => `<option value="${x.id}" ${x.id === did ? 'selected' : ''}>${esc(x.name)}${x.id === did ? ' (el mismo)' : ''}</option>`).join('')}</select></label>
+    <div class="grid g2"><label class="f">Hora acordada (opcional)<input type="time" name="appointment_time" /></label>
+    <label class="f">Nota<input name="reason" value="El cliente confirmó que sí lo quiere" /></label></div></form>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn ok" id="raOk">↩ Regresar a la ruta</button>' });
+  $('#raOk', d.el).onclick = async () => {
+    const f = $('#raF', d.el);
+    try { const x = await POST(`/api/orders/${o.id}/reactivate`, { driver_id: Number(f.driver_id.value), reason: f.reason.value, appointment_time: f.appointment_time.value }); toast(`${o.tracking_code} regresó a la ruta de ${x.driver}`, 'ok'); d.close(); after?.(); }
+    catch (e) { toast(e.message, 'bad'); }
+  };
+}
 // Quitar clientes de una ruta: liberarlos, reprogramarlos o cancelarlos (administrador)
 function removeFromRoute(r, ids, after) {
   if (!ids.length) return;
@@ -1290,7 +1306,7 @@ async function orderDetail(id) {
       </div>
     </div>`, {
     wide: true,
-    footer: `${staff && ['fallido', 'pendiente', 'asignado'].includes(o.status) ? '<button class="btn" id="resch">Reprogramar</button>' : ''}
+    footer: `${staff && !driverMode() && (o.status === 'fallido' || (o.status === 'pendiente' && o.evidences.some((e) => e.result === 'fallido'))) ? '<button class="btn ok" id="react">↩ El cliente sí lo quiere</button>' : ''}${staff && ['fallido', 'pendiente', 'asignado'].includes(o.status) ? '<button class="btn" id="resch">Reprogramar</button>' : ''}
              ${staff && o.status !== 'cancelado' && (o.status !== 'entregado' || store.user.role === 'admin') ? '<button class="btn" id="chgSt">Cambiar estado</button>' : ''}
              ${staff && !['entregado', 'cancelado'].includes(o.status) ? '<button class="btn bad" id="cancel">Cancelar pedido</button>' : ''}
              ${store.user.role === 'admin' && !driverMode() ? `<button class="btn" id="editAll">${icon('edit')} Editar todo</button>` : ''}<button class="btn" id="print">Imprimir etiqueta</button><button class="btn primary" data-close>Cerrar</button>`,
@@ -1377,6 +1393,7 @@ async function orderDetail(id) {
     if (!(await confirmDlg('¿Cancelar el pedido? El stock regresará al inventario.'))) return;
     await POST(`/api/orders/${o.id}/cancel`); toast('Pedido cancelado', 'ok'); m.close(); render();
   });
+  $('#react', m.el)?.addEventListener('click', () => reactivateOrder(o, () => { m.close(); render(); }));
   $('#resch', m.el)?.addEventListener('click', async () => {
     const d = prompt('Nueva fecha (AAAA-MM-DD):', today());
     if (!d) return;
@@ -1810,7 +1827,7 @@ async function routeDetail(id) {
         <button class="btn sm ghost" id="rmNone">Desmarcar</button></div>
       <div class="table-wrap" style="max-height:520px"><table><thead><tr><th><input type="checkbox" id="rmAll" title="Marcar todos los pendientes" /></th><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
         ${r.stops.map((s) => `<tr><td>${['asignado', 'cargado'].includes(s.status) ? `<input type="checkbox" data-rms="${s.id}" />` : ''}</td><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.appointment_time ? `<br><small><b>⏰ ${esc(s.appointment_time)}</b> acordada</small>` : s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
-          <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar este cliente de la ruta" style="color:var(--bad)">${icon('x')} Quitar</button>` : ''}</td></tr>`).join('')}
+          <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar este cliente de la ruta" style="color:var(--bad)">${icon('x')} Quitar</button>` : s.status === 'fallido' ? `<button class="btn ghost sm" data-react="${s.id}" title="El cliente sí lo quiere: regresa a la ruta" style="color:var(--ok)">↩ Sí lo quiere</button>` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     </div>`, {
     wide: true,
@@ -1870,6 +1887,7 @@ async function routeDetail(id) {
     try { const x = await POST(`/api/routes/${r.id}/geo-improve`, {}); toast(x.mejoradas ? `${x.mejoradas} de ${x.revisadas} ubicaciones mejoradas${x.mismo_domicilio ? ` (${x.mismo_domicilio} por domicilio ya confirmado)` : ''}` : `Se revisaron ${x.revisadas}: no se encontró una ubicación más precisa`, x.mejoradas ? 'ok' : ''); reopenRd(); }
     catch (er) { toast(er.message, 'bad'); e.target.disabled = false; e.target.textContent = '📍 Mejorar ubicaciones de esta ruta'; }
   };
+  $$('[data-react]', m.el).forEach((b) => (b.onclick = () => reactivateOrder({ ...r.stops.find((x) => x.id === Number(b.dataset.react)), driver_id: r.driver_id }, reopenRd)));
   const rmSel = () => $$('[data-rms]', m.el).filter((c) => c.checked).map((c) => Number(c.dataset.rms));
   const pinOf = (id) => rdPins.find((p) => p.s.id === id);
   const paintPins = () => rdPins.forEach(({ s: st, mk }) => { const c = $(`[data-rms="${st.id}"]`, m.el); mk.getElement()?.classList.toggle('pin-sel', !!c?.checked); });

@@ -3791,6 +3791,32 @@ function selfDriver(req, id) {
   const u = db.prepare('SELECT can_deliver FROM users WHERE id=?').get(req.user.id);
   if (u && !u.can_deliver) { db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(req.user.id); audit(req, 'usuario.tambien_reparte', `${req.user.name} se asignó pedidos: se activó "También reparte"`); }
 }
+// El cliente sí lo quiere: el pedido no entregado vuelve a la ruta de hoy de su repartidor (o del elegido) como parada pendiente.
+// El intento fallido queda en el historial, marcado como reactivado.
+app.post('/api/orders/:id/reactivate', auth(...STAFF), wrap((req, res) => res.json(reactivateOrder(req, Number(req.params.id), req.body || {}))));
+function reactivateOrder(req, orderId, body) {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(orderId);
+  if (!o) throw new HttpError(404, 'Pedido no encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina o ciudad');
+  const lastFail = db.prepare("SELECT id, driver_id, reason FROM evidences WHERE order_id=? AND result='fallido' ORDER BY id DESC LIMIT 1").get(o.id);
+  if (!(o.status === 'fallido' || (o.status === 'pendiente' && lastFail))) throw new HttpError(409, `El pedido está "${o.status}": solo se reactivan pedidos no entregados`);
+  const did = Number(body.driver_id) || o.driver_id || lastFail?.driver_id;
+  const drv = did ? db.prepare("SELECT id, name, active FROM users WHERE id=? AND (role='repartidor' OR can_deliver=1)").get(did) : null;
+  if (!drv || !drv.active) throw new HttpError(400, 'Elige el repartidor que lo va a entregar');
+  officeDriver(req, drv.id);
+  const why = String(body.reason || '').trim().slice(0, 200) || 'El cliente confirmó que sí lo quiere';
+  const hora = String(body.appointment_time || '');
+  const out = tx(() => {
+    db.prepare(`UPDATE orders SET status='pendiente', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL, retry_at=NULL, delivered_at=NULL,
+      appointment_time=CASE WHEN ? <> '' THEN ? ELSE appointment_time END, notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`)
+      .run(/^\d{2}:\d{2}$/.test(hora) ? hora : '', hora, ` | Reactivado ${today()} (${req.user.name}): ${why}${lastFail?.reason ? ' · antes: ' + lastFail.reason : ''}`, o.id);
+    if (lastFail) db.prepare("UPDATE evidences SET notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?").run(` [Reactivado: ${why}]`, lastFail.id);
+    return assignOrdersTo(req, { id: drv.id, name: drv.name }, [o.id], today());
+  });
+  if (!out.assigned) throw new HttpError(409, out.skipped?.[0]?.reason || 'No se pudo regresar a la ruta');
+  audit(req, 'pedido.reactivar', `${o.tracking_code}: el cliente sí lo quiere → ruta de ${drv.name} (${today()})${lastFail?.reason ? ' · antes: ' + lastFail.reason : ''}`);
+  return { ok: true, driver: drv.name, route_id: out.route_id, order: loadOrder(o.id) };
+}
 function assignOrdersTo(req, drv, ids, date) {
   {
     const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
@@ -5031,5 +5057,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder };
 module.exports = app;
