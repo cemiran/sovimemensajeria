@@ -11,14 +11,16 @@ const enabled = () => !!key() && getSettings().practice_mode !== '1';
 const used = (kind) => db.prepare('SELECT n FROM gm_usage WHERE day=? AND kind=?').get(day(), kind)?.n || 0;
 const add = (kind, n) => db.prepare('INSERT INTO gm_usage (day, kind, n) VALUES (?,?,?) ON CONFLICT(day, kind) DO UPDATE SET n = n + excluded.n').run(day(), kind, n);
 const CAP_DEF = { geocode: 300, elements: 3000, routes: 1500, tiles: 20000 };
-const cap = (kind) => Number(getSettings()['google_daily_' + kind]) || CAP_DEF[kind];
+// extra de un solo día para ubicar paradas en ruta (google_geocode_extra + google_geocode_extra_day = fecha): no lo usa la búsqueda masiva
+const extra = () => { const s = getSettings(); return s.google_geocode_extra_day === day() ? Number(s.google_geocode_extra) || 0 : 0; };
+const cap = (kind) => (Number(getSettings()['google_daily_' + kind]) || CAP_DEF[kind]) + (kind === 'geocode' ? extra() : 0);
 const left = (kind) => Math.max(0, cap(kind) - used(kind));
 let lastError = null;
 
 // ---------- Ubicar un domicilio ----------
 // Devuelve { lat, lng, quality: 'exacta' | 'calle' | 'colonia' | 'ciudad', partial } o null
 // la búsqueda masiva (bulk) deja libre una reserva del tope diario para las paradas en ruta y los clientes nuevos
-const reserve = () => Number(getSettings().google_geocode_reserve) || Math.round(cap('geocode') * 0.2);
+const reserve = () => (Number(getSettings().google_geocode_reserve) || Math.round((cap('geocode') - extra()) * 0.2)) + extra();
 async function geocode(text, { zip, bulk = false } = {}) {
   if (!enabled() || left('geocode') < (bulk ? reserve() + 1 : 1)) return null;
   add('geocode', 1);
