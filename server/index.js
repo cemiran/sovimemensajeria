@@ -102,7 +102,7 @@ function auth(...roles) {
     if (!token) return res.status(401).json({ error: 'No autenticado' });
     try {
       const p = jwt.verify(token, JWT_SECRET);
-      const u = db.prepare('SELECT id, name, email, role, active, token_version, office_id, can_deliver FROM users WHERE id = ?').get(p.sub);
+      const u = db.prepare('SELECT id, name, email, role, active, token_version, office_id, can_deliver, cities FROM users WHERE id = ?').get(p.sub);
       if (!u || !u.active) return res.status(401).json({ error: 'Usuario inactivo' });
       if (req.headers['x-as-driver'] === '1' && u.can_deliver && u.role !== 'repartidor') { u.real_role = u.role; u.role = 'repartidor'; }
       if ((p.tv || 0) !== u.token_version) return res.status(401).json({ error: 'Tu sesión se cerró, vuelve a entrar' });
@@ -112,6 +112,8 @@ function auth(...roles) {
       delete u.token_version;
       u.office = u.role === 'admin' ? null : Number(u.office_id || db.prepare('SELECT id FROM warehouses WHERE is_default = 1').get()?.id || 0) || null;
       u.supervises = db.prepare('SELECT id FROM warehouses WHERE supervisor_id = ? AND active = 1').all(u.id).map((r) => r.id);
+      // supervisor por ciudad: solo ve sus ciudades (en modo repartidor, solo su ruta)
+      u.cities = u.role === 'despachador' && u.cities ? String(u.cities).split(',').map((x) => x.trim()).filter(Boolean) : null;
       req.user = u;
       next();
     } catch {
@@ -140,7 +142,7 @@ function tempPassword() {
 // Sesión de 30 días que se renueva sola mientras se usa (el repartidor no vuelve a entrar a media ruta).
 // Se cierra de inmediato si se desactiva el usuario o se cambia su contraseña (token_version).
 const signToken = (u) => jwt.sign({ sub: u.id, role: u.role, tv: u.token_version || 0 }, JWT_SECRET, { expiresIn: '30d' });
-const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, last_login, must_change_password, created_at';
+const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, cities, last_login, must_change_password, created_at';
 
 app.post(
   '/api/auth/login',
@@ -188,7 +190,7 @@ app.post(
 );
 
 // ---------- Usuarios (administración) ----------
-const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode,
+const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id,
   u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
 
 app.get(
@@ -244,6 +246,16 @@ app.get(
   })
 );
 
+// Rol "supervisor": despachador limitado a sus ciudades; todas deben ser de la misma oficina
+function supCities(b) {
+  if (b.role !== 'supervisor') return undefined;
+  const list = [...new Set([].concat(b.cities || []).flatMap((x) => String(x).split(',')).map((x) => canonCity(x.trim())).filter(Boolean))];
+  if (!list.length) throw new HttpError(400, 'Elige al menos una ciudad para el supervisor');
+  const offs = [...new Set(list.map((c) => officeForCity(c)))];
+  if (offs.length > 1) throw new HttpError(400, 'Las ciudades del supervisor deben ser de la misma oficina (crea otro supervisor para la otra oficina)');
+  b.role = 'despachador';
+  return { cities: list.join(', '), office: offs[0] || null };
+}
 function validateUser(b, isNew) {
   if (!String(b.name || '').trim()) throw new HttpError(400, 'El nombre es obligatorio');
   if (!EMAIL_RE.test(String(b.email || '').trim())) throw new HttpError(400, 'Correo inválido');
@@ -254,6 +266,7 @@ function activeAdmins(exceptId) {
   return db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin' AND active=1 AND id<>?").get(exceptId).n;
 }
 function createUser(b) {
+  const sup = supCities(b);
   validateUser(b, true);
   const pwd = b.password || tempPassword();
   try {
@@ -269,6 +282,7 @@ function createUser(b) {
     const cd = b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(b.can_deliver) ? 1 : 0;
     if (cd) db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(Number(r.lastInsertRowid));
     if (b.route_mode === 'dia') db.prepare("UPDATE users SET route_mode='dia' WHERE id=?").run(Number(r.lastInsertRowid));
+    if (sup) db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, Number(r.lastInsertRowid));
     return { id: Number(r.lastInsertRowid), temp_password: b.password ? null : pwd };
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `El correo ${b.email} ya está registrado`);
@@ -280,7 +294,7 @@ app.post(
   auth('admin'),
   wrap((req, res) => {
     const r = createUser(req.body || {});
-    audit(req, 'usuario.alta', `${req.body.email} (${req.body.role})`);
+    audit(req, 'usuario.alta', `${req.body.email} (${req.body.cities ? 'supervisor de ' + [].concat(req.body.cities).join(', ') : req.body.role})`);
     res.status(201).json(r);
   })
 );
@@ -312,6 +326,7 @@ app.put(
     if (!u) throw new HttpError(404, 'No encontrado');
     const b = { ...u, ...req.body };
     b.active = b.active === true || b.active === 1 || b.active === '1' || b.active === 'on' ? 1 : 0;
+    const sup = supCities(b);
     validateUser(b, false);
     if (u.id === req.user.id && (b.role !== 'admin' || !b.active))
       throw new HttpError(400, 'No puedes quitarte el rol de administrador ni desactivar tu propia cuenta');
@@ -326,6 +341,10 @@ app.put(
         db.prepare('UPDATE users SET route_mode=? WHERE id=?').run(req.body.route_mode, u.id);
         audit(req, 'usuario.tipo_ruta', `${u.name}: ${req.body.route_mode === 'dia' ? 'ruta por día (a medianoche se libera lo pendiente)' : 'ruta continua (lo pendiente sigue con él hasta terminar)'}`);
       }
+      if (sup && (sup.cities !== u.cities || sup.office !== u.office_id)) {
+        db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, u.id);
+        audit(req, 'usuario.supervisor', `${u.name}: supervisor de ${sup.cities}`);
+      } else if (!sup && req.body.role && u.cities) db.prepare('UPDATE users SET cities=NULL WHERE id=?').run(u.id);
       if (req.body.can_deliver !== undefined || b.role === 'repartidor')
         db.prepare('UPDATE users SET can_deliver=? WHERE id=?').run(b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(req.body.can_deliver) ? 1 : 0, u.id);
     } catch (e) {
@@ -1975,6 +1994,7 @@ app.get(
     }
     const offC = req.user.office || req.query.office_id;
     if (offC) { w = (w ? `WHERE (${w.slice(6)}) AND ` : 'WHERE ') + `${OFFICE_OF('c')} = ?`; args.push(Number(offC)); }
+    if (cityIn(req)) w = (w ? `WHERE (${w.slice(6)})` : 'WHERE 1') + cityIn(req);
     const total = db.prepare(`SELECT COUNT(*) c FROM customers c ${w}`).get(...args).c;
     const rows = db
       .prepare(
@@ -2100,6 +2120,7 @@ app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
   const cw = [];
   const ca = [];
   if (off) { cw.push(`${OFFICE_OF('c')} = ?`); ca.push(off); }
+  if (cityIn(req)) cw.push('1' + cityIn(req));
   if (city) { cw.push('lower(TRIM(c.city)) = lower(TRIM(?))'); ca.push(city); }
   if (drv) { cw.push('o.driver_id = ?'); ca.push(drv); }
   const W = cw.length ? ' AND ' + cw.join(' AND ') : '';
@@ -2147,7 +2168,7 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
   const [p1, p2] = [okD(req.query.from) ? req.query.from : today(), okD(req.query.to) ? req.query.to : today()].sort();
   const drvB = Number(req.query.driver_id) || null;
-  const W = `WHERE 1 ${drvB ? `AND o.driver_id = ${drvB}` : ''} ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
+  const W = `WHERE 1 ${drvB ? `AND o.driver_id = ${drvB}` : ''} ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''}${cityIn(req)} ${city ? 'AND lower(TRIM(c.city)) = lower(?)' : ''}`;
   const A = city ? [city] : [];
   const cols = `COUNT(DISTINCT c.id) clientes,
       SUM(o.status = 'pendiente') pendientes, SUM(o.status IN ('asignado','cargado')) en_ruta,
@@ -2165,7 +2186,7 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   for (const o of offices) { const r = inv.get(o.id, o.id, o.id); Object.assign(o, { inv_almacen: r.almacen || 0, inv_repartidores: r.repartidores || 0, inv_abierto: r.abierto || 0 }); o.inv_total = o.inv_almacen + o.inv_repartidores + o.inv_abierto; }
   const cities = db.prepare(`SELECT COALESCE(NULLIF(TRIM(c.city),''),'Sin ciudad') city, ${cols} ${from} ${W} GROUP BY lower(TRIM(COALESCE(c.city,''))) ORDER BY clientes DESC`).all(...A);
   // ciudades disponibles para filtrar (dentro de la oficina)
-  const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
+  const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''}${cityIn(req)} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
   res.json({ offices, cities, city_list: list });
 }));
 // Renglones del resumen para la hoja: oficinas (con inventario) y ciudades
@@ -2245,6 +2266,7 @@ app.post(
     const b = req.body;
     if (!b.name || !b.address) throw new HttpError(400, 'Nombre y dirección son obligatorios');
     if (req.user.office) b.office_id = req.user.office; // el personal de una oficina registra clientes de su oficina
+    if (scopeCities(req) && !req.user.cities.map(normCity).includes(normCity(b.city))) throw new HttpError(403, `Solo puedes registrar clientes de ${req.user.cities.join(', ')}`);
     const vals = customerFields.map((f) => custVal(b, f));
     const r = db.prepare(`INSERT INTO customers (${customerFields.join(',')}) VALUES (${customerFields.map(() => '?').join(',')})`).run(...vals);
     if (b.lat != null && b.lat !== '') db.prepare('UPDATE customers SET geo_quality=? WHERE id=?').run(['exacta', 'calle', 'colonia'].includes(b.geo_quality) ? b.geo_quality : 'manual', Number(r.lastInsertRowid));
@@ -2257,7 +2279,7 @@ app.put(
   wrap((req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!c) throw new HttpError(404, 'No encontrado');
-    if (req.user.office && customerOffice(c.id) !== req.user.office) throw new HttpError(403, 'Este cliente es de otra oficina');
+    if (outOfScope(req, c.id)) throw new HttpError(403, 'Este cliente es de otra oficina o ciudad');
     const b = { ...c, ...req.body };
     if (req.user.office && !canManageOffice(req, b.office_id)) b.office_id = c.office_id;
     const vals = customerFields.map((f) => custVal(b, f));
@@ -2735,7 +2757,7 @@ app.get(
   wrap((req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
     if (!c) throw new HttpError(404, 'No encontrado');
-    if (req.user.office && customerOffice(c.id) !== req.user.office) throw new HttpError(403, 'Este cliente es de otra oficina');
+    if (outOfScope(req, c.id)) throw new HttpError(403, 'Este cliente es de otra oficina o ciudad');
     c.orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.scheduled_date, o.delivered_at, o.appointment_time, o.driver_id, o.route_id, u.name driver_name
       FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.customer_id = ? ORDER BY o.id DESC LIMIT 50`).all(c.id);
     res.json(c);
@@ -2811,7 +2833,19 @@ function customerOffice(customerId) {
   return db.prepare(`SELECT ${OFFICE_OF('c')} o FROM customers c WHERE c.id = ?`).get(customerId)?.o ?? null;
 }
 // Fragmentos SQL para limitar a la oficina del usuario (el número viene de la base, no del cliente)
-const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '');
+let cityVarC = { at: 0, rows: [] };
+function scopeCities(req) {
+  const l = req.user?.cities;
+  if (!l || !l.length || req.user.role === 'repartidor') return null;
+  if (Date.now() - cityVarC.at > 60000) cityVarC = { at: Date.now(), rows: db.prepare("SELECT DISTINCT TRIM(city) c FROM customers WHERE TRIM(COALESCE(city,'')) <> ''").all().map((r) => r.c) };
+  const want = new Set(l.map(normCity));
+  return cityVarC.rows.filter((c) => want.has(normCity(c)));
+}
+// filtro SQL de las ciudades del supervisor sobre la tabla de clientes (alias)
+const cityIn = (req, alias = 'c') => { const l = scopeCities(req); return l ? (l.length ? ` AND TRIM(${alias}.city) IN (${l.map((c) => "'" + c.replace(/'/g, "''") + "'").join(',')})` : ' AND 0') : ''; };
+// ¿el cliente queda fuera de lo que puede ver este usuario? (otra oficina u otra ciudad)
+const outOfScope = (req, customerId) => (req.user.office && customerOffice(customerId) !== req.user.office) || (scopeCities(req) && !db.prepare(`SELECT 1 FROM customers c WHERE c.id = ? ${cityIn(req, 'c')}`).get(Number(customerId)));
+const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '') + (/^c/.test(alias) ? cityIn(req, alias) : '');
 const canManageOffice = (req, officeId) => req.user.role === 'admin' || req.user.supervises.includes(Number(officeId));
 
 app.get(
@@ -2850,6 +2884,7 @@ app.get(
     if (unrouted === '1') where.push('o.route_id IS NULL');
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
+    if (cityIn(req)) where.push('1' + cityIn(req));
     if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
     const colQ = [].concat(req.query.colonia || []).map(String).filter((x) => x.trim());
     if (colQ.length) {
@@ -2879,6 +2914,7 @@ app.get('/api/orders/zips', auth(...STAFF), wrap((req, res) => {
   const args = [];
   const off = req.user.office || Number(req.query.office_id) || null;
   if (off) { where.push(`${OFFICE_OF('c')} = ?`); args.push(off); }
+  if (cityIn(req)) where.push('1' + cityIn(req));
   if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
   if (req.query.open === '1') where.push("o.status IN ('pendiente','asignado','cargado','fallido')");
   const rows = db.prepare(`SELECT c.zip, c.colonia, c.city, COUNT(*) n FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${where.join(' AND ')} GROUP BY c.zip, c.colonia, c.city`).all(...args);
@@ -2895,6 +2931,7 @@ app.get('/api/orders/colonias', auth(...STAFF), wrap((req, res) => {
   const args = [];
   const off = req.user.office || Number(req.query.office_id) || null;
   if (off) { where.push(`${OFFICE_OF('c')} = ?`); args.push(off); }
+  if (cityIn(req)) where.push('1' + cityIn(req));
   if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
   if (req.query.open === '1') where.push("o.status IN ('pendiente','asignado','cargado','fallido')");
   const rows = db.prepare(`SELECT c.colonia, c.city, COUNT(*) n FROM orders o JOIN customers c ON c.id = o.customer_id WHERE ${where.join(' AND ')} AND o.status <> 'cancelado' GROUP BY c.colonia, c.city`).all(...args);
@@ -3211,7 +3248,7 @@ function registerEvidence(req, result) {
 app.post('/api/evidences/:id/photo', auth(...STAFF), wrap((req, res) => {
   const e = db.prepare('SELECT e.*, o.customer_id, o.tracking_code FROM evidences e JOIN orders o ON o.id = e.order_id WHERE e.id = ?').get(req.params.id);
   if (!e) throw new HttpError(404, 'Evidencia no encontrada');
-  if (req.user.office && customerOffice(e.customer_id) !== req.user.office) throw new HttpError(403, 'Este pedido es de otra oficina');
+  if (outOfScope(req, e.customer_id)) throw new HttpError(403, 'Este pedido es de otra oficina o ciudad');
   const name = saveDataUrl(req.body?.photo, 'foto');
   if (!name) throw new HttpError(400, 'Falta la foto');
   const note = `Foto agregada por oficina (${req.user.name}, ${new Date().toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })})`;
@@ -3354,6 +3391,7 @@ app.get(
     if (req.query.driver_id) { where.push('e.driver_id = ?'); args.push(Number(req.query.driver_id)); }
     const offR = req.user.office || Number(req.query.office_id) || null;
     if (offR) { where.push(`${OFFICE_OF('c')} = ?`); args.push(offR); }
+    if (cityIn(req)) where.push('1' + cityIn(req));
     if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
     if (req.query.q) { where.push('(o.tracking_code LIKE ? OR c.name LIKE ? OR e.receiver_name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
@@ -3559,7 +3597,7 @@ const userOffice = (id) => db.prepare(`SELECT ${OFFICE_OF('u')} o FROM users u W
 function officeDriver(req, id) { if (req.user.office && userOffice(id) !== req.user.office) throw new HttpError(403, 'Ese repartidor es de otra oficina'); }
 function officeRoute(req, r) { if (req.user.office && r.driver_id && userOffice(r.driver_id) !== req.user.office) throw new HttpError(403, 'Esta ruta es de otra oficina'); }
 function officeOrders(req, ids) {
-  if (!req.user.office || !ids.length) return ids;
+  if ((!req.user.office && !scopeCities(req)) || !ids.length) return ids;
   const ok = new Set(db.prepare(`SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (${ids.map(() => '?').join(',')}) ${inOffice(req, 'c')}`).all(...ids).map((r) => r.id));
   return ids.filter((i) => ok.has(Number(i)));
 }
@@ -4077,11 +4115,11 @@ app.get(
     // Entregas y fallidos cuentan por la FECHA REAL en que pasaron (hora local); lo abierto, por su fecha programada.
     const DONE = "date(o.delivered_at,'localtime')";
     const offA = req.user.office || Number(req.query.office_id) || null;
-    const sreq = { user: { office: offA } };
+    const sreq = { user: { office: offA, cities: req.user.cities, role: req.user.role } };
     const cityA = String(req.query.city || '').trim();
     const cityW = cityA ? ` AND lower(TRIM(c2.city)) = '${cityA.toLowerCase().replace(/'/g, "''")}'` : '';
     const drvA = Number(req.query.driver_id) || null;
-    const OFF = (offA || cityA ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '') + (drvA ? ` AND o.driver_id = ${drvA}` : '');
+    const OFF = (offA || cityA || cityIn(req) ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '') + (drvA ? ` AND o.driver_id = ${drvA}` : '');
     const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
     const R = [from, to, from, to];
     const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,

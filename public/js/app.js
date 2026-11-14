@@ -706,13 +706,16 @@ const logo = (cls = '') => HAS_LOGO_IMG
   ? `<img class="logo-img ${cls}" src="/img/logo.png" alt="Sovime Mensajería" />`
   : `<span class="wordmark ${cls}" role="img" aria-label="Sovime Mensajería"><span class="wm-top"><b>S</b>ovime</span><span class="wm-sub">Mensajería</span></span>`;
 
-const ROLE = { admin: 'Administrador', despachador: 'Despachador', repartidor: 'Repartidor' };
+const ROLE = { admin: 'Administrador', supervisor: 'Supervisor', despachador: 'Despachador', repartidor: 'Repartidor' };
+// el supervisor por ciudad se guarda como despachador con sus ciudades
+const roleOf = (u) => (u?.role === 'despachador' && u.cities ? 'supervisor' : u?.role);
 const ROLE_DESC = {
   admin: 'Control total: usuarios, configuración, operación y reportes.',
+  supervisor: 'Supervisa una o varias ciudades: ve y opera solo sus clientes, pedidos, rutas y análisis.',
   despachador: 'Opera el día: pedidos, rutas, inventario, clientes y análisis.',
   repartidor: 'App móvil: su ruta, carga por escaneo y evidencias de entrega.',
 };
-const roleChip = (r) => `<span class="chip role-${r}">${ROLE[r] || esc(r)}</span>`;
+const roleChip = (r, u) => `<span class="chip role-${r === 'supervisor' ? 'despachador' : r}">${ROLE[r] || esc(r)}${r === 'supervisor' && u?.cities ? ' · ' + esc(u.cities) : ''}</span>`;
 const initials = (n) => String(n || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
 const AV_COLORS = ['#1d5a96', '#e5612a', '#2a9d8f', '#8e5bd1', '#c0392b', '#3c7a3b', '#b5771b', '#5a6b7d'];
 const avatar = (u, size = '') => `<span class="avatar ${size}" style="background:${AV_COLORS[(u.id || 0) % AV_COLORS.length]}" aria-hidden="true">${esc(initials(u.name))}</span>`;
@@ -912,7 +915,7 @@ function shell(active, content) {
 }
 function moreSheet(groups, active) {
   const u = store.user;
-  const m = modal('Menú', `<a class="sheet-user" href="#/profile" data-close>${avatar(u, 'lg')}<span><b>${esc(u.name)}</b><br>${roleChip(u.role)}</span></a>
+  const m = modal('Menú', `<a class="sheet-user" href="#/profile" data-close>${avatar(u, 'lg')}<span><b>${esc(u.name)}</b><br>${roleChip(roleOf(u), u)}</span></a>
     ${groups.map(([g, items]) => `<div class="nav-group">${esc(g)}</div><div class="sheet-grid">${items.map(([k, l, i]) => `<a href="#/${k}" data-close class="${k === active ? 'active' : ''}">${icon(i)}<span>${l}</span></a>`).join('')}</div>`).join('')}
     <button class="btn block bad" style="margin-top:16px" id="sheetOut">${icon('logout')} Cerrar sesión</button>`, { sheet: true });
   $('#sheetOut', m.el).onclick = () => { m.close(); logout(); };
@@ -4464,7 +4467,7 @@ async function viewUsers(v) {
   const draw = () => {
     const q = uState.q.toLowerCase();
     const list = users.filter((u) =>
-      (!uState.role || u.role === uState.role) &&
+      (!uState.role || roleOf(u) === uState.role) &&
       (uState.status === '' || String(u.active) === uState.status) &&
       (!q || `${u.name} ${u.email} ${u.phone || ''} ${u.vehicle || ''}`.toLowerCase().includes(q)));
     const pages = Math.max(1, Math.ceil(list.length / PAGE));
@@ -4475,10 +4478,10 @@ async function viewUsers(v) {
       ? `<div class="empty">${icon('users')}<p><b>Sin resultados</b><br>Prueba con otro nombre o quita los filtros.</p></div>`
       : `<div class="table-wrap desk-only"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Teléfono</th><th>Vehículo</th><th class="r">Entregas</th><th>Último acceso</th><th>Estado</th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="click" data-id="${u.id}"><td><div class="ucell">${avatar(u)}<div><b>${esc(u.name)}</b>${u.id === me.id ? ' <small class="muted">(tú)</small>' : ''}<br><small class="muted">${esc(u.email)}</small></div></div></td>
-          <td>${roleChip(u.role)}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
+          <td>${roleChip(roleOf(u), u)}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
           <td class="r num">${u.role === 'repartidor' ? u.delivered : '—'}</td><td><small>${ago(u.last_login)}</small></td><td>${statusBadge(u)}</td></tr>`).join('')}
         </tbody></table></div>
-        <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(u.role)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;
+        <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(roleOf(u), u)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;
     $('#uPager').innerHTML = list.length > PAGE
       ? `<small class="muted">${uState.page * PAGE + 1}–${Math.min(list.length, (uState.page + 1) * PAGE)} de ${list.length}</small><span class="row"><button class="btn sm" data-pg="-1" ${uState.page ? '' : 'disabled'}>Anterior</button><button class="btn sm" data-pg="1" ${uState.page < pages - 1 ? '' : 'disabled'}>Siguiente</button></span>`
       : `<small class="muted">${list.length} usuario${list.length === 1 ? '' : 's'}</small>`;
@@ -4496,7 +4499,7 @@ async function viewUsers(v) {
   <div class="card" style="margin-top:14px">
     <div class="toolbar">
       <label class="search">${icon('search')}<input id="uq" type="search" placeholder="Buscar por nombre, correo, teléfono…" value="${esc(uState.q)}" /></label>
-      <div class="pill-tabs" id="uRole">${[['', 'Todos'], ['admin', 'Admin'], ['despachador', 'Despacho'], ['repartidor', 'Repartidores']].map(([k, l]) => `<button data-r="${k}" class="${uState.role === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="pill-tabs" id="uRole">${[['', 'Todos'], ['admin', 'Admin'], ['supervisor', 'Supervisores'], ['despachador', 'Despacho'], ['repartidor', 'Repartidores']].map(([k, l]) => `<button data-r="${k}" class="${uState.role === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <select id="uSt" aria-label="Estado"><option value="1">Activos</option><option value="0">Inactivos</option><option value="">Todos los estados</option></select>
     </div>
     <div id="uList"></div>
@@ -4525,10 +4528,24 @@ async function viewUsers(v) {
 
 function roleCards(sel) {
   return `<div class="role-cards">${Object.keys(ROLE).map((r) => `<label class="role-card"><input type="radio" name="role" value="${r}" ${r === sel ? 'checked' : ''} />
-    <span>${icon(r === 'admin' ? 'shield' : r === 'despachador' ? 'dash' : 'truck')}<b>${ROLE[r]}</b><small>${ROLE_DESC[r]}</small></span></label>`).join('')}</div>`;
+    <span>${icon(r === 'admin' ? 'shield' : r === 'despachador' ? 'dash' : r === 'supervisor' ? 'users' : 'truck')}<b>${ROLE[r]}</b><small>${ROLE_DESC[r]}</small></span></label>`).join('')}</div>`;
 }
-function userFields(u) {
-  return `${roleCards(u.role)}
+// ciudades de las oficinas (para el supervisor)
+let OFFICE_CITIES = null;
+async function officeCities() {
+  if (!OFFICE_CITIES) OFFICE_CITIES = (await GET('/api/offices').catch(() => [])).filter((w) => w.active).map((w) => ({ office: w.name, cities: String(w.city || '').split(/[,;/]/).map((c) => c.trim()).filter(Boolean) }));
+  return OFFICE_CITIES;
+}
+function supFields(u, offs) {
+  const mine = new Set(String(u.cities || '').split(',').map((c) => c.trim().toLowerCase()).filter(Boolean));
+  return `<fieldset class="sup-only"><legend>${icon('building')} Ciudades que supervisa</legend>
+    ${offs.map((o) => `<div style="margin-bottom:6px"><small class="muted">${esc(o.office)}</small><div class="row" style="gap:12px;flex-wrap:wrap">${o.cities.map((c) => `<label class="row" style="gap:6px"><input type="checkbox" name="cities" value="${esc(c)}" ${mine.has(c.toLowerCase()) ? 'checked' : ''} /> ${esc(c)}</label>`).join('')}</div></div>`).join('')}
+    <small class="muted">Solo verá y operará clientes, pedidos, rutas, evidencias y análisis de estas ciudades, y los repartidores de su oficina. Las ciudades deben ser de la misma oficina.</small></fieldset>`;
+}
+const formBody = (f) => { const b = Object.fromEntries(new FormData(f)); b.cities = $$('input[name=cities]:checked', f).map((x) => x.value); if (b.role === 'supervisor' && !b.cities.length) throw new Error('Elige al menos una ciudad para el supervisor'); return b; };
+function userFields(u, offs = []) {
+  return `${roleCards(roleOf(u))}
+    ${supFields(u, offs)}
     <div class="grid g2"><label class="f">Nombre completo<input name="name" required value="${esc(u.name)}" autocomplete="off" /></label>
     <label class="f">Correo (usuario para entrar)<input name="email" type="email" required value="${esc(u.email)}" autocomplete="off" /></label></div>
     <div class="grid g2"><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label><span></span></div>
@@ -4546,6 +4563,7 @@ function wireRole(f) {
   // los datos del vehículo solo aplican a repartidores: ocultos se desactivan para que no bloqueen el "Guardar"
   const upd = () => {
     const isDrv = f.role.value === 'repartidor';
+    $$('.sup-only', f).forEach((x) => (x.hidden = f.role.value !== 'supervisor'));
     const d = isDrv || !!f.can_deliver?.checked;
     f.classList.toggle('is-driver', d);
     $$('.driver-only', f).forEach((x) => { x.disabled = !d; x.hidden = !d; });
@@ -4555,9 +4573,10 @@ function wireRole(f) {
   if (f.can_deliver) f.can_deliver.onchange = upd;
   upd();
 }
-function userForm() {
+async function userForm() {
   const u = { role: 'repartidor', capacity: 30 };
-  const m = modal('Nuevo usuario', `<form id="uf" class="stack">${userFields(u)}
+  const offs = await officeCities();
+  const m = modal('Nuevo usuario', `<form id="uf" class="stack">${userFields(u, offs)}
     <fieldset><legend>${icon('key')} Acceso</legend>
       <label class="radio"><input type="radio" name="pmode" value="temp" checked /> <span><b>Generar contraseña temporal</b><br><small class="muted">Recomendado. Se le pedirá cambiarla al entrar.</small></span></label>
       <label class="radio"><input type="radio" name="pmode" value="set" /> <span><b>Definir contraseña ahora</b></span></label>
@@ -4568,7 +4587,7 @@ function userForm() {
   $$('input[name=pmode]', f).forEach((r) => (r.onchange = () => { $('#pset', f).hidden = f.pmode.value !== 'set'; f.password.required = f.pmode.value === 'set'; }));
   $('#saveU', m.el).onclick = async () => {
     if (!f.reportValidity()) return;
-    const b = Object.fromEntries(new FormData(f));
+    let b; try { b = formBody(f); } catch (e) { return toast(e.message, 'bad'); }
     if (b.pmode !== 'set') b.password = '';
     delete b.pmode;
     try {
@@ -4583,13 +4602,14 @@ function userForm() {
 
 async function userPanel(id) {
   const u = await GET('/api/users/' + id);
+  const offs = await officeCities();
   const me = store.user;
   const self = u.id === me.id;
   const s = u.stats || {};
   const done = (s.delivered || 0) + (s.failed || 0);
   const m = modal('Usuario', `
     <div class="uhead">${avatar(u, 'xl')}<div class="grow"><h2 style="margin:0">${esc(u.name)}</h2><div class="muted">${esc(u.email)}</div>
-      <div class="row" style="margin-top:6px">${roleChip(u.role)} ${u.active ? '<span class="chip ok">Activo</span>' : '<span class="chip off">Inactivo</span>'} ${u.must_change_password ? '<span class="chip warn">Debe cambiar contraseña</span>' : ''}</div></div></div>
+      <div class="row" style="margin-top:6px">${roleChip(roleOf(u), u)} ${u.active ? '<span class="chip ok">Activo</span>' : '<span class="chip off">Inactivo</span>'} ${u.must_change_password ? '<span class="chip warn">Debe cambiar contraseña</span>' : ''}</div></div></div>
     <div class="mini-stats">
       <div><small>Último acceso</small><b>${ago(u.last_login)}</b></div>
       <div><small>Alta</small><b>${fmtDT(u.created_at).split(',')[0]}</b></div>
@@ -4597,7 +4617,7 @@ async function userPanel(id) {
     </div>
     <div class="pill-tabs" id="uTabs"><button class="on" data-t="datos">Datos</button><button data-t="exp">Expediente y pago</button><button data-t="seg">Seguridad</button><button data-t="act">Actividad</button></div>
     <div data-pane="exp" hidden><div id="expBox" style="margin-top:14px"><p class="muted">Cargando…</p></div></div>
-    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u)}</form></div>
+    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u, offs)}</form></div>
     <div data-pane="seg" hidden><div class="stack" style="margin-top:14px">
       <div class="sec-row"><div>${icon('key')}</div><div class="grow"><b>Restablecer contraseña</b><br><small class="muted">Genera una contraseña temporal y cierra sus sesiones abiertas.</small></div><button class="btn" id="rst">Restablecer</button></div>
       <div class="sec-row"><div>${icon('logout')}</div><div class="grow"><b>Cerrar todas sus sesiones</b><br><small class="muted">Útil si perdió el teléfono. Tendrá que volver a entrar.</small></div><button class="btn" id="kick" ${self ? 'disabled' : ''}>Cerrar sesiones</button></div>
@@ -4619,7 +4639,7 @@ async function userPanel(id) {
   const reload = async () => { m.close(); await render(); userPanel(id); };
   $('#saveU', m.el).onclick = async () => {
     if (!f.reportValidity()) return;
-    try { await PUT('/api/users/' + id, { ...Object.fromEntries(new FormData(f)), can_deliver: !!f.can_deliver?.checked, active: u.active }); toast('Cambios guardados', 'ok'); m.close(); render(); }
+    try { await PUT('/api/users/' + id, { ...formBody(f), can_deliver: !!f.can_deliver?.checked, active: u.active }); toast('Cambios guardados', 'ok'); m.close(); render(); }
     catch (e) { toast(e.message, 'bad'); }
   };
   $('#rst', m.el).onclick = async () => {
@@ -4734,7 +4754,7 @@ async function viewProfile(v) {
   v.innerHTML = topbar('Mi perfil') + `
   <div class="grid g-main">
     <div class="stack">
-      <div class="card profile-card">${avatar(u, 'xl')}<div><h2 style="margin:0">${esc(u.name)}</h2><div class="muted">${esc(u.email)}</div><div class="row" style="margin-top:6px">${roleChip(u.role)}${u.vehicle ? `<span class="chip">${icon('truck')} ${esc(u.vehicle)}</span>` : ''}</div></div></div>
+      <div class="card profile-card">${avatar(u, 'xl')}<div><h2 style="margin:0">${esc(u.name)}</h2><div class="muted">${esc(u.email)}</div><div class="row" style="margin-top:6px">${roleChip(roleOf(u), u)}${u.vehicle ? `<span class="chip">${icon('truck')} ${esc(u.vehicle)}</span>` : ''}</div></div></div>
       <form class="card stack" id="pf"><h2>Mis datos</h2>
         <div class="grid g2"><label class="f">Nombre<input name="name" required value="${esc(u.name)}" /></label><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label></div>
         <label class="f">Correo<input value="${esc(u.email)}" disabled /><small class="muted">Para cambiar tu correo o rol, pídeselo a un administrador.</small></label>

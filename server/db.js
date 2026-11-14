@@ -492,6 +492,8 @@ addCols('users', [['office_id', 'INTEGER REFERENCES warehouses(id)']]);
 addCols('warehouses', [['supervisor_id', 'INTEGER REFERENCES users(id)']]);
 // Supervisor / despachador que también reparte: aparece como repartidor y puede usar la app en modo repartidor
 addCols('users', [['can_deliver', 'INTEGER NOT NULL DEFAULT 0']]);
+// Supervisor por ciudad: despachador limitado a una o varias ciudades (lista separada por comas)
+addCols('users', [['cities', 'TEXT']]);
 // Índices para bases grandes (miles de clientes y pedidos)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id, status);
 CREATE INDEX IF NOT EXISTS idx_customers_office ON customers(office_id);
