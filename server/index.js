@@ -114,6 +114,8 @@ function auth(...roles) {
       u.supervises = db.prepare('SELECT id FROM warehouses WHERE supervisor_id = ? AND active = 1').all(u.id).map((r) => r.id);
       // supervisor por ciudad: solo ve sus ciudades (en modo repartidor, solo su ruta)
       u.cities = u.role === 'despachador' && u.cities ? String(u.cities).split(',').map((x) => x.trim()).filter(Boolean) : null;
+      // personal a cargo: si el supervisor tiene equipo, solo ve y opera a su personal (y a sí mismo)
+      u.team = u.role === 'despachador' ? db.prepare('SELECT id FROM users WHERE reports_to = ? AND active = 1 AND deleted_at IS NULL').all(u.id).map((r) => r.id) : [];
       req.user = u;
       next();
     } catch {
@@ -190,7 +192,8 @@ app.post(
 );
 
 // ---------- Usuarios (administración) ----------
-const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id,
+const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id, u.reports_to,
+  (SELECT s2.name FROM users s2 WHERE s2.id = u.reports_to) reports_to_name, (SELECT COUNT(*) FROM users t WHERE t.reports_to = u.id AND t.active = 1 AND t.deleted_at IS NULL) team_size,
   u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
 
 app.get(
@@ -211,6 +214,7 @@ app.get(
     }
     where.push('u.deleted_at IS NULL');
     if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
+    if (req.user.team?.length) where.push(`u.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})`);
     if (q) {
       where.push('(u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)');
       args.push(`%${q}%`, `%${q}%`, `%${q}%`);
@@ -256,6 +260,30 @@ function supCities(b) {
   b.role = 'despachador';
   return { cities: list.join(', '), office: offs[0] || null };
 }
+// a quién reporta (supervisor o despachador activo) y, para un supervisor, su personal a cargo
+function saveTeam(uid, b, req) {
+  if (b.reports_to !== undefined) {
+    const to = Number(b.reports_to) || null;
+    if (to === uid) throw new HttpError(400, 'Un usuario no puede reportarse a sí mismo');
+    if (to && !db.prepare("SELECT 1 FROM users WHERE id=? AND role IN ('despachador','admin') AND active=1").get(to)) throw new HttpError(400, 'El supervisor elegido no es válido');
+    db.prepare('UPDATE users SET reports_to=? WHERE id=?').run(to, uid);
+  }
+  if (Array.isArray(b.team)) {
+    const me = db.prepare('SELECT name, office_id FROM users WHERE id=?').get(uid);
+    const ids = [...new Set(b.team.map(Number).filter((x) => x && x !== uid))];
+    const was = db.prepare('SELECT id FROM users WHERE reports_to=?').all(uid).map((r) => r.id);
+    for (const id of was) if (!ids.includes(id)) db.prepare('UPDATE users SET reports_to=NULL WHERE id=?').run(id);
+    for (const id of ids) {
+      const t = db.prepare("SELECT id, role FROM users WHERE id=? AND role <> 'admin'").get(id);
+      if (!t) continue;
+      db.prepare('UPDATE users SET reports_to=? WHERE id=?').run(uid, id);
+      // el personal a cargo queda en la oficina de su supervisor
+      if (me.office_id) db.prepare('UPDATE users SET office_id=? WHERE id=? AND COALESCE(office_id, 0) <> ?').run(me.office_id, id, me.office_id);
+    }
+    const add = ids.filter((x) => !was.includes(x)).length, rem = was.filter((x) => !ids.includes(x)).length;
+    if ((add || rem) && req) audit(req, 'usuario.equipo', `${me.name}: ${ids.length} a cargo (+${add} / -${rem})`);
+  }
+}
 function validateUser(b, isNew) {
   if (!String(b.name || '').trim()) throw new HttpError(400, 'El nombre es obligatorio');
   if (!EMAIL_RE.test(String(b.email || '').trim())) throw new HttpError(400, 'Correo inválido');
@@ -283,6 +311,7 @@ function createUser(b) {
     if (cd) db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(Number(r.lastInsertRowid));
     if (b.route_mode === 'dia') db.prepare("UPDATE users SET route_mode='dia' WHERE id=?").run(Number(r.lastInsertRowid));
     if (sup) db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, Number(r.lastInsertRowid));
+    saveTeam(Number(r.lastInsertRowid), b, null);
     return { id: Number(r.lastInsertRowid), temp_password: b.password ? null : pwd };
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) throw new HttpError(409, `El correo ${b.email} ya está registrado`);
@@ -345,6 +374,7 @@ app.put(
         db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, u.id);
         audit(req, 'usuario.supervisor', `${u.name}: supervisor de ${sup.cities}`);
       } else if (!sup && req.body.role && u.cities) db.prepare('UPDATE users SET cities=NULL WHERE id=?').run(u.id);
+      saveTeam(u.id, { reports_to: req.body.reports_to, team: sup ? req.body.team : u.cities && req.body.role ? [] : undefined }, req);
       if (req.body.can_deliver !== undefined || b.role === 'repartidor')
         db.prepare('UPDATE users SET can_deliver=? WHERE id=?').run(b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(req.body.can_deliver) ? 1 : 0, u.id);
     } catch (e) {
@@ -2940,7 +2970,8 @@ function scopeCities(req) {
 const cityIn = (req, alias = 'c') => { const l = scopeCities(req); return l ? (l.length ? ` AND TRIM(${alias}.city) IN (${l.map((c) => "'" + c.replace(/'/g, "''") + "'").join(',')})` : ' AND 0') : ''; };
 // ¿el cliente queda fuera de lo que puede ver este usuario? (otra oficina u otra ciudad)
 const outOfScope = (req, customerId) => (req.user.office && customerOffice(customerId) !== req.user.office) || (scopeCities(req) && !db.prepare(`SELECT 1 FROM customers c WHERE c.id = ? ${cityIn(req, 'c')}`).get(Number(customerId)));
-const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '') + (/^c/.test(alias) ? cityIn(req, alias) : '');
+const teamIn = (req, alias) => (req.user?.team?.length && req.user.role !== 'repartidor' ? ` AND ${alias}.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})` : '');
+const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '') + (/^c/.test(alias) ? cityIn(req, alias) : /^u/.test(alias) ? teamIn(req, alias) : '');
 const canManageOffice = (req, officeId) => req.user.role === 'admin' || req.user.supervises.includes(Number(officeId));
 
 app.get(
@@ -3596,7 +3627,7 @@ app.get(
       args.push(req.user.id);
     } else {
       if (Number(req.query.driver_id)) { where.push('r.driver_id = ?'); args.push(Number(req.query.driver_id)); }
-      if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id) } }, 'u2')})`);
+      if (req.user.office || req.query.office_id) where.push(`r.driver_id IN (SELECT u2.id FROM users u2 WHERE 1 ${inOffice({ user: { office: req.user.office || Number(req.query.office_id), team: req.user.team, id: req.user.id, role: req.user.role } }, 'u2')})`);
     }
     const rows = db
       .prepare(
@@ -3689,7 +3720,10 @@ app.post(
 );
 // Personal de una oficina: solo repartidores, pedidos y rutas de su oficina (el admin ve todo)
 const userOffice = (id) => db.prepare(`SELECT ${OFFICE_OF('u')} o FROM users u WHERE u.id = ?`).get(Number(id))?.o ?? null;
-function officeDriver(req, id) { if (req.user.office && userOffice(id) !== req.user.office) throw new HttpError(403, 'Ese repartidor es de otra oficina'); }
+function officeDriver(req, id) {
+  if (req.user.office && userOffice(id) !== req.user.office) throw new HttpError(403, 'Ese repartidor es de otra oficina');
+  if (req.user.team?.length && req.user.role !== 'repartidor' && ![...req.user.team, req.user.id].includes(Number(id))) throw new HttpError(403, 'Ese repartidor no está a tu cargo');
+}
 function officeRoute(req, r) { if (req.user.office && r.driver_id && userOffice(r.driver_id) !== req.user.office) throw new HttpError(403, 'Esta ruta es de otra oficina'); }
 function officeOrders(req, ids) {
   if ((!req.user.office && !scopeCities(req)) || !ids.length) return ids;

@@ -4492,7 +4492,7 @@ async function viewUsers(v) {
       ? `<div class="empty">${icon('users')}<p><b>Sin resultados</b><br>Prueba con otro nombre o quita los filtros.</p></div>`
       : `<div class="table-wrap desk-only"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Teléfono</th><th>Vehículo</th><th class="r">Entregas</th><th>Último acceso</th><th>Estado</th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="click" data-id="${u.id}"><td><div class="ucell">${avatar(u)}<div><b>${esc(u.name)}</b>${u.id === me.id ? ' <small class="muted">(tú)</small>' : ''}<br><small class="muted">${esc(u.email)}</small></div></div></td>
-          <td>${roleChip(roleOf(u), u)}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
+          <td>${roleChip(roleOf(u), u)}${u.team_size ? `<br><small class="muted">${icon('users')} ${u.team_size} a cargo</small>` : ''}${u.reports_to_name ? `<br><small class="muted">A cargo de ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
           <td class="r num">${u.role === 'repartidor' ? u.delivered : '—'}</td><td><small>${ago(u.last_login)}</small></td><td>${statusBadge(u)}</td></tr>`).join('')}
         </tbody></table></div>
         <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(roleOf(u), u)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;
@@ -4556,10 +4556,20 @@ function supFields(u, offs) {
     ${offs.map((o) => `<div style="margin-bottom:6px"><small class="muted">${esc(o.office)}</small><div class="row" style="gap:12px;flex-wrap:wrap">${o.cities.map((c) => `<label class="row" style="gap:6px"><input type="checkbox" name="cities" value="${esc(c)}" ${mine.has(c.toLowerCase()) ? 'checked' : ''} /> ${esc(c)}</label>`).join('')}</div></div>`).join('')}
     <small class="muted">Solo verá y operará clientes, pedidos, rutas, evidencias y análisis de estas ciudades, y los repartidores de su oficina. Las ciudades deben ser de la misma oficina.</small></fieldset>`;
 }
-const formBody = (f) => { const b = Object.fromEntries(new FormData(f)); b.cities = $$('input[name=cities]:checked', f).map((x) => x.value); if (b.role === 'supervisor' && !b.cities.length) throw new Error('Elige al menos una ciudad para el supervisor'); return b; };
-function userFields(u, offs = []) {
+const formBody = (f) => { const b = Object.fromEntries(new FormData(f)); b.cities = $$('input[name=cities]:checked', f).map((x) => x.value); if (b.role === 'supervisor') b.team = $$('input[name=team]:checked', f).map((x) => Number(x.value)); if (b.role === 'supervisor' && !b.cities.length) throw new Error('Elige al menos una ciudad para el supervisor'); return b; };
+function teamFields(u, people) {
+  const sups = people.filter((p) => p.id !== u.id && p.active && p.role === 'despachador');
+  const staff = people.filter((p) => p.id !== u.id && p.active && p.role !== 'admin' && !p.cities);
+  return `<label class="f boss-only">A cargo de (supervisor)<select name="reports_to"><option value="">— Nadie —</option>${sups.map((p) => `<option value="${p.id}" ${u.reports_to === p.id ? 'selected' : ''}>${esc(p.name)}${p.cities ? ' · ' + esc(p.cities) : ''}</option>`).join('')}</select><small class="muted">Su supervisor lo ve y opera en rutas, pedidos y análisis.</small></label>
+    <fieldset class="sup-only"><legend>${icon('users')} Personal a cargo</legend>
+      <input class="grow" id="teamQ" placeholder="Buscar persona…" autocomplete="off" style="margin-bottom:6px" />
+      <div class="stack" id="teamL" style="max-height:220px;overflow:auto;gap:4px">${staff.map((p) => `<label class="row" style="gap:8px" data-tn="${esc((p.name + ' ' + (p.reports_to_name || '')).toLowerCase())}"><input type="checkbox" name="team" value="${p.id}" ${p.reports_to === u.id && u.id ? 'checked' : ''} /> <span class="grow">${esc(p.name)} <small class="muted">${ROLE[p.role]}${p.reports_to && p.reports_to !== u.id ? ' · hoy con ' + esc(p.reports_to_name || '') : ''}</small></span></label>`).join('') || '<small class="muted">No hay repartidores ni despachadores activos.</small>'}</div>
+      <small class="muted">Si marcas personal, este supervisor solo ve y asigna a su equipo (y quedan en su oficina). Sin personal marcado ve a todos los de su oficina. Puede haber varios supervisores en la misma ciudad.</small></fieldset>`;
+}
+function userFields(u, offs = [], people = []) {
   return `${roleCards(roleOf(u))}
     ${supFields(u, offs)}
+    ${teamFields(u, people)}
     <div class="grid g2"><label class="f">Nombre completo<input name="name" required value="${esc(u.name)}" autocomplete="off" /></label>
     <label class="f">Correo (usuario para entrar)<input name="email" type="email" required value="${esc(u.email)}" autocomplete="off" /></label></div>
     <div class="grid g2"><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label><span></span></div>
@@ -4578,6 +4588,8 @@ function wireRole(f) {
   const upd = () => {
     const isDrv = f.role.value === 'repartidor';
     $$('.sup-only', f).forEach((x) => (x.hidden = f.role.value !== 'supervisor'));
+    $$('.boss-only', f).forEach((x) => (x.hidden = !['repartidor', 'despachador'].includes(f.role.value)));
+    if ($('#teamQ', f)) $('#teamQ', f).oninput = (e) => { const q = e.target.value.toLowerCase(); $$('#teamL [data-tn]', f).forEach((l) => (l.hidden = q && !l.dataset.tn.includes(q))); };
     const d = isDrv || !!f.can_deliver?.checked;
     f.classList.toggle('is-driver', d);
     $$('.driver-only', f).forEach((x) => { x.disabled = !d; x.hidden = !d; });
@@ -4589,8 +4601,8 @@ function wireRole(f) {
 }
 async function userForm() {
   const u = { role: 'repartidor', capacity: 30 };
-  const offs = await officeCities();
-  const m = modal('Nuevo usuario', `<form id="uf" class="stack">${userFields(u, offs)}
+  const [offs, people] = await Promise.all([officeCities(), GET('/api/users').catch(() => [])]);
+  const m = modal('Nuevo usuario', `<form id="uf" class="stack">${userFields(u, offs, people)}
     <fieldset><legend>${icon('key')} Acceso</legend>
       <label class="radio"><input type="radio" name="pmode" value="temp" checked /> <span><b>Generar contraseña temporal</b><br><small class="muted">Recomendado. Se le pedirá cambiarla al entrar.</small></span></label>
       <label class="radio"><input type="radio" name="pmode" value="set" /> <span><b>Definir contraseña ahora</b></span></label>
@@ -4615,8 +4627,7 @@ async function userForm() {
 }
 
 async function userPanel(id) {
-  const u = await GET('/api/users/' + id);
-  const offs = await officeCities();
+  const [u, offs, people] = await Promise.all([GET('/api/users/' + id), officeCities(), GET('/api/users').catch(() => [])]);
   const me = store.user;
   const self = u.id === me.id;
   const s = u.stats || {};
@@ -4631,7 +4642,7 @@ async function userPanel(id) {
     </div>
     <div class="pill-tabs" id="uTabs"><button class="on" data-t="datos">Datos</button><button data-t="exp">Expediente y pago</button><button data-t="seg">Seguridad</button><button data-t="act">Actividad</button></div>
     <div data-pane="exp" hidden><div id="expBox" style="margin-top:14px"><p class="muted">Cargando…</p></div></div>
-    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u, offs)}</form></div>
+    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u, offs, people)}</form></div>
     <div data-pane="seg" hidden><div class="stack" style="margin-top:14px">
       <div class="sec-row"><div>${icon('key')}</div><div class="grow"><b>Restablecer contraseña</b><br><small class="muted">Genera una contraseña temporal y cierra sus sesiones abiertas.</small></div><button class="btn" id="rst">Restablecer</button></div>
       <div class="sec-row"><div>${icon('logout')}</div><div class="grow"><b>Cerrar todas sus sesiones</b><br><small class="muted">Útil si perdió el teléfono. Tendrá que volver a entrar.</small></div><button class="btn" id="kick" ${self ? 'disabled' : ''}>Cerrar sesiones</button></div>
