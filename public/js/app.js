@@ -5978,9 +5978,10 @@ async function viewDeliver(v, id, mode) {
     <div><b>${esc(o.customer_name)}</b> · <span class="mono">${esc(o.tracking_code)}</span><br><small>${esc(o.address)}</small><div class="tels">${phonesLine(o)}</div>
       ${o.items.length ? `<br><small class="muted">${o.items.map((i) => `${i.qty}× ${esc(i.name)}`).join(', ')}</small>` : ''}
       ${o.cod_amount && !isFail ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(o.cod_amount)} al cliente</div>` : ''}</div>
-    ${!isFail && (o.serial_needs || []).some((n) => n.missing) ? `<div class="card" id="snFind" style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>${icon('search')} Busca el S/N del equipo que entregas</b>
-      <input id="snQ" class="mono" inputmode="text" placeholder="Escribe 3 o más caracteres (ej. 3E15)" autocomplete="off" style="text-transform:uppercase;margin-top:6px" />
-      <div id="snRes" class="stack" style="gap:4px;margin-top:6px"></div><small class="muted">También puedes tocar <b>Verificar</b> para escanearlo.</small></div>` : ''}
+    ${!isFail && (o.serial_needs || []).some((n) => n.missing) ? `<div class="card" id="snFind" style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>${icon('search')} Elige el equipo que dejas al cliente</b>
+      <br><small class="muted">Este pedido lleva: ${(o.serial_needs || []).filter((n) => n.missing).map((n) => `<b>${esc(n.name)}</b>${n.missing > 1 ? ' × ' + n.missing : ''}`).join(', ')}</small>
+      <input id="snQ" inputmode="text" placeholder="Busca por S/N, serie o descripción (ej. 3E15 u ONT)" autocomplete="off" style="margin-top:6px" />
+      <div id="snRes" class="stack" style="gap:4px;margin-top:6px;max-height:320px;overflow:auto"><small class="muted">Cargando equipos…</small></div><small class="muted">Primero aparecen los del producto del pedido y los que traes. También puedes tocar <b>Verificar</b> para escanearlo.</small></div>` : ''}
     <div class="row between" id="verifyRow"><span id="verifyTxt">${verified ? '✅ Paquete verificado por escaneo' : '⚠️ Escanea la etiqueta para verificar el paquete'}</span>${verified ? '' : `<button class="btn sm" id="verify">${icon('scan')} Verificar</button>`}</div>
     ${isFail ? `
       <label class="f">Motivo <b class="req">*</b><select id="reason"><option value="">Selecciona…</option>${FAIL_REASONS.map((r) => `<option>${r}</option>`).join('')}</select></label>
@@ -6032,27 +6033,34 @@ async function viewDeliver(v, id, mode) {
   };
   // Buscar el S/N por cualquier parte del número y elegirlo con un toque
   let snT;
-  const snPick = async (sn) => {
+  const snPick = async (sn, other) => {
     try {
-      const r = await POST(`/api/orders/${o.id}/serials`, { serial: sn });
+      if (other && !(await confirmDlg(`Este pedido lleva ${(o.serial_needs || []).filter((n) => n.missing).map((n) => n.name).join(', ')}. ¿Entregar ${other} (S/N ${sn}) en su lugar?`))) return;
+      const r = await POST(`/api/orders/${o.id}/serials`, { serial: sn, swap: !!other });
       o.serials = r.serials; o.serial_needs = (o.serial_needs || []).map((x) => ({ ...x, missing: r.missing }));
       verified = true;
       $('#verifyRow').innerHTML = `<span>✅ S/N <b class="mono">${esc(r.serial)}</b> asignado a este pedido</span>`;
-      if (!r.missing) $('#snFind')?.remove(); else { $('#snQ').value = ''; $('#snRes').innerHTML = `<small>Faltan ${r.missing}</small>`; }
+      if (!r.missing) $('#snFind')?.remove(); else { $('#snQ').value = ''; toast(`Faltan ${r.missing}`, ''); snSearch(''); }
       toast(`S/N ${r.serial} asignado`, 'ok');
     } catch (e) { toast(e.message, 'bad'); }
   };
+  // lista de equipos: por S/N, serie o descripción; sin texto, los disponibles (primero los que traes y los del producto del pedido)
+  const snSearch = async (q) => {
+    const list = await GET(`/api/my/serials?q=${encodeURIComponent(q)}&order=${o.id}`).catch(() => []);
+    if (!$('#snRes')) return;
+    const qq = q.toUpperCase();
+    const hl = (t) => { const i = qq ? String(t).toUpperCase().indexOf(qq) : -1; return i < 0 ? esc(t) : `${esc(t.slice(0, i))}<mark>${esc(t.slice(i, i + q.length))}</mark>${esc(t.slice(i + q.length))}`; };
+    $('#snRes').innerHTML = list.length ? list.map((x) => `<button type="button" class="btn block" data-snp="${esc(x.serial)}" data-other="${x.need ? '' : esc(x.product)}" style="justify-content:space-between;text-align:left;height:auto;padding:8px 10px;white-space:normal">
+        <span style="min-width:0"><span class="mono" style="font-size:16px">${hl(x.serial)}</span><br><small>${hl(x.product)}${x.need ? '' : ' · <b style="color:var(--warn,#b26d00)">otro producto</b>'}</small></span>
+        <small class="chip ${x.where === 'tuyo' ? 'ok' : ''}" style="flex:none">${x.where === 'tuyo' ? 'lo traes' : esc(x.where)}</small></button>`).join('')
+      : `<small class="muted">${q ? `No hay equipos disponibles con "${esc(q)}". Revisa el número o escríbelo completo y toca Verificar.` : 'No hay equipos disponibles para este pedido: pide a tu oficina que te asigne uno.'}</small>`;
+    $$('[data-snp]', $('#snRes')).forEach((b) => (b.onclick = () => snPick(b.dataset.snp, b.dataset.other)));
+  };
+  if ($('#snQ')) snSearch('');
   $('#snQ')?.addEventListener('input', (e) => {
     clearTimeout(snT);
     const q = e.target.value.trim();
-    if (q.length < 3) { $('#snRes').innerHTML = ''; return; }
-    snT = setTimeout(async () => {
-      const list = await GET(`/api/my/serials?q=${encodeURIComponent(q)}&order=${o.id}`).catch(() => []);
-      const hl = (sn) => { const i = sn.toUpperCase().indexOf(q.toUpperCase()); return i < 0 ? esc(sn) : `${esc(sn.slice(0, i))}<mark>${esc(sn.slice(i, i + q.length))}</mark>${esc(sn.slice(i + q.length))}`; };
-      $('#snRes').innerHTML = list.length ? list.map((x) => `<button type="button" class="btn block" data-snp="${esc(x.serial)}" style="justify-content:space-between;text-align:left"><span class="mono" style="font-size:16px">${hl(x.serial)}</span><small class="muted">${esc(x.where)}</small></button>`).join('')
-        : `<small class="muted">No hay equipos disponibles con "${esc(q)}". Revisa el número o escríbelo completo y toca Verificar.</small>`;
-      $$('[data-snp]', $('#snRes')).forEach((b) => (b.onclick = () => snPick(b.dataset.snp)));
-    }, 250);
+    snT = setTimeout(() => snSearch(q.length >= 2 ? q : ''), 250);
   });
   // Verificar: la guía del paquete o el S/N del módem (si es un S/N disponible, se asigna a este pedido)
   $('#verify')?.addEventListener('click', () => openScanner({ title: 'Verificar paquete', hint: 'Escanea la guía o el número de serie del módem', onCode: async (c) => {

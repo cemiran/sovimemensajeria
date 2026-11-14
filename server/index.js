@@ -1624,14 +1624,23 @@ app.put('/api/evidences/:id', auth('admin'), wrap((req, res) => {
 // Repartidor: S/N disponibles para entregar, buscando por cualquier parte del número (los suyos primero)
 app.get('/api/my/serials', auth('repartidor'), wrap((req, res) => {
   const me = req.user;
-  const q = normSerial(req.query.q || '').replace(/[^A-Z0-9]/g, '');
-  const offs = new Set([me.office, req.query.order ? customerOffice(db.prepare('SELECT customer_id FROM orders WHERE id=?').get(Number(req.query.order))?.customer_id) : null].filter(Boolean).map(Number));
-  const rows = db.prepare(`SELECT s.serial, s.product_id, s.holder_id, s.open_pool, s.warehouse_id, p.name product, u.name holder, w.name wname
+  // busca por S/N (cualquier parte), por descripción o SKU del producto; sin texto, lista lo disponible (primero lo del pedido y lo que trae)
+  const raw = String(req.query.q || '').trim();
+  const q = normSerial(raw).replace(/[^A-Z0-9]/g, '');
+  const words = normCity(raw).split(' ').filter((w) => w.length >= 2);
+  const order = req.query.order ? db.prepare('SELECT id, customer_id FROM orders WHERE id=?').get(Number(req.query.order)) : null;
+  const need = new Set(order ? orderSerialNeeds(order.id).filter((n) => n.missing).map((n) => n.product_id) : []);
+  const offs = new Set([me.office, order ? customerOffice(order.customer_id) : null].filter(Boolean).map(Number));
+  const rows = db.prepare(`SELECT s.serial, s.product_id, s.holder_id, s.open_pool, s.warehouse_id, p.name product, p.sku, u.name holder, w.name wname
       FROM serials s JOIN products p ON p.id = s.product_id LEFT JOIN users u ON u.id = s.holder_id LEFT JOIN warehouses w ON w.id = s.warehouse_id
-      WHERE s.status='disponible' AND REPLACE(REPLACE(s.serial,'-',''),' ','') LIKE ? ORDER BY (s.holder_id = ?) DESC, s.open_pool DESC, s.serial LIMIT 300`).all(`%${q}%`, me.id);
-  const ok = rows.filter((s) => s.holder_id === me.id || s.open_pool || (!s.holder_id && (!s.warehouse_id || !offs.size || offs.has(Number(s.warehouse_id))))
-    || (s.holder_id && offs.has(Number(userOffice(s.holder_id)))));
-  res.json(ok.slice(0, 40).map((s) => ({ serial: s.serial, product: s.product, product_id: s.product_id,
+      WHERE s.status='disponible' ORDER BY (s.holder_id = ?) DESC, s.open_pool DESC, s.serial`).all(me.id);
+  const hit = (s) => !raw || (q.length >= 2 && s.serial.toUpperCase().replace(/[^A-Z0-9]/g, '').includes(q))
+    || (words.length && words.every((w) => normCity(`${s.product} ${s.sku}`).includes(w)));
+  const ok = rows.filter((s) => hit(s) && (s.holder_id === me.id || s.open_pool || (!s.holder_id && (!s.warehouse_id || !offs.size || offs.has(Number(s.warehouse_id))))
+    || (s.holder_id && offs.has(Number(userOffice(s.holder_id))))));
+  const rank = (s) => (need.has(s.product_id) ? 0 : 4) + (s.holder_id === me.id ? 0 : s.open_pool ? 1 : !s.holder_id ? 2 : 3);
+  ok.sort((a, b) => rank(a) - rank(b));
+  res.json(ok.slice(0, 60).map((s) => ({ serial: s.serial, product: s.product, sku: s.sku, product_id: s.product_id, need: !need.size || need.has(s.product_id),
     where: s.holder_id === me.id ? 'tuyo' : s.holder_id ? `lo trae ${s.holder}` : s.open_pool ? 'abierto' : s.wname || 'almacén' })));
 }));
 // Pedidos del cliente que el repartidor puede reactivar / tomar para entregar ahora (de su oficina)
@@ -1943,7 +1952,27 @@ app.post(
     const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
     if (!o) throw new HttpError(404, 'Pedido no encontrado');
     if (!canSee(req.user, o)) throw new HttpError(403, 'Este pedido no está asignado a ti');
-    const r = tx(() => assignSerial(o, req.body?.serial, req.user));
+    const r = tx(() => {
+      // swap: el repartidor eligió un equipo de otro producto (otro modelo): ese equipo reemplaza al artículo del pedido que aún no tiene S/N
+      if (req.body?.swap) {
+        const s = db.prepare('SELECT s.product_id, p.name FROM serials s JOIN products p ON p.id = s.product_id WHERE s.serial = ?').get(normSerial(req.body.serial));
+        const needs = orderSerialNeeds(o.id);
+        if (s && !needs.some((n) => n.product_id === s.product_id && n.missing)) {
+          const from = needs.find((n) => n.missing && n.assigned === 0);
+          if (!from) throw new HttpError(409, 'Este pedido ya tiene S/N asignados: pide a la oficina que cambie el producto');
+          const it = db.prepare('SELECT * FROM order_items WHERE order_id=? AND product_id=?').get(o.id, from.product_id);
+          if (it.qty > 1) {
+            db.prepare('UPDATE order_items SET qty = qty - 1, filled = MIN(filled, qty - 1) WHERE id=?').run(it.id);
+            const ex = db.prepare('SELECT id FROM order_items WHERE order_id=? AND product_id=?').get(o.id, s.product_id);
+            if (ex) db.prepare('UPDATE order_items SET qty = qty + 1 WHERE id=?').run(ex.id);
+            else db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,1)').run(o.id, s.product_id);
+          } else db.prepare('UPDATE order_items SET product_id=? WHERE id=?').run(s.product_id, it.id);
+          db.prepare("UPDATE orders SET notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?").run(` | Se entrega ${s.name} en lugar de ${from.name} (${req.user.name})`, o.id);
+          audit(req, 'pedidos.producto', `${o.tracking_code}: ${from.name} → ${s.name} (elegido al entregar)`);
+        }
+      }
+      return assignSerial(o, req.body?.serial, req.user);
+    });
     res.json({ ok: true, already: r.already, serial: r.serial.serial, product: r.serial.pname, missing: missingSerialCount(o.id), serials: serialsOfOrder(o.id) });
   })
 );
