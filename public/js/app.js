@@ -1766,7 +1766,8 @@ async function routeDetail(id) {
   const late = r.stops.filter((s) => s.eta && s.window_end && s.eta > s.window_end).length;
   const m = modal(r.name, `
     <div class="grid g2">
-      <div><div id="rdmap" class="map"></div>
+      <div><div class="row" style="gap:6px;margin-bottom:6px;flex-wrap:wrap" id="selTools"><button type="button" class="btn sm" id="selPin" title="Toca los pines para marcarlos o desmarcarlos">👆 Seleccionar pines</button><button type="button" class="btn sm" id="selDraw" title="Dibuja con el dedo o el mouse alrededor de los pines">✏️ Dibujar zona</button><button type="button" class="btn sm ghost" id="selClr">Limpiar</button><small class="muted" id="selHint"></small></div>
+        <div id="rdmap" class="map"></div>
         <div class="grid g3" style="margin-top:10px">
           <div class="kpi"><div class="label">Distancia</div><div class="value" style="font-size:1.3rem">${fmtN(r.distance_km, 1)} km</div><div class="sub">sin optimizar ${fmtN(r.original_distance_km, 1)}</div></div>
           <div class="kpi"><div class="label">Duración est.</div><div class="value" style="font-size:1.3rem">${fmtN(r.est_minutes / 60, 1)} h</div><div class="sub">${r.stops.length} paradas</div></div>
@@ -1775,7 +1776,10 @@ async function routeDetail(id) {
         <div class="row" style="margin-top:10px;gap:6px;align-items:flex-end"><label class="f grow" style="margin:0">Fecha de la ruta<input type="date" id="rdate2" value="${esc(r.date)}" /></label><button class="btn" id="rdateGo" title="Mueve la ruta completa a otra fecha (si aún no tiene entregas)">📅 Cambiar fecha</button></div>
         <label class="f" style="margin-top:10px">Reasignar repartidor<select id="rdrv">${drivers.map((d) => `<option value="${d.id}" ${d.id === r.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
       </div>
-      <div><div class="row" id="rmBar" style="gap:6px;margin-bottom:6px" hidden><b id="rmN"></b><button class="btn sm bad" id="rmGo">${icon('x')} Quitar de la ruta</button><button class="btn sm ghost" id="rmNone">Desmarcar</button></div>
+      <div><div class="row" id="rmBar" style="gap:6px;margin-bottom:6px;flex-wrap:wrap;position:sticky;top:0;z-index:2;background:var(--card,#fff);padding:6px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)" hidden><b id="rmN"></b><button class="btn sm bad" id="rmGo">${icon('x')} Quitar de la ruta</button>
+        <select id="rmDrv" style="width:auto;max-width:180px"><option value="">Pasar a repartidor…</option>${drivers.filter((d) => d.id !== r.driver_id).map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select>
+        <select id="rmSt" style="width:auto;max-width:160px"><option value="">Cambiar estado…</option><option value="pendiente">Pendiente (sale de la ruta)</option><option value="fallido">No entregado</option>${store.user.role === 'admin' ? '<option value="entregado">Entregado (manual)</option><option value="cancelado">Cancelado</option>' : ''}</select>
+        <button class="btn sm ghost" id="rmNone">Desmarcar</button></div>
       <div class="table-wrap" style="max-height:520px"><table><thead><tr><th><input type="checkbox" id="rmAll" title="Marcar todos los pendientes" /></th><th>#</th><th>Cliente</th><th>ETA</th><th>Estado</th><th></th></tr></thead><tbody>
         ${r.stops.map((s) => `<tr><td>${['asignado', 'cargado'].includes(s.status) ? `<input type="checkbox" data-rms="${s.id}" />` : ''}</td><td class="num"><b>${s.stop_seq}</b><br><small class="muted">${s.leg_km ?? ''} km</small></td><td>${esc(s.customer_name)} ${s.priority === 'alta' ? '<span class="badge b-alta">!</span>' : ''}<br><small>${esc(s.address)}</small>${s.appointment_time ? `<br><small><b>⏰ ${esc(s.appointment_time)}</b> acordada</small>` : s.window_start ? `<br><small class="muted">Ventana ${s.window_start}–${s.window_end}</small>` : ''}</td><td class="num" style="${s.window_end && s.eta > s.window_end ? 'color:var(--bad)' : ''}">${esc(s.eta || '—')}</td><td>${badge(s.status)}</td>
           <td>${['asignado', 'cargado'].includes(s.status) ? `<button class="btn ghost sm" data-rm="${s.id}" title="Quitar este cliente de la ruta" style="color:var(--bad)">${icon('x')} Quitar</button>` : ''}</td></tr>`).join('')}
@@ -1834,10 +1838,67 @@ async function routeDetail(id) {
   // quitar uno o varios clientes de la ruta
   const reopenRd = () => { m.el.remove(); routeDetail(r.id); };
   const rmSel = () => $$('[data-rms]', m.el).filter((c) => c.checked).map((c) => Number(c.dataset.rms));
-  const rmUpd = () => { const n = rmSel().length; $('#rmBar', m.el).hidden = !n; $('#rmN', m.el).textContent = `${n} marcado(s)`; };
+  const pinOf = (id) => rdPins.find((p) => p.s.id === id);
+  const paintPins = () => rdPins.forEach(({ s: st, mk }) => { const c = $(`[data-rms="${st.id}"]`, m.el); mk.getElement()?.classList.toggle('pin-sel', !!c?.checked); });
+  const rmUpd = () => { const n = rmSel().length; $('#rmBar', m.el).hidden = !n; $('#rmN', m.el).textContent = `${n} marcado(s)`; paintPins(); };
+  const setSel = (id, on) => { const c = $(`[data-rms="${id}"]`, m.el); if (c) c.checked = on ?? !c.checked; };
   $$('[data-rms]', m.el).forEach((c) => (c.onchange = rmUpd));
   $('#rmAll', m.el).onchange = (e) => { $$('[data-rms]', m.el).forEach((c) => (c.checked = e.target.checked)); rmUpd(); };
   $('#rmNone', m.el).onclick = () => { $$('[data-rms]', m.el).forEach((c) => (c.checked = false)); $('#rmAll', m.el).checked = false; rmUpd(); };
+  $('#selClr', m.el).onclick = () => $('#rmNone', m.el).click();
+  // pasar lo marcado a otro repartidor (a su ruta del mismo día)
+  $('#rmDrv', m.el).onchange = async (e) => {
+    const did = Number(e.target.value); if (!did) return;
+    const ids = rmSel(); const name = e.target.selectedOptions[0].text;
+    const d = r.date >= today() ? r.date : today();
+    if (!(await confirmDlg(`¿Pasar ${ids.length} cliente(s) a la ruta de ${name} del ${d}?`))) { e.target.value = ''; return; }
+    try {
+      const x = await POST('/api/routes/assign', { driver_id: did, date: d, order_ids: ids });
+      toast(`${x.assigned} pasaron a ${x.driver}${x.skipped.length ? ` · ${x.skipped.length} no se movieron (${x.skipped[0].reason})` : ''}`, x.skipped.length ? '' : 'ok');
+      reopenRd();
+    } catch (er) { toast(er.message, 'bad'); e.target.value = ''; }
+  };
+  $('#rmSt', m.el).onchange = (e) => { const st = e.target.value; e.target.value = ''; if (st) bulkStatus(st, 'orders', rmSel(), reopenRd); };
+  // modos del mapa: tocar pines o dibujar zona
+  let selMode = '';
+  const setMode = (md) => {
+    selMode = selMode === md ? '' : md;
+    $('#selPin', m.el).classList.toggle('primary', selMode === 'pin');
+    $('#selDraw', m.el).classList.toggle('primary', selMode === 'draw');
+    $('#selHint', m.el).textContent = selMode === 'pin' ? 'Toca los pines para marcarlos' : selMode === 'draw' ? 'Dibuja alrededor de los pines que quieras marcar' : '';
+    if (selMode === 'draw') { map.dragging.disable(); map.getContainer().style.touchAction = 'none'; map.getContainer().style.cursor = 'crosshair'; }
+    else { map.dragging.enable(); map.getContainer().style.touchAction = ''; map.getContainer().style.cursor = ''; }
+  };
+  $('#selPin', m.el).onclick = () => setMode('pin');
+  $('#selDraw', m.el).onclick = () => setMode('draw');
+  rdPins.forEach(({ s: st, mk }) => mk.on('click', () => {
+    if (selMode !== 'pin' || !['asignado', 'cargado'].includes(st.status)) return;
+    setTimeout(() => mk.closePopup(), 0);
+    setSel(st.id); rmUpd();
+  }));
+  // dibujar zona a mano alzada
+  const inPoly = (pt, poly) => { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const [yi, xi] = [poly[i].lat, poly[i].lng], [yj, xj] = [poly[j].lat, poly[j].lng]; if ((yi > pt.lat) !== (yj > pt.lat) && pt.lng < ((xj - xi) * (pt.lat - yi)) / (yj - yi) + xi) c = !c; } return c; };
+  let lasso = null, lassoPts = [];
+  const mc = map.getContainer();
+  const toLL = (ev) => map.mouseEventToLatLng(ev);
+  mc.addEventListener('pointerdown', (ev) => {
+    if (selMode !== 'draw') return;
+    ev.preventDefault(); ev.stopPropagation(); mc.setPointerCapture?.(ev.pointerId);
+    lassoPts = [toLL(ev)];
+    lasso?.remove(); lasso = L.polyline(lassoPts, { color: '#ef7d2d', weight: 3, dashArray: '4 4' }).addTo(map);
+  }, true);
+  mc.addEventListener('pointermove', (ev) => { if (selMode !== 'draw' || !lassoPts.length) return; ev.preventDefault(); lassoPts.push(toLL(ev)); lasso.setLatLngs(lassoPts); }, true);
+  const endLasso = () => {
+    if (selMode !== 'draw' || lassoPts.length < 3) { lassoPts = []; return; }
+    lasso.remove(); lasso = L.polygon(lassoPts, { color: '#ef7d2d', weight: 2, fillOpacity: 0.12 }).addTo(map);
+    let n = 0;
+    rdPins.forEach(({ s: st, mk }) => { if (['asignado', 'cargado'].includes(st.status) && inPoly(mk.getLatLng(), lassoPts)) { setSel(st.id, true); n++; } });
+    lassoPts = []; rmUpd();
+    toast(n ? `${n} cliente(s) marcados en la zona` : 'No hay paradas pendientes dentro de la zona', n ? 'ok' : '');
+    const z = lasso; setTimeout(() => z.remove(), 2500);
+  };
+  mc.addEventListener('pointerup', endLasso, true);
+  mc.addEventListener('pointercancel', endLasso, true);
   $('#rmGo', m.el).onclick = () => removeFromRoute(r, rmSel(), reopenRd);
   $$('[data-rm]', m.el).forEach((b) => (b.onclick = () => removeFromRoute(r, [Number(b.dataset.rm)], reopenRd)));
   // en el mapa: botón "Quitar de la ruta" en el globo de cada parada pendiente

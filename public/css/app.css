@@ -806,3 +806,7 @@ label:has(> input[type="file"]) { position: relative; }
 .qs { padding: 0 12px 10px; }
 .qs input { width: 100%; }
 #snRes mark { background: #ffe58a; color: inherit; border-radius: 3px; padding: 0 1px; }
+
+/* pin marcado en el mapa de la ruta */
+.leaflet-marker-icon.pin-sel { filter: drop-shadow(0 0 0 #ef7d2d) drop-shadow(0 0 4px #ef7d2d) drop-shadow(0 0 2px #ef7d2d); transform-origin: center bottom; z-index: 1000 !important; }
+.leaflet-marker-icon.pin-sel::after { content: '✓'; position: absolute; top: -6px; right: -6px; background: #ef7d2d; color: #fff; border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; font-weight: 700; }
