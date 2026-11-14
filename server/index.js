@@ -569,7 +569,53 @@ function moveStock(productId, type, qty, reference, userId) {
   db.prepare('INSERT INTO inventory_movements (product_id, type, qty, stock_after, reference, user_id) VALUES (?,?,?,?,?,?)').run(
     p.id, type, delta, after, reference || null, userId || null
   );
+  if (delta > 0 && !FILL.busy && getSettings().auto_fill !== '0') fillBackorders(userId, p.id);
   return after;
+}
+// ---------- Pedidos por surtir ----------
+// order_items.filled = piezas ya descontadas del inventario; qty - filled queda "por surtir" hasta que haya existencia
+const FILL = { busy: false, skip: new Set() };
+const OPEN_ST = "('pendiente','asignado','cargado','fallido')";
+// descuenta hasta "want" piezas de lo que haya; regresa cuántas tomó
+function takeStock(orderId, productId, want, code, userId, note = '') {
+  const st = db.prepare('SELECT stock FROM products WHERE id=?').get(productId)?.stock || 0;
+  const take = Math.max(0, Math.min(st, Math.trunc(want)));
+  if (!take) return 0;
+  const was = FILL.busy; FILL.busy = true;
+  try { moveStock(productId, 'salida', take, `Pedido ${code}${note}`, userId); } finally { FILL.busy = was; }
+  db.prepare('UPDATE order_items SET filled = MIN(qty, filled + ?) WHERE order_id=? AND product_id=?').run(take, orderId, productId);
+  return take;
+}
+// regresa al inventario lo que el pedido ya tenía descontado (al cancelarlo); lo que regresa surte a otros pedidos
+function returnOrderStock(orderId, code, userId, why = 'Cancelación') {
+  const items = db.prepare('SELECT product_id, filled FROM order_items WHERE order_id=? AND filled > 0').all(orderId);
+  FILL.skip.add(Number(orderId));
+  try {
+    for (const it of items) {
+      db.prepare('UPDATE order_items SET filled = 0 WHERE order_id=? AND product_id=?').run(orderId, it.product_id);
+      moveStock(it.product_id, 'devolucion', it.filled, `${why} ${code}`, userId);
+    }
+  } finally { FILL.skip.delete(Number(orderId)); }
+}
+// surte pedidos abiertos con faltante: primero los de fecha más próxima y prioridad alta
+function fillBackorders(userId, productId = null) {
+  if (FILL.busy) return { orders: 0, units: 0 };
+  FILL.busy = true;
+  const out = { orders: 0, units: 0, codes: [] };
+  try {
+    const rows = db.prepare(`SELECT i.order_id, i.product_id, i.qty - i.filled need, o.tracking_code FROM order_items i JOIN orders o ON o.id = i.order_id
+      WHERE i.filled < i.qty AND o.status IN ${OPEN_ST} ${productId ? 'AND i.product_id = ' + Number(productId) : ''}
+      ORDER BY o.scheduled_date, o.priority = 'alta' DESC, o.id`).all();
+    const empty = new Set();
+    for (const r of rows) {
+      if (empty.has(r.product_id) || FILL.skip.has(r.order_id)) continue;
+      const t = takeStock(r.order_id, r.product_id, r.need, r.tracking_code, userId, ' (surtido)');
+      if (!t) { empty.add(r.product_id); continue; }
+      out.units += t; out.orders++; if (out.codes.length < 10) out.codes.push(r.tracking_code);
+    }
+  } finally { FILL.busy = false; }
+  if (out.units) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (?, ?, ?)').run(userId || null, 'inventario.surtir', `${out.units} pieza(s) surtidas a ${out.orders} pedido(s) por surtir: ${out.codes.join(', ')}${out.orders > 10 ? '…' : ''}`);
+  return out;
 }
 
 
@@ -1470,7 +1516,7 @@ app.post('/api/orders/:id/items', auth('admin'), wrap((req, res) => {
     const it = db.prepare('SELECT * FROM order_items WHERE order_id=? AND product_id=?').get(o.id, p.id);
     if (it) db.prepare('UPDATE order_items SET qty = qty + ? WHERE order_id=? AND product_id=?').run(qty, o.id, p.id);
     else db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(o.id, p.id, qty);
-    if ((db.prepare('SELECT stock FROM products WHERE id=?').get(p.id)?.stock || 0) >= qty) moveStock(p.id, 'salida', qty, `Pedido ${o.tracking_code} (agregado por administración)`, req.user.id);
+    takeStock(o.id, p.id, qty, o.tracking_code, req.user.id, ' (agregado por administración)');
     for (const sn of serials) assignSerial(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id), sn, req.user);
   });
   audit(req, 'pedidos.producto', `${o.tracking_code}: + ${qty} × ${p.name}${serials.length ? ' (S/N ' + serials.join(', ') + ')' : ''}`);
@@ -1486,11 +1532,12 @@ app.put('/api/orders/:id/items/:pid', auth('admin'), wrap((req, res) => {
   const sn = db.prepare('SELECT COUNT(*) n FROM serials WHERE order_id=? AND product_id=?').get(o.id, it.product_id).n;
   if (qty < sn) throw new HttpError(409, `Este pedido tiene ${sn} S/N de ${it.name}: quita o corrige primero los números de serie`);
   tx(() => {
+    // baja: regresa solo lo que sí se había descontado; sube: descuenta lo que haya (lo demás queda por surtir)
+    const keep = Math.min(it.filled, qty), back = it.filled - keep;
     if (qty === 0) db.prepare('DELETE FROM order_items WHERE order_id=? AND product_id=?').run(o.id, it.product_id);
-    else db.prepare('UPDATE order_items SET qty=? WHERE order_id=? AND product_id=?').run(qty, o.id, it.product_id);
-    const diff = qty - it.qty;
-    if (diff < 0) moveStock(it.product_id, 'devolucion', -diff, `Pedido ${o.tracking_code} (ajuste de administración)`, req.user.id);
-    else if (diff > 0 && (db.prepare('SELECT stock FROM products WHERE id=?').get(it.product_id)?.stock || 0) >= diff) moveStock(it.product_id, 'salida', diff, `Pedido ${o.tracking_code} (ajuste de administración)`, req.user.id);
+    else db.prepare('UPDATE order_items SET qty=?, filled=? WHERE order_id=? AND product_id=?').run(qty, keep, o.id, it.product_id);
+    if (back > 0) { FILL.skip.add(o.id); try { moveStock(it.product_id, 'devolucion', back, `Pedido ${o.tracking_code} (ajuste de administración)`, req.user.id); } finally { FILL.skip.delete(o.id); } }
+    if (qty > keep && !['entregado', 'cancelado'].includes(o.status)) takeStock(o.id, it.product_id, qty - keep, o.tracking_code, req.user.id, ' (ajuste de administración)');
   });
   audit(req, 'pedidos.producto', `${o.tracking_code}: ${it.name} ${it.qty} → ${qty}`);
   res.json(loadOrder(o.id));
@@ -1664,9 +1711,8 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
     }
     for (const [pid, qty] of qtyBy) {
       db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, pid, qty);
-      // la existencia libre baja como en cualquier pedido; si ya estaba apartada para otro pedido no se descuenta dos veces
-      const st = db.prepare('SELECT stock FROM products WHERE id=?').get(pid).stock;
-      if (st >= qty) moveStock(pid, 'salida', qty, `Pedido ${code}`, me);
+      // la existencia libre baja como en cualquier pedido; lo que no haya queda por surtir
+      takeStock(oid, pid, qty, code, me);
     }
     // a su ruta del día (o una nueva) y ya en su unidad
     const s = getSettings();
@@ -1885,7 +1931,7 @@ app.delete(
       // pedido entregado: también baja la cantidad del producto (lo entregado fue una pieza menos)
       if (s.status === 'entregado') {
         const it = db.prepare('SELECT qty FROM order_items WHERE order_id=? AND product_id=?').get(o.id, s.product_id);
-        if (it && it.qty > 1) db.prepare('UPDATE order_items SET qty=qty-1 WHERE order_id=? AND product_id=?').run(o.id, s.product_id);
+        if (it && it.qty > 1) db.prepare('UPDATE order_items SET qty=qty-1, filled=MIN(filled, qty-1) WHERE order_id=? AND product_id=?').run(o.id, s.product_id);
         else if (it) db.prepare('DELETE FROM order_items WHERE order_id=? AND product_id=?').run(o.id, s.product_id);
         db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(o.id);
       }
@@ -2033,6 +2079,19 @@ function officeForCity(city) {
 }
 const OFFICE_OF = (alias) => `COALESCE(${alias}.office_id, (SELECT id FROM warehouses WHERE is_default = 1))`;
 
+// ---------- Pedidos por surtir (sin existencia al crearlos) ----------
+app.get('/api/stock/backorders', auth(...STAFF), wrap((req, res) => {
+  const rows = db.prepare(`SELECT p.id product_id, p.name, p.sku, p.stock, p.serialized, COUNT(DISTINCT o.id) orders, SUM(i.qty - i.filled) missing,
+      SUM(o.status IN ('asignado','cargado')) in_route, MIN(o.scheduled_date) oldest
+    FROM order_items i JOIN orders o ON o.id = i.order_id JOIN products p ON p.id = i.product_id JOIN customers c ON c.id = o.customer_id
+    WHERE i.filled < i.qty AND o.status IN ${OPEN_ST} ${inOffice(req, 'c')} GROUP BY p.id ORDER BY missing DESC`).all();
+  res.json({ products: rows, orders: rows.reduce((a, r) => a + r.orders, 0), missing: rows.reduce((a, r) => a + r.missing, 0), auto: getSettings().auto_fill !== '0' });
+}));
+app.post('/api/stock/fill', auth(...STAFF), wrap((req, res) => {
+  const r = tx(() => fillBackorders(req.user.id, Number(req.body?.product_id) || null));
+  const left = db.prepare(`SELECT COALESCE(SUM(i.qty - i.filled), 0) n FROM order_items i JOIN orders o ON o.id = i.order_id WHERE i.filled < i.qty AND o.status IN ${OPEN_ST}`).get().n;
+  res.json({ ...r, left });
+}));
 // ---------- Oficinas foráneas por ciudad ----------
 app.get('/api/offices', auth(...STAFF), wrap((req, res) => {
   const now = new Date(); const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -2265,7 +2324,8 @@ app.post(
   wrap((req, res) => {
     const b = req.body;
     if (!b.name || !b.address) throw new HttpError(400, 'Nombre y dirección son obligatorios');
-    if (req.user.office) b.office_id = req.user.office; // el personal de una oficina registra clientes de su oficina
+    // el cliente queda en la oficina de su ciudad; si su ciudad no tiene oficina, en la del usuario
+    b.office_id = officeForCity(b.city) || req.user.office || b.office_id;
     if (scopeCities(req) && !req.user.cities.map(normCity).includes(normCity(b.city))) throw new HttpError(403, `Solo puedes registrar clientes de ${req.user.cities.join(', ')}`);
     const vals = customerFields.map((f) => custVal(b, f));
     const r = db.prepare(`INSERT INTO customers (${customerFields.join(',')}) VALUES (${customerFields.map(() => '?').join(',')})`).run(...vals);
@@ -2282,6 +2342,8 @@ app.put(
     if (outOfScope(req, c.id)) throw new HttpError(403, 'Este cliente es de otra oficina o ciudad');
     const b = { ...c, ...req.body };
     if (req.user.office && !canManageOffice(req, b.office_id)) b.office_id = c.office_id;
+    // si cambió de ciudad, pasa a la oficina de su nueva ciudad
+    if (req.body.city !== undefined && normCity(req.body.city) !== normCity(c.city) && officeForCity(req.body.city)) b.office_id = officeForCity(req.body.city);
     const vals = customerFields.map((f) => custVal(b, f));
     db.prepare(`UPDATE customers SET ${customerFields.map((f) => f + '=?').join(',')} WHERE id=?`).run(...vals, c.id);
     const moved = b.lat != null && b.lat !== '' && (Number(b.lat) !== c.lat || Number(b.lng) !== c.lng);
@@ -2391,8 +2453,10 @@ app.post(
                 c.lat, c.lng, c.lat != null ? 'archivo' : null).lastInsertRowid);
               out.action = 'nuevo';
             }
-            if (impOffice) P('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
-            else if (out.action === 'nuevo') P('UPDATE customers SET office_id=? WHERE id=?').run(officeForCity(c.city), cid);
+            // cada cliente va a la oficina de su ciudad; la oficina elegida solo aplica a ciudades que no tienen oficina
+            const cityOff = officeForCity(c.city);
+            if (cityOff) { if (out.action === 'nuevo' || impOffice) P('UPDATE customers SET office_id=? WHERE id=?').run(cityOff, cid); }
+            else if (impOffice) P('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
             out.customer_id = cid;
             if (makeOrders) {
               const open = P("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);
@@ -2405,8 +2469,7 @@ app.post(
                 if (product) {
                   P('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
                   // sin existencia el pedido se crea igual (queda por surtir)
-                  if (P('SELECT stock FROM products WHERE id=?').get(product.id).stock >= qty) moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
-                  else noStockOrders++;
+                  if (takeStock(oid, product.id, qty, code, req.user.id) < qty) noStockOrders++;
                   stockNeeded += qty;
                 }
                 out.order = code;
@@ -2882,6 +2945,7 @@ app.get(
       args.push(route_id);
     }
     if (unrouted === '1') where.push('o.route_id IS NULL');
+    if (req.query.backorder === '1') where.push(`o.status IN ${OPEN_ST} AND EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.filled < i.qty)`);
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
     if (cityIn(req)) where.push('1' + cityIn(req));
@@ -2990,8 +3054,7 @@ app.post(
         const qty = Math.abs(Math.trunc(Number(it.qty))) || 1;
         db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, it.product_id, qty);
         // sin existencia suficiente el pedido se crea igual (queda por surtir); solo se descuenta lo que hay
-        if ((db.prepare('SELECT stock FROM products WHERE id=?').get(it.product_id)?.stock || 0) >= qty) moveStock(it.product_id, 'salida', qty, `Pedido ${code}`, req.user.id);
-        else noStock.push(db.prepare('SELECT name FROM products WHERE id=?').get(it.product_id)?.name || 'producto');
+        if (takeStock(oid, it.product_id, qty, code, req.user.id) < qty) noStock.push(db.prepare('SELECT name FROM products WHERE id=?').get(it.product_id)?.name || 'producto');
       }
       return oid;
     });
@@ -3008,9 +3071,9 @@ app.post(
     if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
     if (['entregado', 'cancelado'].includes(o.status)) throw new HttpError(409, 'No se puede cancelar');
     tx(() => {
-      for (const it of o.items) moveStock(it.product_id, 'devolucion', it.qty, `Cancelación ${o.tracking_code}`, req.user.id);
       releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado`);
       db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL WHERE id=?").run(o.id);
+      returnOrderStock(o.id, o.tracking_code, req.user.id);
     });
     audit(req, 'pedido.cancelar', o.tracking_code);
     res.json({ ok: true });
@@ -3075,9 +3138,9 @@ app.post(
         if (status === 'pendiente') {
           db.prepare("UPDATE orders SET status='pendiente', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL, loaded_at=NULL, scheduled_date=COALESCE(?, scheduled_date) WHERE id=?").run(date, o.id);
         } else if (status === 'cancelado') {
-          for (const it of o.items) moveStock(it.product_id, 'devolucion', it.qty, `Cancelación ${o.tracking_code}`, req.user.id);
           releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado`);
           db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL WHERE id=?").run(o.id);
+          returnOrderStock(o.id, o.tracking_code, req.user.id);
         } else {
           const ev = db.prepare(`INSERT INTO evidences (order_id, driver_id, result, receiver_name, reason, notes, kind, photo_path) VALUES (?,?,?,?,?,?, 'manual', ?)`)
             .run(o.id, o.driver_id || null, status, status === 'entregado' ? receiver : null, status === 'fallido' ? reason : null,
@@ -3718,6 +3781,7 @@ app.post('/api/routes/:id/close', auth(...STAFF), wrap((req, res) => {
         releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado al cerrar la ruta`);
         db.prepare(`UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, loaded_at=NULL, notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`)
           .run(` | Cancelado al cerrar la ruta ${today()} (${r.dname || 'repartidor'})${reason ? ': ' + reason : ''}`, o.id);
+        returnOrderStock(o.id, o.tracking_code, req.user.id);
       }
       db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')), started_at=COALESCE(started_at, datetime('now')) WHERE id=?").run(r.id);
     });
@@ -3959,6 +4023,7 @@ app.put(
           if (mode === 'cancelar') releaseOrderSerials(o.id, req.user.id, `Pedido ${o.tracking_code} cancelado al quitarlo de la ruta`);
           db.prepare(`UPDATE orders SET route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL, loaded_at=NULL, status=?, scheduled_date=COALESCE(?, scheduled_date),
             notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`).run(mode === 'cancelar' ? 'cancelado' : 'pendiente', rdate, note, o.id);
+          if (mode === 'cancelar') returnOrderStock(o.id, o.tracking_code, req.user.id);
           done.push(o.tracking_code);
         }
       });

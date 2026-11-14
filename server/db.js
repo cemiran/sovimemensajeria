@@ -494,6 +494,13 @@ addCols('warehouses', [['supervisor_id', 'INTEGER REFERENCES users(id)']]);
 addCols('users', [['can_deliver', 'INTEGER NOT NULL DEFAULT 0']]);
 // Supervisor por ciudad: despachador limitado a una o varias ciudades (lista separada por comas)
 addCols('users', [['cities', 'TEXT']]);
+// Pedidos por surtir: piezas de cada artículo ya descontadas del inventario (lo demás espera existencia)
+if (!db.prepare('PRAGMA table_info(order_items)').all().some((c) => c.name === 'filled')) {
+  db.exec('ALTER TABLE order_items ADD COLUMN filled INTEGER NOT NULL DEFAULT 0');
+  // los pedidos que ya tuvieron su salida de inventario cuentan como surtidos
+  db.exec(`UPDATE order_items SET filled = qty WHERE order_id IN (SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM inventory_movements m WHERE m.type = 'salida' AND m.reference LIKE 'Pedido ' || o.tracking_code || '%'))`);
+}
+ins.run('auto_fill', '1');
 // Índices para bases grandes (miles de clientes y pedidos)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id, status);
 CREATE INDEX IF NOT EXISTS idx_customers_office ON customers(office_id);
