@@ -1496,7 +1496,7 @@ function customerForm(c, done) {
   if (c.lat) setPt(c.lat, c.lng);
   map.on('click', (e) => setPt(e.latlng.lat, e.latlng.lng));
   $('#here', m.el).onclick = async () => { const p = await getPosition(); if (p) setPt(p.lat, p.lng, true); else toast('No se obtuvo GPS', 'bad'); };
-  const geoQ = () => `address=${encodeURIComponent(f.address.value)}&colonia=${encodeURIComponent(f.colonia?.value || '')}&city=${encodeURIComponent(f.city.value)}`;
+  const geoQ = () => `address=${encodeURIComponent(f.address.value)}&colonia=${encodeURIComponent(f.colonia?.value || '')}&city=${encodeURIComponent(f.city.value)}&zip=${encodeURIComponent(f.zip?.value || "")}`;
   $('#geo', m.el).onclick = async (e) => {
     const btn = e.currentTarget;
     if (!f.address.value.trim()) return toast('Escribe el domicilio', 'bad');

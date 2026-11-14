@@ -17,10 +17,10 @@ let lastError = null;
 
 // ---------- Ubicar un domicilio ----------
 // Devuelve { lat, lng, quality: 'exacta' | 'calle' | 'colonia' | 'ciudad', partial } o null
-async function geocode(text) {
+async function geocode(text, { zip } = {}) {
   if (!enabled() || left('geocode') < 1) return null;
   add('geocode', 1);
-  const p = new URLSearchParams({ address: text, region: 'mx', language: 'es', components: 'country:MX', key: key() });
+  const p = new URLSearchParams({ address: text, region: 'mx', language: 'es', components: 'country:MX' + (zip ? '|postal_code:' + zip : ''), key: key() });
   const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?' + p, { signal: AbortSignal.timeout(15000) });
   const j = await r.json().catch(() => ({}));
   if (j.status && !['OK', 'ZERO_RESULTS'].includes(j.status)) { lastError = `${j.status}: ${j.error_message || ''}`.trim(); return null; }
@@ -34,7 +34,30 @@ async function geocode(text) {
     ? 'exacta'
     : t.includes('route') || t.includes('intersection') ? 'calle'
     : t.some((x) => ['sublocality', 'sublocality_level_1', 'neighborhood', 'political'].includes(x)) && !t.includes('locality') ? 'colonia' : 'ciudad';
-  return { lat: g.geometry.location.lat, lng: g.geometry.location.lng, quality, partial: !!g.partial_match, address: g.formatted_address };
+  const comp = (k) => (g.address_components || []).find((a) => a.types.includes(k))?.long_name || '';
+  const vp = g.geometry.bounds || g.geometry.viewport;
+  return { lat: g.geometry.location.lat, lng: g.geometry.location.lng, quality: t.includes('postal_code') ? 'cp' : quality, partial: !!g.partial_match, address: g.formatted_address,
+    zip: comp('postal_code'), colonia: comp('sublocality_level_1') || comp('neighborhood') || comp('sublocality'),
+    box: vp ? { n: vp.northeast.lat, e: vp.northeast.lng, s: vp.southwest.lat, w: vp.southwest.lng } : null };
+}
+// ---------- Área de un código postal (centro y rectángulo), guardada para no volver a pedirla ----------
+db.exec("CREATE TABLE IF NOT EXISTS gm_zip (zip TEXT PRIMARY KEY, lat REAL, lng REAL, n REAL, e REAL, s REAL, w REAL, at TEXT DEFAULT (datetime('now')))");
+async function zipArea(zip, city, state) {
+  zip = String(zip || '').replace(/D/g, '').slice(0, 5);
+  if (zip.length !== 5) return null;
+  const c = db.prepare('SELECT * FROM gm_zip WHERE zip=?').get(zip);
+  if (c) return c.lat == null ? null : c;
+  if (!enabled()) return null;
+  const g = await geocode(`${zip}, ${city || ''}, ${state || 'Baja California'}, México`, { zip }).catch(() => null);
+  const ok = g && (g.zip === zip || g.quality === 'cp') && g.box;
+  db.prepare('INSERT OR REPLACE INTO gm_zip (zip, lat, lng, n, e, s, w) VALUES (?,?,?,?,?,?,?)').run(zip, ok ? g.lat : null, ok ? g.lng : null, ok ? g.box.n : null, ok ? g.box.e : null, ok ? g.box.s : null, ok ? g.box.w : null);
+  return ok ? db.prepare('SELECT * FROM gm_zip WHERE zip=?').get(zip) : null;
+}
+// ¿el punto cae dentro del CP? (con un margen en km porque el rectángulo de Google es aproximado)
+function inZip(p, a, marginKm = 0.6) {
+  if (!a || a.n == null) return null;
+  const dl = marginKm / 111, dg = marginKm / (111 * Math.cos((a.lat * Math.PI) / 180));
+  return p.lat <= a.n + dl && p.lat >= a.s - dl && p.lng <= a.e + dg && p.lng >= a.w - dg;
 }
 
 // ---------- Tiempos y distancias por calle entre puntos ----------
@@ -198,4 +221,4 @@ async function colonyCenter(text) {
   return g && g.quality === 'colonia' ? g : null;
 }
 
-Object.assign(module.exports, { tilesOn, tile, directions, colonyCenter });
+Object.assign(module.exports, { tilesOn, tile, directions, colonyCenter, zipArea, inZip });

@@ -2530,7 +2530,7 @@ async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0)
   const own = colonyCenter(col, city, excludeId);
   return own && own.n >= 2 && !broad(own) ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
 }
-async function geocodeAddress({ address, colonia, city, id = 0 }) {
+async function geocodeAddress({ address, colonia, city, zip, id = 0 }) {
   const cityName = osmCity(city);
   const st = stateOf(city);
   const ctr = await cityCenter(city).catch(() => null);
@@ -2552,10 +2552,14 @@ async function geocodeAddress({ address, colonia, city, id = 0 }) {
   const anchor = await colonyAnchor(col, city, cityName, st, bias, inBox, id);
   const house = (g) => g.cat === 'building' || ['house', 'building', 'apartments', 'detached', 'commercial'].includes(g.type) || ['building', 'house'].includes(g.addr) || (g.cat === 'place' && g.type === 'house');
   let street1 = null;
+  // código postal: la búsqueda lo incluye y el resultado debe caer dentro de él
+  const cp = String(zip || '').replace(/D/g, '').slice(0, 5);
+  const zarea = cp.length === 5 ? await gmaps.zipArea(cp, cityName, st).catch(() => null) : null;
+  const zipOk = (g) => !zarea || gmaps.inZip(g, zarea, 0.6) !== false || (g.zip && g.zip === cp);
   if (street && gmaps.enabled()) {
     try {
-      const g = await gmaps.geocode(`${street}${col ? ', Col. ' + col : ''}, ${cityName}, ${st}, México`);
-      if (g && inBox(g) && !(anchor && haversine(g, anchor) > (g.quality === 'exacta' ? 2.5 : 1.2))) {
+      const g = await gmaps.geocode(`${street}${col ? ', Col. ' + col : ''}${cp.length === 5 ? ', C.P. ' + cp : ''}, ${cityName}, ${st}, México`, { zip: cp.length === 5 ? cp : undefined });
+      if (g && inBox(g) && zipOk(g) && !(anchor && haversine(g, anchor) > (g.quality === 'exacta' ? 2.5 : 1.2))) {
         if (g.quality === 'exacta' && !g.partial) return { lat: g.lat, lng: g.lng, quality: 'exacta' };
         if (g.quality === 'exacta' || g.quality === 'calle') street1 = { lat: g.lat, lng: g.lng, quality: 'calle' };
       }
@@ -2575,7 +2579,7 @@ async function geocodeAddress({ address, colonia, city, id = 0 }) {
         // con número: exacta solo si encontró el edificio; si encontró la calle, es "calle"
         quality = g ? (house(g) ? 'exacta' : 'calle') : null;
       }
-      if (!g || !quality || !inBox(g)) continue;
+      if (!g || !quality || !inBox(g) || !zipOk(g)) continue;
       // debe quedar dentro de su colonia: una avenida larga con el mismo nombre puede estar a kilómetros
       if (anchor && haversine(g, anchor) > (quality === 'exacta' ? 2.5 : 1.2)) continue;
       if (quality === 'exacta') return { lat: g.lat, lng: g.lng, quality };
@@ -2584,8 +2588,11 @@ async function geocodeAddress({ address, colonia, city, id = 0 }) {
     } catch (e) { if (e.message === 'rate') await pause(30000); }
   }
   if (street1 && anchor) return street1;
+  if (anchor && zipOk(anchor)) return { lat: anchor.lat, lng: anchor.lng, quality: 'colonia' };
+  if (street1 && zarea) return street1;
+  if (zarea) return { lat: zarea.lat, lng: zarea.lng, quality: 'colonia' }; // centro del código postal, por revisar
   if (anchor) return { lat: anchor.lat, lng: anchor.lng, quality: 'colonia' };
-  return street1; // sin colonia para validar: la calle (queda por revisar)
+  return street1; // sin colonia ni CP para validar: la calle (queda por revisar)
 }
 // Auditoría en segundo plano: revisa las ubicaciones guardadas contra su colonia y corrige las que quedaron lejos
 const gaudit = { running: false, done: 0, fixed: 0 };
@@ -2608,7 +2615,7 @@ async function geoAudit() {
       const anchor = await colonyAnchor(colA, c.city, cityName, st, bias, inBox, c.id);
       const lim = c.geo_quality === 'exacta' ? 2.5 : c.geo_quality === 'calle' ? 1.5 : 1;
       if (anchor && (c.geo_quality === 'ciudad' || haversine(c, anchor) > lim)) {
-        const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city, id: c.id });
+        const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city, zip: c.zip, id: c.id });
         if (hit) {
           db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('exacta','calle','colonia','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
           db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `${c.name}: estaba a ${haversine(c, anchor).toFixed(1)} km de su colonia (${colA}); reubicado (${hit.quality})`);
@@ -2625,8 +2632,8 @@ async function geoAudit() {
   }
 }
 app.get('/api/geocode', auth(...STAFF), wrap(async (req, res) => {
-  const { address = '', colonia = '', city = '' } = req.query;
-  const hit = String(address).trim() ? await geocodeAddress({ address, colonia, city }) : null;
+  const { address = '', colonia = '', city = '', zip = '' } = req.query;
+  const hit = String(address).trim() ? await geocodeAddress({ address, colonia, city, zip }) : null;
   if (hit && hit.quality !== 'colonia') return res.json(hit);
   // no se encontró el domicilio: su colonia según nuestros clientes, o la del mapa
   const colA = colonia || (String(address).match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
@@ -2648,7 +2655,7 @@ async function geocodePending() {
       if (!c) break;
       // colonia escrita en el domicilio ("…, Col. MADERO") si no viene aparte
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
-      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', id: c.id });
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id });
       void dl; void dg;
       let hit2 = hit;
       if (!hit2 || hit2.quality === 'colonia') { const cc = colonyCenter(colA, c.city, c.id); if (cc) hit2 = { lat: cc.lat, lng: cc.lng, quality: 'colonia' }; }
@@ -2682,7 +2689,7 @@ async function refineApprox() {
       const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_refine', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
-      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', id: c.id });
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
       const rank = { exacta: 3, calle: 2, colonia: 1, ciudad: 0 };
       if (c.geo_quality === 'ciudad' && (!hit || hit.quality === 'colonia')) {
