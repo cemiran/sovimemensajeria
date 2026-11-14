@@ -2677,7 +2677,7 @@ async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0)
   const own = colonyCenter(col, city, excludeId);
   return own && own.n >= 2 && !broad(own) ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
 }
-async function geocodeAddress({ address, colonia, city, zip, id = 0 }) {
+async function geocodeAddress({ address, colonia, city, zip, id = 0, bulk = false }) {
   const cityName = osmCity(city);
   const st = stateOf(city);
   const ctr = await cityCenter(city).catch(() => null);
@@ -2705,7 +2705,7 @@ async function geocodeAddress({ address, colonia, city, zip, id = 0 }) {
   const zipOk = (g) => !zarea || gmaps.inZip(g, zarea, 0.6) !== false || (g.zip && g.zip === cp);
   if (street && gmaps.enabled()) {
     try {
-      const g = await gmaps.geocode(`${street}${col ? ', Col. ' + col : ''}${cp.length === 5 ? ', C.P. ' + cp : ''}, ${cityName}, ${st}, México`, { zip: cp.length === 5 ? cp : undefined });
+      const g = await gmaps.geocode(`${street}${col ? ', Col. ' + col : ''}${cp.length === 5 ? ', C.P. ' + cp : ''}, ${cityName}, ${st}, México`, { zip: cp.length === 5 ? cp : undefined, bulk });
       if (g && inBox(g) && zipOk(g) && !(anchor && haversine(g, anchor) > (g.quality === 'exacta' ? 2.5 : 1.2))) {
         if (g.quality === 'exacta' && !g.partial) return { lat: g.lat, lng: g.lng, quality: 'exacta' };
         if (g.quality === 'exacta' || g.quality === 'calle') street1 = { lat: g.lat, lng: g.lng, quality: 'calle' };
@@ -2825,6 +2825,61 @@ async function geocodePending() {
 // Mejora ubicaciones aproximadas (centro de la colonia o de la calle): si encuentra el domicilio exacto lo actualiza;
 // si no, deja la que ya tiene. Se reanuda solo tras un reinicio (guarda el último cliente revisado).
 const refine = { running: false, done: 0, improved: 0 };
+// ---------- Ubicación de las paradas en ruta (prioridad para navegar) ----------
+const GEO_RANK = { exacta: 4, calle: 3, colonia: 2, cp: 1, ciudad: 0 };
+const addrKey = (c) => normCity(String(c.address || '').split(',')[0].replace(/#\s*/g, '').replace(/\b(col(onia)?|fracc?(ionamiento)?)\b.*$/i, '')) + '|' + normCity(c.city);
+// mismo domicilio ya confirmado en otro cliente (exacto, a mano, GPS de entrega o el repartidor): se usa ese pin
+function sameAddressPin(c) {
+  const k = addrKey(c);
+  if (k.length < 8 || !/\d/.test(k)) return null; // sin número no es un domicilio único
+  const peers = db.prepare(`SELECT id, address, city, colonia, lat, lng FROM customers WHERE id <> ? AND lat IS NOT NULL AND geo_quality IN ('exacta','manual','gps_entrega','repartidor')
+    AND lower(TRIM(city)) = lower(TRIM(?)) AND substr(lower(TRIM(address)), 1, 6) = substr(lower(TRIM(?)), 1, 6)`).all(c.id, c.city || '', c.address || '');
+  return peers.find((p) => addrKey(p) === k && (!c.colonia || !p.colonia || colKey(p.colonia) === colKey(c.colonia))) || null;
+}
+const routedGeo = { running: false, last: null };
+// paradas con pin aproximado en rutas de hoy y mañana: primero las más próximas en la ruta
+async function routedRefine({ routeId = null, force = false } = {}) {
+  if (routedGeo.running) return { busy: true };
+  routedGeo.running = true;
+  const out = { revisadas: 0, mejoradas: 0, mismo_domicilio: 0, rutas: new Set() };
+  try {
+    const tom = new Date(Date.now() + 864e5).toLocaleDateString('en-CA');
+    const rows = db.prepare(`SELECT DISTINCT c.*, r.id rid FROM orders o JOIN routes r ON r.id = o.route_id JOIN customers c ON c.id = o.customer_id
+      WHERE o.status IN ('asignado','cargado') AND c.geo_quality IN ('calle','colonia','cp','ciudad')
+        ${routeId ? 'AND r.id = ' + Number(routeId) : "AND r.date BETWEEN date('now','localtime') AND '" + tom + "'"}
+        ${force ? '' : "AND (c.geo_tried IS NULL OR c.geo_tried < datetime('now','-12 hours'))"}
+      ORDER BY r.date, o.stop_seq LIMIT 400`).all();
+    for (const c of rows) {
+      out.revisadas++;
+      db.prepare("UPDATE customers SET geo_tried = datetime('now') WHERE id = ?").run(c.id);
+      const same = sameAddressPin(c);
+      if (same) {
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='exacta' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(same.lat, same.lng, c.id);
+        out.mejoradas++; out.mismo_domicilio++; out.rutas.add(c.rid); continue;
+      }
+      const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id }).catch(() => null);
+      if (hit && GEO_RANK[hit.quality] > GEO_RANK[c.geo_quality]) {
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
+        out.mejoradas++; out.rutas.add(c.rid);
+      }
+    }
+    // rutas que aún no salen: se reordenan con los pins nuevos
+    for (const rid of out.rutas) googleRefine(rid);
+    if (out.mejoradas) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `Paradas en ruta: ${out.mejoradas} de ${out.revisadas} ubicaciones mejoradas${out.mismo_domicilio ? ` (${out.mismo_domicilio} por domicilio ya confirmado)` : ''}`);
+  } catch (e) { console.error('routedRefine', e.message); }
+  finally { routedGeo.running = false; routedGeo.last = { at: new Date().toISOString(), revisadas: out.revisadas, mejoradas: out.mejoradas }; }
+  return { revisadas: out.revisadas, mejoradas: out.mejoradas, mismo_domicilio: out.mismo_domicilio, rutas: out.rutas.size };
+}
+app.post('/api/routes/:id/geo-improve', auth(...STAFF), wrap(async (req, res) => {
+  const r = db.prepare('SELECT * FROM routes WHERE id=?').get(req.params.id);
+  if (!r) throw new HttpError(404, 'Ruta no encontrada');
+  officeRoute(req, r);
+  const x = await routedRefine({ routeId: r.id, force: true });
+  if (x.busy) throw new HttpError(409, 'Ya se están mejorando ubicaciones; intenta en un minuto');
+  audit(req, 'rutas.ubicaciones', `${r.name || 'Ruta ' + r.id}: ${x.mejoradas} de ${x.revisadas} ubicaciones mejoradas`);
+  res.json(x);
+}));
 async function refineApprox() {
   if (refine.running || geo.running) return;
   refine.running = true;
@@ -2836,7 +2891,7 @@ async function refineApprox() {
       const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','cp','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_refine', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
-      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id });
+      const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id, bulk: true });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
       const rank = { exacta: 4, calle: 3, colonia: 2, cp: 1, ciudad: 0 };
       if (['ciudad', 'cp'].includes(c.geo_quality) && (!hit || ['colonia', 'cp'].includes(hit.quality))) {
@@ -4959,6 +5014,8 @@ if (require.main === module) {
   setTimeout(resumenTick, 60000);
   setInterval(resumenTick, 15 * 60000).unref();
   setTimeout(geocodePending, 5000);
+  setTimeout(() => routedRefine(), 90000);
+  setInterval(() => routedRefine(), 10 * 60000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }
@@ -4974,5 +5031,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf };
+app.internal = { persistRoute, depotOf, routedRefine };
 module.exports = app;

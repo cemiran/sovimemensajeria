@@ -496,6 +496,8 @@ addCols('users', [['can_deliver', 'INTEGER NOT NULL DEFAULT 0']]);
 addCols('users', [['cities', 'TEXT']]);
 // Personal a cargo: a qué supervisor reporta cada repartidor o despachador (varios supervisores por ciudad)
 addCols('users', [['reports_to', 'INTEGER REFERENCES users(id)']]);
+// última vez que se intentó mejorar la ubicación del cliente (para no repetir la búsqueda cada pocos minutos)
+addCols('customers', [['geo_tried', 'TEXT']]);
 // Pedidos por surtir: piezas de cada artículo ya descontadas del inventario (lo demás espera existencia)
 if (!db.prepare('PRAGMA table_info(order_items)').all().some((c) => c.name === 'filled')) {
   db.exec('ALTER TABLE order_items ADD COLUMN filled INTEGER NOT NULL DEFAULT 0');

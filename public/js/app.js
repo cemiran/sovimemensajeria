@@ -1794,7 +1794,7 @@ async function routeDetail(id) {
   const m = modal(r.name, `
     <div class="grid g2">
       <div><div class="row" style="gap:6px;margin-bottom:6px;flex-wrap:wrap" id="selTools"><button type="button" class="btn sm" id="selPin" title="Toca los pines para marcarlos o desmarcarlos">👆 Seleccionar pines</button><button type="button" class="btn sm" id="selDraw" title="Dibuja con el dedo o el mouse alrededor de los pines">✏️ Dibujar zona</button><button type="button" class="btn sm ghost" id="selClr">Limpiar</button><small class="muted" id="selHint"></small></div>
-        ${(() => { const n = r.stops.filter((x) => x.lat != null && geoChk(x.geo_quality) && ['asignado', 'cargado', 'fallido', 'pendiente'].includes(x.status)).length; return n ? `<div class="offline-bar" style="margin-bottom:6px">⚠ ${n} parada(s) con <b>ubicación aproximada</b> (pin con <b>!</b>: por código postal, colonia o calle). El repartidor la confirma al llegar.</div>` : ''; })()}
+        ${(() => { const n = r.stops.filter((x) => x.lat != null && geoChk(x.geo_quality) && ['asignado', 'cargado', 'fallido', 'pendiente'].includes(x.status)).length; return n ? `<div class="offline-bar" style="margin-bottom:6px">⚠ ${n} parada(s) con <b>ubicación aproximada</b> (pin con <b>!</b>: por código postal, colonia o calle). El repartidor la confirma al llegar. ${['admin', 'despachador'].includes(store.user.role) && !driverMode() ? '<button type="button" class="btn sm" id="geoImp">📍 Mejorar ubicaciones de esta ruta</button>' : ''}</div>` : ''; })()}
         <div id="rdmap" class="map"></div>
         <div class="grid g3" style="margin-top:10px">
           <div class="kpi"><div class="label">Distancia</div><div class="value" style="font-size:1.3rem">${fmtN(r.distance_km, 1)} km</div><div class="sub">sin optimizar ${fmtN(r.original_distance_km, 1)}</div></div>
@@ -1865,6 +1865,11 @@ async function routeDetail(id) {
   $('#rdel', m.el)?.addEventListener('click', async () => { if (!(await confirmDlg('¿Eliminar la ruta? Los pedidos regresarán a pendientes.'))) return; try { await api('DELETE', '/api/routes/' + r.id); toast('Ruta eliminada', 'ok'); m.close(); } catch (e) { toast(e.message, 'bad'); } });
   // quitar uno o varios clientes de la ruta
   const reopenRd = () => { m.el.remove(); routeDetail(r.id); };
+  if ($('#geoImp', m.el)) $('#geoImp', m.el).onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Buscando domicilios…';
+    try { const x = await POST(`/api/routes/${r.id}/geo-improve`, {}); toast(x.mejoradas ? `${x.mejoradas} de ${x.revisadas} ubicaciones mejoradas${x.mismo_domicilio ? ` (${x.mismo_domicilio} por domicilio ya confirmado)` : ''}` : `Se revisaron ${x.revisadas}: no se encontró una ubicación más precisa`, x.mejoradas ? 'ok' : ''); reopenRd(); }
+    catch (er) { toast(er.message, 'bad'); e.target.disabled = false; e.target.textContent = '📍 Mejorar ubicaciones de esta ruta'; }
+  };
   const rmSel = () => $$('[data-rms]', m.el).filter((c) => c.checked).map((c) => Number(c.dataset.rms));
   const pinOf = (id) => rdPins.find((p) => p.s.id === id);
   const paintPins = () => rdPins.forEach(({ s: st, mk }) => { const c = $(`[data-rms="${st.id}"]`, m.el); mk.getElement()?.classList.toggle('pin-sel', !!c?.checked); });

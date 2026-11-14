@@ -17,8 +17,10 @@ let lastError = null;
 
 // ---------- Ubicar un domicilio ----------
 // Devuelve { lat, lng, quality: 'exacta' | 'calle' | 'colonia' | 'ciudad', partial } o null
-async function geocode(text, { zip } = {}) {
-  if (!enabled() || left('geocode') < 1) return null;
+// la búsqueda masiva (bulk) deja libre una reserva del tope diario para las paradas en ruta y los clientes nuevos
+const reserve = () => Number(getSettings().google_geocode_reserve) || Math.round(cap('geocode') * 0.2);
+async function geocode(text, { zip, bulk = false } = {}) {
+  if (!enabled() || left('geocode') < (bulk ? reserve() + 1 : 1)) return null;
   add('geocode', 1);
   const p = new URLSearchParams({ address: text, region: 'mx', language: 'es', components: 'country:MX' + (zip ? '|postal_code:' + zip : ''), key: key() });
   const r = await fetch('https://maps.googleapis.com/maps/api/geocode/json?' + p, { signal: AbortSignal.timeout(15000) });
