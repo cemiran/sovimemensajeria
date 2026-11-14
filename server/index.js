@@ -576,10 +576,13 @@ function moveStock(productId, type, qty, reference, userId) {
 // order_items.filled = piezas ya descontadas del inventario; qty - filled queda "por surtir" hasta que haya existencia
 const FILL = { busy: false, skip: new Set() };
 const OPEN_ST = "('pendiente','asignado','cargado','fallido')";
-// descuenta hasta "want" piezas de lo que haya; regresa cuántas tomó
-function takeStock(orderId, productId, want, code, userId, note = '') {
+// Inventario abierto (stock_at = 'entrega'): el pedido NO aparta existencia; la pieza sale del inventario de la ciudad al entregarse.
+const stockAtDelivery = () => getSettings().stock_at === 'entrega';
+// descuenta hasta "want" piezas de lo que haya; regresa cuántas tomó (con inventario abierto, solo revisa si hay, salvo al entregar)
+function takeStock(orderId, productId, want, code, userId, note = '', { force = false } = {}) {
   const st = db.prepare('SELECT stock FROM products WHERE id=?').get(productId)?.stock || 0;
   const take = Math.max(0, Math.min(st, Math.trunc(want)));
+  if (stockAtDelivery() && !force) return take;
   if (!take) return 0;
   const was = FILL.busy; FILL.busy = true;
   try { moveStock(productId, 'salida', take, `Pedido ${code}${note}`, userId); } finally { FILL.busy = was; }
@@ -599,7 +602,7 @@ function returnOrderStock(orderId, code, userId, why = 'Cancelación') {
 }
 // surte pedidos abiertos con faltante: primero los de fecha más próxima y prioridad alta
 function fillBackorders(userId, productId = null) {
-  if (FILL.busy) return { orders: 0, units: 0 };
+  if (FILL.busy || stockAtDelivery()) return { orders: 0, units: 0 };
   FILL.busy = true;
   const out = { orders: 0, units: 0, codes: [] };
   try {
@@ -1516,7 +1519,7 @@ app.post('/api/orders/:id/items', auth('admin'), wrap((req, res) => {
     const it = db.prepare('SELECT * FROM order_items WHERE order_id=? AND product_id=?').get(o.id, p.id);
     if (it) db.prepare('UPDATE order_items SET qty = qty + ? WHERE order_id=? AND product_id=?').run(qty, o.id, p.id);
     else db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(o.id, p.id, qty);
-    takeStock(o.id, p.id, qty, o.tracking_code, req.user.id, ' (agregado por administración)');
+    takeStock(o.id, p.id, qty, o.tracking_code, req.user.id, ' (agregado por administración)', { force: o.status === 'entregado' });
     for (const sn of serials) assignSerial(db.prepare('SELECT * FROM orders WHERE id=?').get(o.id), sn, req.user);
   });
   audit(req, 'pedidos.producto', `${o.tracking_code}: + ${qty} × ${p.name}${serials.length ? ' (S/N ' + serials.join(', ') + ')' : ''}`);
@@ -1855,6 +1858,9 @@ app.post('/api/custody/return', auth(...STAFF), wrap((req, res) => {
 }));
 // Al entregar un pedido, lo que el repartidor traía de ese pedido sale de su inventario
 function custodyOnDelivery(orderId, driverId, userId) {
+  const code = db.prepare('SELECT tracking_code FROM orders WHERE id=?').get(orderId)?.tracking_code || orderId;
+  for (const it of db.prepare('SELECT product_id, qty - filled need FROM order_items WHERE order_id=? AND filled < qty').all(orderId))
+    takeStock(orderId, it.product_id, it.need, code, userId, ' (entregado)', { force: true });
   db.prepare('UPDATE serials SET open_pool=0 WHERE order_id=?').run(orderId);
   for (const s of db.prepare('SELECT * FROM serials WHERE order_id=? AND holder_id IS NOT NULL').all(orderId)) {
     db.prepare('UPDATE serials SET holder_id=NULL, held_at=NULL WHERE id=?').run(s.id);
@@ -2086,6 +2092,32 @@ app.get('/api/stock/backorders', auth(...STAFF), wrap((req, res) => {
     FROM order_items i JOIN orders o ON o.id = i.order_id JOIN products p ON p.id = i.product_id JOIN customers c ON c.id = o.customer_id
     WHERE i.filled < i.qty AND o.status IN ${OPEN_ST} ${inOffice(req, 'c')} GROUP BY p.id ORDER BY missing DESC`).all();
   res.json({ products: rows, orders: rows.reduce((a, r) => a + r.orders, 0), missing: rows.reduce((a, r) => a + r.missing, 0), auto: getSettings().auto_fill !== '0' });
+}));
+app.get('/api/stock/by-office', auth(...STAFF), wrap((req, res) => {
+  const offs = db.prepare(`SELECT id, name, city FROM warehouses WHERE active = 1 ${req.user.office ? 'AND id = ' + Number(req.user.office) : ''} ORDER BY is_default DESC, name`).all();
+  const prods = db.prepare('SELECT id, name, sku, serialized, stock FROM products').all();
+  const need = db.prepare(`SELECT i.product_id, SUM(i.qty - i.filled) n, SUM(CASE WHEN o.status IN ('asignado','cargado') THEN i.qty - i.filled ELSE 0 END) ruta, COUNT(DISTINCT o.id) pedidos
+    FROM order_items i JOIN orders o ON o.id = i.order_id JOIN customers c ON c.id = o.customer_id
+    WHERE o.status IN ${OPEN_ST} AND i.filled < i.qty AND ${OFFICE_OF('c')} = ? ${cityIn(req, 'c')} GROUP BY i.product_id`);
+  const sn = db.prepare(`SELECT s.product_id,
+      SUM(s.holder_id IS NULL AND s.open_pool = 0) almacen,
+      SUM(s.holder_id IS NOT NULL) repartidores,
+      SUM(s.holder_id IS NULL AND s.open_pool = 1) abierto
+    FROM serials s LEFT JOIN users u ON u.id = s.holder_id
+    WHERE s.status = 'disponible' AND (CASE WHEN s.holder_id IS NOT NULL THEN ${OFFICE_OF('u')} ELSE COALESCE(s.warehouse_id, (SELECT id FROM warehouses WHERE is_default = 1)) END) = ?
+    GROUP BY s.product_id`);
+  const out = offs.map((w) => {
+    const nd = new Map(need.all(w.id).map((r) => [r.product_id, r]));
+    const sv = new Map(sn.all(w.id).map((r) => [r.product_id, r]));
+    const rows = prods.map((p) => {
+      const n = nd.get(p.id) || {}, v = sv.get(p.id) || {};
+      const have = p.serialized ? (v.almacen || 0) + (v.repartidores || 0) + (v.abierto || 0) : null;
+      return { product_id: p.id, name: p.name, sku: p.sku, serialized: p.serialized, pedidos: n.pedidos || 0, necesita: n.n || 0, en_ruta: n.ruta || 0,
+        almacen: v.almacen || 0, repartidores: v.repartidores || 0, abierto: v.abierto || 0, disponible: have, faltan: have == null ? null : Math.max(0, (n.n || 0) - have) };
+    }).filter((r) => r.necesita || r.disponible);
+    return { id: w.id, name: w.name, cities: w.city, rows };
+  });
+  res.json({ offices: out, stock_at: getSettings().stock_at || 'pedido' });
 }));
 app.post('/api/stock/fill', auth(...STAFF), wrap((req, res) => {
   const r = tx(() => fillBackorders(req.user.id, Number(req.body?.product_id) || null));
@@ -4896,6 +4928,17 @@ if (require.main === module) {
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }
+// Inventario abierto por ciudad: una sola vez, lo que los pedidos abiertos tenían apartado regresa a la existencia
+(function toOpenStock() {
+  if (getSettings().stock_at === 'entrega') return;
+  const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  tx(() => {
+    up.run('auto_fill', '0'); up.run('stock_at', 'entrega');
+    const open = db.prepare(`SELECT DISTINCT o.id, o.tracking_code FROM orders o JOIN order_items i ON i.order_id = o.id WHERE i.filled > 0 AND o.status IN ${OPEN_ST}`).all();
+    for (const o of open) returnOrderStock(o.id, o.tracking_code, null, 'Inventario abierto (se descuenta al entregar):');
+    db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('inventario.abierto', `Inventario abierto por ciudad: el pedido ya no aparta existencia, se descuenta al entregar (${open.length} pedido(s) abiertos regresaron lo apartado)`);
+  });
+})();
 app.releaseOverdue = releaseOverdue;
 app.internal = { persistRoute, depotOf };
 module.exports = app;

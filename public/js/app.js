@@ -1260,7 +1260,7 @@ async function orderDetail(id) {
           <dt>Intentos</dt><dd>${o.attempts}</dd>
           ${o.notes ? `<dt>Notas</dt><dd>${esc(o.notes)}</dd>` : ''}
         </dl>
-        <div><h3>Contenido</h3><table><tbody>${o.items.map((i) => `<tr><td>${esc(i.name)}${i.serialized ? ` <span class="chip">${icon('tag')} S/N</span>` : ''}<br><small class="muted">${esc(i.sku)}</small></td><td class="r num">× ${i.qty}${i.filled < i.qty && !['entregado', 'cancelado'].includes(o.status) ? `<br><span class="chip warn" title="Sin existencia al crear el pedido: se surte sola al entrar inventario">📦 por surtir ${i.qty - i.filled}</span>` : ''}</td></tr>`).join('') || '<tr><td class="muted">Sin artículos</td></tr>'}</tbody></table></div>
+        <div><h3>Contenido</h3><table><tbody>${o.items.map((i) => `<tr><td>${esc(i.name)}${i.serialized ? ` <span class="chip">${icon('tag')} S/N</span>` : ''}<br><small class="muted">${esc(i.sku)}</small></td><td class="r num">× ${i.qty}</td></tr>`).join('') || '<tr><td class="muted">Sin artículos</td></tr>'}</tbody></table></div>
         ${o.serial_needs?.length ? `<div><div class="row between"><h3 style="margin:0">Números de serie</h3>${o.serials_missing ? `<span class="chip warn">Faltan ${o.serials_missing}</span>` : '<span class="chip ok">Completos</span>'}</div>
           <div class="sn-list" style="margin:8px 0">${o.serials.map((x) => `<span class="chip sn-chip"><span class="mono" data-snview="${esc(x.serial)}">${esc(x.serial)}</span>${staff && x.status === 'asignado' ? `<button type="button" class="x" data-snrm="${x.id}" aria-label="Quitar ${esc(x.serial)}">×</button>` : ''}</span>`).join('') || '<small class="muted">Sin series asignadas</small>'}</div>
           ${o.serials_missing && o.status !== 'cancelado' && (staff || o.status !== 'entregado') ? `<div class="row" style="gap:6px;flex-wrap:wrap">${o.status !== 'entregado' ? `<button class="btn sm primary" id="snAssign">${icon('scan')} Escanear números de serie</button>` : ''}${staff ? `<button class="btn sm ${o.status === 'entregado' ? 'primary' : ''}" id="snManual">${icon('tag')} Asignar S/N manualmente</button>` : ''}</div>` : ''}</div>` : ''}
@@ -1440,7 +1440,7 @@ async function orderForm(done) {
     try {
       const o = await POST('/api/orders', { account_id: $('#oacc', m.el).value || null, customer_id: customer.id, items: items.map(({ product_id, qty }) => ({ product_id, qty })), scheduled_date: $('#odate', m.el).value, priority: $('#oprio', m.el).value, cod_amount: $('#ocod', m.el).value, notes: $('#onotes', m.el).value, tracking_code: $('#ocode', m.el).value,
         shipment_type: $('#oship', m.el).value, temp_min: tempRange()[0], temp_max: tempRange()[1], requires_seal: $('#oreqseal', m.el).checked, seal_number: $('#oseal', m.el).value });
-      toast(`Pedido ${o.tracking_code} creado${o.without_stock?.length ? ` sin inventario de ${o.without_stock.join(', ')} (queda por surtir)` : ''}`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
+      toast(`Pedido ${o.tracking_code} creado${o.without_stock?.length ? ` sin existencia de ${o.without_stock.join(', ')}: se entrega cuando haya inventario en su ciudad` : ''}`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
     } catch (e) { toast(e.message, 'bad'); }
   };
 }
@@ -4308,7 +4308,7 @@ async function viewInventory(v) {
   if (p.get('view') === 'list') return viewInventoryList(v);
   const q = p.get('q') || '';
   const low = p.get('low') === '1';
-  const [r, movs, cust, bd, whs, bo] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody'), GET('/api/inventory/breakdown'), GET('/api/warehouses'), GET('/api/stock/backorders').catch(() => ({ products: [], orders: 0, missing: 0 }))]);
+  const [r, movs, cust, bd, whs, bo] = await Promise.all([GET(`/api/products?limit=500&q=${encodeURIComponent(q)}&low=${low ? 1 : ''}`), GET('/api/inventory/movements?limit=25'), GET('/api/custody'), GET('/api/inventory/breakdown'), GET('/api/warehouses'), GET('/api/stock/by-office').catch(() => ({ offices: [] }))]);
   const totalUnits = bd.products.reduce((a, x) => a + x.in_warehouses, 0);
   const outUnits = bd.products.reduce((a, x) => a + x.drivers + x.open, 0);
   const withDrv = cust.drivers.filter((d) => d.total);
@@ -4316,12 +4316,13 @@ async function viewInventory(v) {
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
     <button class="card kpi kpi-btn" id="kpiWh" title="Ver dónde está cada unidad"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div><div class="sub">${fmtN(outUnits)} fuera · ver detalle ›</div></button>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>
-  ${bo.orders ? `<div class="card" id="boCard" style="margin-top:14px;border-left:4px solid var(--warn,#e0a100)"><div class="row between" style="flex-wrap:wrap;gap:8px"><div><h2 style="margin:0">📦 Pedidos por surtir</h2>
-      <small class="muted">Se crearon sin existencia. Se asignan y reparten igual; al entrar inventario se surten solos (primero los de fecha más próxima).</small></div>
-      <button class="btn primary" id="boFill" ${bo.products.some((x) => x.stock > 0) ? '' : 'disabled title="No hay existencia: registra una entrada primero"'}>Surtir ahora con la existencia</button></div>
-    <div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>Producto</th><th class="r">Pedidos</th><th class="r">Faltan</th><th class="r">En ruta</th><th class="r">Existencia</th><th>Desde</th><th></th></tr></thead><tbody>
-      ${bo.products.map((x) => `<tr><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.sku)}</small></td><td class="r num">${fmtN(x.orders)}</td><td class="r num"><b>${fmtN(x.missing)}</b></td><td class="r num">${fmtN(x.in_route || 0)}</td><td class="r num">${fmtN(x.stock)}</td><td><small>${esc(x.oldest || '')}</small></td>
-        <td class="r"><button class="btn sm" data-boin="${x.product_id}">${icon('plus')} Agregar inventario</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+  ${bo.offices.some((w) => w.rows.length) ? `<div class="card" id="boCard" style="margin-top:14px"><div class="row between" style="flex-wrap:wrap;gap:8px"><div><h2 style="margin:0">${icon('building')} Inventario por ciudad</h2>
+      <small class="muted">El inventario es abierto en cada ciudad: cualquier equipo de la oficina sirve para cualquier pedido de sus ciudades y sale del inventario al entregarse. "Faltan" = pedidos abiertos − equipos disponibles.</small></div></div>
+    ${bo.offices.filter((w) => w.rows.length).map((w) => `<h3 style="margin:12px 0 4px">${esc(w.name)} <small class="muted">${esc(w.cities || '')}</small></h3>
+    <div class="table-wrap"><table><thead><tr><th>Producto</th><th class="r">Pedidos abiertos</th><th class="r">En ruta</th><th class="r">En almacén</th><th class="r">Con repartidores</th><th class="r">Abierto</th><th class="r">Faltan</th><th></th></tr></thead><tbody>
+      ${w.rows.map((x) => `<tr><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.sku)}</small></td><td class="r num">${fmtN(x.necesita)}</td><td class="r num">${fmtN(x.en_ruta)}</td>
+        ${x.serialized ? `<td class="r num">${fmtN(x.almacen)}</td><td class="r num">${fmtN(x.repartidores)}</td><td class="r num">${fmtN(x.abierto)}</td><td class="r num"><b style="color:${x.faltan ? 'var(--bad)' : 'var(--ok)'}">${x.faltan ? fmtN(x.faltan) : '✓'}</b></td>` : '<td class="r muted" colspan="4"><small>sin control por S/N</small></td>'}
+        <td class="r"><button class="btn sm" data-boin="${x.product_id}" data-bos="${x.serialized ? 1 : 0}">${icon('plus')} Agregar inventario</button></td></tr>`).join('')}</tbody></table></div>`).join('')}</div>` : ''}
   <div class="card" style="margin-top:14px"><div class="row between"><h2>${icon('building')} Almacenes</h2><div class="row"><button class="btn sm" id="whStock">${icon('inv')} Existencias por almacén</button><button class="btn sm" id="whXfer2">${icon('truck')} Traspaso</button>${store.user.role === 'admin' ? `<button class="btn sm primary" id="whNew">${icon('plus')} Almacén</button>` : ''}</div></div>
     <div class="grid g3" style="margin-top:8px">${whs.map((w) => `<button class="card kpi-btn" data-wh="${w.id}" style="text-align:left;padding:12px;${w.active ? '' : 'opacity:.55'}"><b>${esc(w.name)}</b>${w.is_default ? ' <span class="chip ok">Principal</span>' : ''}${w.active ? '' : ' <span class="chip off">Inactivo</span>'}
       <br><small class="muted">${esc(w.address || (w.lat ? 'Ubicado en el mapa' : 'Sin ubicación'))}</small><div style="font-size:22px;font-weight:700;margin-top:4px">${fmtN(w.units)} <small class="muted" style="font-size:12px">equipos con S/N</small></div></button>`).join('')}</div></div>
@@ -4337,14 +4338,9 @@ async function viewInventory(v) {
     <div class="card"><h2>Últimos movimientos</h2><div class="table-wrap" style="max-height:600px"><table><tbody>${movs.map((mv) => `<tr><td><b>${esc(mv.product_name)}</b><br><small class="muted">${esc(mv.type)} · ${esc(mv.reference || '')} · ${fmtDT(mv.created_at)}</small></td><td class="r num" style="color:${mv.qty < 0 ? 'var(--bad)' : 'var(--ok)'};font-weight:700">${mv.qty > 0 ? '+' : ''}${mv.qty}</td></tr>`).join('')}</tbody></table></div></div>
   </div>`;
   $('#iq').onsubmit = (e) => { e.preventDefault(); const f = new FormData(e.target); location.hash = `#/inventory?q=${encodeURIComponent(f.get('q'))}&low=${f.get('low') || ''}`; };
-  if ($('#boFill')) $('#boFill').onclick = async () => {
-    try { const x = await POST('/api/stock/fill', {}); toast(x.units ? `${x.units} pieza(s) surtidas a ${x.orders} pedido(s)${x.left ? ` · faltan ${x.left}` : ''}` : 'No hay existencia para surtir', x.units ? 'ok' : ''); render(); }
-    catch (e) { toast(e.message, 'bad'); }
-  };
-  // agregar inventario: equipos con S/N se reciben por número de serie; lo demás, entrada por escaneo o cantidad
+  // agregar inventario: equipos con S/N se reciben por número de serie (en el almacén de la oficina) o se traspasan; lo demás, entrada por escaneo
   $$('[data-boin]', v).forEach((b) => (b.onclick = () => {
-    const x = bo.products.find((p) => p.product_id === Number(b.dataset.boin));
-    if (x?.serialized) { toast('Recibe los S/N en Números de serie → Recibir: al entrar se surten solos los pedidos', 'ok'); location.hash = '#/serials'; }
+    if (b.dataset.bos === '1') { toast('Recibe los S/N en el almacén de la oficina (Números de serie → Recibir) o pásalos con Traspaso entre almacenes', 'ok'); location.hash = '#/serials'; }
     else $('#scanIn').click();
   }));
   $('#newP').onclick = () => productForm(null);
