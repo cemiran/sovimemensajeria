@@ -2247,7 +2247,7 @@ app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
   const openW = `o.status IN ('pendiente','asignado','cargado','fallido')${W}`;
   const alerts = {
     overdue: port.overdue || 0,
-    geo_check: db.prepare(`SELECT COUNT(DISTINCT c.id) n ${J} WHERE ${openW} AND (c.lat IS NULL OR c.geo_quality IN ('calle','colonia','ciudad'))`).get(...ca).n,
+    geo_check: db.prepare(`SELECT COUNT(DISTINCT c.id) n ${J} WHERE ${openW} AND (c.lat IS NULL OR c.geo_quality IN ('calle','colonia','cp','ciudad'))`).get(...ca).n,
     no_route_today: db.prepare(`SELECT COUNT(*) n ${J} WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?${W}`).get(today(), ...ca).n,
     sms_failed: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND status='error' AND error NOT LIKE 'Vencido%' AND created_at >= datetime('now','-1 day')").get().n,
   };
@@ -2598,7 +2598,7 @@ async function cityCenter(city) {
 // Colonia / fraccionamiento: "TERRAZAS DEL VALLE 2A SECCION" y "Terrazas del Valle" son la misma
 const colKey = (x) => normCity(String(x || '').replace(/\(.*?\)/g, '').replace(/\b(\d+\s*[aªo]?|primera|segunda|tercera|1ra|2da|3ra)\s*secci[oó]n\b.*$/i, '').replace(/\bsecci[oó]n\b.*$/i, '').replace(/^(col(onia)?|fracc?(ionamiento)?|fracc)\.?\s+/i, ''));
 const GOOD_GEO = ['exacta', 'manual', 'gps_entrega', 'repartidor', 'archivo'];
-const APPROX_GEO = ['calle', 'colonia', 'ciudad'];
+const APPROX_GEO = ['calle', 'colonia', 'cp', 'ciudad'];
 // Centro de una colonia según nuestros propios clientes bien ubicados en ella (mediana, sin los que queden a >3 km)
 function colonyCenter(colonia, city, excludeId = 0) {
   const k = colKey(colonia);
@@ -2707,7 +2707,7 @@ async function geocodeAddress({ address, colonia, city, zip, id = 0 }) {
   if (street1 && anchor) return street1;
   if (anchor && zipOk(anchor)) return { lat: anchor.lat, lng: anchor.lng, quality: 'colonia' };
   if (street1 && zarea) return street1;
-  if (zarea) return { lat: zarea.lat, lng: zarea.lng, quality: 'colonia' }; // centro del código postal, por revisar
+  if (zarea) return { lat: zarea.lat, lng: zarea.lng, quality: 'cp' }; // centro del código postal: aproximada, por revisar
   if (anchor) return { lat: anchor.lat, lng: anchor.lng, quality: 'colonia' };
   return street1; // sin colonia ni CP para validar: la calle (queda por revisar)
 }
@@ -2721,7 +2721,7 @@ async function geoAudit() {
     for (;;) {
       if (getSettings().geo_audit !== '1') break;
       const last = Number(getSettings().geo_audit_last || 0);
-      const c = db.prepare("SELECT * FROM customers WHERE id > ? AND lat IS NOT NULL AND geo_quality IN ('exacta','calle','colonia','ciudad') ORDER BY id LIMIT 1").get(last);
+      const c = db.prepare("SELECT * FROM customers WHERE id > ? AND lat IS NOT NULL AND geo_quality IN ('exacta','calle','colonia','cp','ciudad') ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_audit', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
       const cityName = osmCity(c.city), st = stateOf(c.city);
@@ -2734,7 +2734,7 @@ async function geoAudit() {
       if (anchor && (c.geo_quality === 'ciudad' || haversine(c, anchor) > lim)) {
         const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city, zip: c.zip, id: c.id });
         if (hit) {
-          db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('exacta','calle','colonia','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
+          db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('exacta','calle','colonia','cp','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
           db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `${c.name}: estaba a ${haversine(c, anchor).toFixed(1)} km de su colonia (${colA}); reubicado (${hit.quality})`);
           gaudit.fixed++;
         }
@@ -2803,18 +2803,18 @@ async function refineApprox() {
     for (;;) {
       if (getSettings().geo_refine !== '1') break;
       const last = Number(getSettings().geo_refine_last || 0);
-      const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
+      const c = db.prepare("SELECT * FROM customers WHERE geo_quality IN ('colonia','calle','cp','ciudad') AND id > ? ORDER BY id LIMIT 1").get(last);
       if (!c) { setK('geo_refine', '0'); break; }
       const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
       const hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id });
       // solo si mejora: exacta siempre; "calle" solo si antes era "colonia"
-      const rank = { exacta: 3, calle: 2, colonia: 1, ciudad: 0 };
-      if (c.geo_quality === 'ciudad' && (!hit || hit.quality === 'colonia')) {
+      const rank = { exacta: 4, calle: 3, colonia: 2, cp: 1, ciudad: 0 };
+      if (['ciudad', 'cp'].includes(c.geo_quality) && (!hit || ['colonia', 'cp'].includes(hit.quality))) {
         const cc = colonyCenter(colA, c.city, c.id);
-        if (cc) { db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='colonia' WHERE id=? AND geo_quality='ciudad'").run(cc.lat, cc.lng, c.id); refine.improved++; refine.done++; setK('geo_refine_last', c.id); continue; }
+        if (cc) { db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='colonia' WHERE id=? AND geo_quality IN ('ciudad','cp')").run(cc.lat, cc.lng, c.id); refine.improved++; refine.done++; setK('geo_refine_last', c.id); continue; }
       }
       if (hit && rank[hit.quality] > rank[c.geo_quality]) {
-        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('colonia','calle','cp','ciudad')").run(hit.lat, hit.lng, hit.quality, c.id);
         refine.improved++;
       }
       refine.done++;
@@ -4777,7 +4777,7 @@ app.get(
     const staffN = n("SELECT COUNT(*) n FROM users WHERE active=1 AND role<>'admin'");
     const drivers = n("SELECT COUNT(*) n FROM users WHERE active=1 AND (role='repartidor' OR can_deliver=1)");
     const noLoc = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND geo_quality='no_encontrada'");
-    const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia','ciudad')");
+    const approx = n("SELECT COUNT(*) n FROM customers WHERE geo_quality IN ('calle','colonia','cp','ciudad')");
     const pendingGeo = n("SELECT COUNT(*) n FROM customers WHERE lat IS NULL AND (geo_quality IS NULL OR geo_quality='')");
     const serialZero = db.prepare("SELECT name, stock FROM products WHERE serialized=1 AND stock<=0").all();
     const vehicles = n('SELECT COUNT(*) n FROM vehicles WHERE active=1');

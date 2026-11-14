@@ -190,12 +190,13 @@ function makeMap(el, center, zoom = 12) {
 }
 const pinIcon = (label, color, chk = false) => L.divIcon({ className: '', html: `<div class="pin${chk ? ' chk' : ''}" style="background:${color}"><span>${esc(label)}</span></div>${chk ? '<b class="pin-q" title="Ubicación por revisar">!</b>' : ''}`, iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -26] });
 // ubicación aproximada (calle, colonia o centro de la ciudad): se marca para que el repartidor la revise o la oficina la corrija
-const geoChk = (q) => ['calle', 'colonia', 'ciudad'].includes(q);
+const geoChk = (q) => ['calle', 'colonia', 'cp', 'ciudad'].includes(q);
+const GEO_TXT = { ciudad: 'centro de la ciudad', calle: 'por calle', colonia: 'en su colonia', cp: 'por código postal' };
 // teléfonos del cliente para el repartidor: móvil, adicional y la línea Telnor (todos se pueden marcar)
 const fmtTel = (p) => { const d = String(p || '').replace(/\D/g, '').slice(-10); return d.length === 10 ? `${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}` : String(p || ''); };
 const phonesLine = (o) => [o.customer_phone && ['Móvil', o.customer_phone], o.customer_phone_alt && ['Adicional', o.customer_phone_alt], o.telnor_phone && ['Telnor', o.telnor_phone]]
   .filter(Boolean).map(([l, p]) => `<a href="tel:${esc(String(p).replace(/[^\d+]/g, ''))}" class="tel-l${l === 'Telnor' ? ' telnor' : ''}" onclick="event.stopPropagation()">${icon('phone')} ${l}: <b class="mono">${esc(fmtTel(p))}</b></a>`).join('');
-const geoWarn = (q) => (geoChk(q) ? `<span class="chip warn" title="El pin está en su ${q === 'ciudad' ? 'ciudad' : q}; el repartidor la confirma al llegar o la oficina mueve el pin">⚠ Ubicación por revisar · ${q === 'ciudad' ? 'centro de la ciudad' : q === 'calle' ? 'por calle' : 'en su colonia'}</span>` : '');
+const geoWarn = (q) => (geoChk(q) ? `<span class="chip warn" title="Ubicación aproximada (${GEO_TXT[q]}): el repartidor la confirma al llegar o la oficina mueve el pin">⚠ Ubicación aproximada · ${GEO_TXT[q]}</span>` : '');
 const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin">🏭</div>', iconSize: [30, 30], iconAnchor: [15, 15] });
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
@@ -1507,7 +1508,7 @@ function customerForm(c, done) {
     try {
       const r = await GET('/api/geocode?' + geoQ());
       if (r.quality === 'exacta') { setPt(r.lat, r.lng, true, 'exacta'); toast('Ubicado. Revisa el pin y arrástralo si hace falta', 'ok'); }
-      else if (r.quality === 'calle' || r.quality === 'colonia') { setPt(r.lat, r.lng, true, r.quality); toast(`Ubicación aproximada (${r.quality}): arrastra el pin al domicilio exacto`, ''); }
+      else if (['calle', 'colonia', 'cp'].includes(r.quality)) { setPt(r.lat, r.lng, true, r.quality); toast(`Ubicación aproximada (${GEO_TXT[r.quality]}): arrastra el pin al domicilio exacto`, ''); }
       else if (r.quality === 'ciudad') { map.setView([r.lat, r.lng], 14); toast('No se encontró el número: toca el mapa en el domicilio correcto', 'bad'); }
       else toast('No se encontró: toca el mapa en el domicilio correcto', 'bad');
     } catch (er) { toast(er.message || 'No se pudo buscar; marca en el mapa', 'bad'); }
@@ -1635,7 +1636,7 @@ async function viewCustomers(v) {
   <div class="grid g-main">
     <div class="card"><form class="row" id="cq" style="margin-bottom:10px"><input name="q" value="${esc(q)}" placeholder="Número de serie o número de pedido (o nombre, teléfono)" class="grow" />${store.user.role === 'admin' && offList.length > 1 ? `<select name="office_id" style="max-width:190px"><option value="">Todas las oficinas</option>${offList.map((w) => `<option value="${w.id}" ${String(w.id) === offF ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>` : ''}<button class="btn">Buscar</button><small class="muted">${r.total} clientes</small></form>
       <div class="table-wrap"><table><thead><tr>${staffC ? '<th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar los que tienen pedidos abiertos" /></th>' : ''}<th>Nombre</th><th>Teléfonos</th><th>Dirección</th><th>Ventana</th><th class="r">Pedidos</th></tr></thead><tbody>
-      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : ['calle', 'colonia', 'ciudad'].includes(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
+      ${r.rows.map((c) => `<tr class="click" data-id="${c.id}">${staffC ? `<td><input type="checkbox" data-sel="${c.id}" ${c.active_orders ? '' : 'disabled title="Sin pedidos activos"'} /></td>` : ''}<td><b>${esc(c.name)}</b>${c.match_txt ? `<br><small class="mono" style="color:var(--ok)">${esc(c.match_txt)}</small>` : ''}${c.driver_name ? `<br><small class="muted">${icon('truck')} ${esc(c.driver_name)}</small>` : ''}${c.lat == null ? ` <span class="badge b-fallido">${c.geo_quality === 'no_encontrada' ? 'sin ubicación' : c.geo_quality ? 'sin GPS' : 'ubicando…'}</span>` : geoChk(c.geo_quality) ? ` <span class="chip warn" title="Ubicación aproximada: revísala">${GEO_Q[c.geo_quality][0]}</span>` : ''}</td><td>${c.phone ? `${icon('phone')} ${esc(c.phone)}` : ''}${c.phone_alt ? `<br><small class="muted">Adicional: ${esc(c.phone_alt)}</small>` : ''}${c.external_id ? `<br><small class="muted">Telnor: ${esc(c.external_id)}</small>` : ''}</td><td><small>${esc(c.address)} ${esc(c.zip || '')}</small></td><td class="num">${c.window_start ? `${c.window_start}–${c.window_end}` : '—'}</td><td class="r num">${c.orders_count}${c.last_status ? `<br>${badge(c.last_status)}` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>
     <div class="card"><h2>Mapa de clientes</h2><div id="cmapall" class="map tall"></div></div>
   </div>`;
@@ -1650,8 +1651,8 @@ async function viewCustomers(v) {
   $$('tr[data-id]', v).forEach((tr) => (tr.onclick = async () => customerForm(await GET('/api/customers/' + tr.dataset.id), () => render())));
   const map = makeMap($('#cmapall'));
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map);
-  const pts = r.rows.filter((c) => c.lat != null).map((c) => { const lyr = L.circleMarker([c.lat, c.lng], { radius: 6, color: ['calle', 'colonia', 'ciudad'].includes(c.geo_quality) ? '#e5612a' : '#1d5a96', fillOpacity: 0.6 }).addTo(map);
-    editableCustomerPin(map, lyr, { id: c.id, name: c.name, address: c.address, extra: ['calle', 'colonia', 'ciudad'].includes(c.geo_quality) ? `<br><small style="color:#e5612a">Ubicación aproximada (${c.geo_quality})</small>` : '' }); return [c.lat, c.lng]; });
+  const pts = r.rows.filter((c) => c.lat != null).map((c) => { const lyr = L.circleMarker([c.lat, c.lng], { radius: 6, color: geoChk(c.geo_quality) ? '#e5612a' : '#1d5a96', fillOpacity: 0.6 }).addTo(map);
+    editableCustomerPin(map, lyr, { id: c.id, name: c.name, address: c.address, extra: geoChk(c.geo_quality) ? `<br><small style="color:#e5612a">Ubicación aproximada (${c.geo_quality})</small>` : '' }); return [c.lat, c.lng]; });
   if (pts.length) map.fitBounds(pts, { padding: [20, 20] });
 }
 
@@ -1793,6 +1794,7 @@ async function routeDetail(id) {
   const m = modal(r.name, `
     <div class="grid g2">
       <div><div class="row" style="gap:6px;margin-bottom:6px;flex-wrap:wrap" id="selTools"><button type="button" class="btn sm" id="selPin" title="Toca los pines para marcarlos o desmarcarlos">👆 Seleccionar pines</button><button type="button" class="btn sm" id="selDraw" title="Dibuja con el dedo o el mouse alrededor de los pines">✏️ Dibujar zona</button><button type="button" class="btn sm ghost" id="selClr">Limpiar</button><small class="muted" id="selHint"></small></div>
+        ${(() => { const n = r.stops.filter((x) => x.lat != null && geoChk(x.geo_quality) && ['asignado', 'cargado', 'fallido', 'pendiente'].includes(x.status)).length; return n ? `<div class="offline-bar" style="margin-bottom:6px">⚠ ${n} parada(s) con <b>ubicación aproximada</b> (pin con <b>!</b>: por código postal, colonia o calle). El repartidor la confirma al llegar.</div>` : ''; })()}
         <div id="rdmap" class="map"></div>
         <div class="grid g3" style="margin-top:10px">
           <div class="kpi"><div class="label">Distancia</div><div class="value" style="font-size:1.3rem">${fmtN(r.distance_km, 1)} km</div><div class="sub">sin optimizar ${fmtN(r.original_distance_km, 1)}</div></div>
@@ -3917,7 +3919,7 @@ function importCustomers(opts) {
   m.el.addEventListener('click', (e) => { if (m.el.dataset.done && (e.target === m.el || e.target.closest('[data-close]'))) setTimeout(render, 50); });
   step1();
 }
-const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle', 'warn'], colonia: ['Aprox. por colonia', 'warn'], repartidor: ['Confirmada por el repartidor', 'ok'], ciudad: ['Aprox. centro de la ciudad (corrígela)', 'warn'], gps_entrega: ['GPS de la entrega', 'ok'], no_encontrada: ['No encontrada', 'off'], archivo: ['Del archivo', 'ok'], manual: ['Manual', 'ok'], pendiente: ['Buscando…', ''] };
+const GEO_Q = { exacta: ['Ubicación exacta', 'ok'], calle: ['Aprox. por calle', 'warn'], colonia: ['Aprox. por colonia', 'warn'], cp: ['Aprox. por código postal', 'warn'], repartidor: ['Confirmada por el repartidor', 'ok'], ciudad: ['Aprox. centro de la ciudad (corrígela)', 'warn'], gps_entrega: ['GPS de la entrega', 'ok'], no_encontrada: ['No encontrada', 'off'], archivo: ['Del archivo', 'ok'], manual: ['Manual', 'ok'], pendiente: ['Buscando…', ''] };
 
 // ================= Importación masiva de inventario =================
 const IMP_FIELDS = [
