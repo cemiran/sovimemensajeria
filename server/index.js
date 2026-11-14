@@ -28,7 +28,7 @@ app.disable('x-powered-by');
 // Detrás de un proxy (Traefik / Nginx con https) para que la IP real y el https se detecten bien
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? true : Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
 app.use(compression());
-app.use(express.json({ limit: '12mb' }));
+app.use(express.json({ limit: '40mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   // solo el dominio (nunca la ruta con tokens) a sitios externos: OpenStreetMap lo exige para servir el mapa
@@ -57,8 +57,14 @@ function paging(req, max = 500) {
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   return { limit, offset };
 }
+// guía única: en importaciones grandes se crean miles por milisegundo, así que se verifica que no exista
+let trackStmt = null;
 function genTracking() {
-  return 'UM' + Date.now().toString(36).toUpperCase().slice(-6) + crypto.randomBytes(2).toString('hex').toUpperCase();
+  trackStmt ||= db.prepare('SELECT 1 FROM orders WHERE tracking_code=?');
+  for (;;) {
+    const c = 'UM' + Date.now().toString(36).toUpperCase().slice(-6) + crypto.randomBytes(2).toString('hex').toUpperCase();
+    if (!trackStmt.get(c)) return c;
+  }
 }
 function saveDataUrl(dataUrl, prefix) {
   if (!dataUrl) return null;
@@ -2265,7 +2271,7 @@ app.put(
 // ---------- Importación masiva de clientes (Excel/CSV) con pedido de entrega opcional ----------
 // El navegador (o un script en el servidor) manda filas normalizadas. Con dry_run calcula todo sin guardar.
 // Por defecto NO avisa a los clientes al crear los pedidos (evita una ráfaga de WhatsApp/correos).
-const CUST_IMPORT_MAX = 3000;
+const CUST_IMPORT_MAX = 20000;
 // Los errores de fórmula de Excel (#N/A, #REF!…) cuentan como celda vacía
 const XL_ERR = /^#?(N\/A|NA|REF!|VALUE!|DIV\/0!|NAME\?|NULL!|NUM!|SPILL!|CALC!)$/i;
 const cleanTxt = (v, max = 200) => {
@@ -2319,6 +2325,8 @@ app.post(
     const impOffice = req.user.office || (req.body.office_id && db.prepare('SELECT id FROM warehouses WHERE id=? AND active=1').get(Number(req.body.office_id)) ? Number(req.body.office_id) : null);
     const skipDupOrders = o.skip_if_open !== false;
     const dry = !!req.body.dry_run;
+    const stc = new Map();
+    const P = (sql) => { let st = stc.get(sql); if (!st) stc.set(sql, (st = db.prepare(sql))); return st; };
     const results = [];
     const seen = new Map();
     const created = [];
@@ -2338,14 +2346,14 @@ app.post(
           db.exec('SAVEPOINT cli');
           try {
             // Con identificador (p. ej. la línea telefónica) cada identificador es un cliente distinto, aunque compartan nombre y celular
-            let ex = c.external_id ? db.prepare('SELECT * FROM customers WHERE external_id=?').get(c.external_id) : null;
-            if (!ex && !c.external_id && c.phone) ex = db.prepare('SELECT * FROM customers WHERE phone=? AND lower(name)=lower(?) AND address=?').get(c.phone, c.name, c.address);
+            let ex = c.external_id ? P('SELECT * FROM customers WHERE external_id=?').get(c.external_id) : null;
+            if (!ex && !c.external_id && c.phone) ex = P('SELECT * FROM customers WHERE phone=? AND lower(name)=lower(?) AND address=?').get(c.phone, c.name, c.address);
             let cid;
             if (ex) {
               cid = ex.id;
               if (updateExisting) {
                 const sameAddr = (ex.address || '') === c.address;
-                db.prepare(`UPDATE customers SET external_id=COALESCE(?, external_id), name=?, phone=COALESCE(?, phone), phone_alt=COALESCE(?, phone_alt), email=COALESCE(?, email),
+                P(`UPDATE customers SET external_id=COALESCE(?, external_id), name=?, phone=COALESCE(?, phone), phone_alt=COALESCE(?, phone_alt), email=COALESCE(?, email),
                   address=?, colonia=COALESCE(?, colonia), city=COALESCE(?, city), zip=COALESCE(?, zip), reference=COALESCE(?, reference), notes=COALESCE(?, notes),
                   lat=?, lng=?, geo_quality=? WHERE id=?`).run(
                   c.external_id, c.name, c.phone, c.phone_alt, c.email, c.address, c.colonia, c.city, c.zip, c.reference, c.notes,
@@ -2355,24 +2363,24 @@ app.post(
                 out.action = 'actualizado';
               } else out.action = 'existente';
             } else {
-              cid = Number(db.prepare(`INSERT INTO customers (external_id, name, phone, phone_alt, email, address, colonia, city, zip, reference, notes, lat, lng, geo_quality)
+              cid = Number(P(`INSERT INTO customers (external_id, name, phone, phone_alt, email, address, colonia, city, zip, reference, notes, lat, lng, geo_quality)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(c.external_id, c.name, c.phone, c.phone_alt, c.email, c.address, c.colonia, c.city, c.zip, c.reference, c.notes,
                 c.lat, c.lng, c.lat != null ? 'archivo' : null).lastInsertRowid);
               out.action = 'nuevo';
             }
-            if (impOffice) db.prepare('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
-            else if (out.action === 'nuevo') db.prepare('UPDATE customers SET office_id=? WHERE id=?').run(officeForCity(c.city), cid);
+            if (impOffice) P('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
+            else if (out.action === 'nuevo') P('UPDATE customers SET office_id=? WHERE id=?').run(officeForCity(c.city), cid);
             out.customer_id = cid;
             if (makeOrders) {
-              const open = db.prepare("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);
+              const open = P("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);
               if (open && skipDupOrders) out.order = `ya tiene ${open.tracking_code}`;
               else {
                 const code = genTracking();
-                const oid = Number(db.prepare(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
+                const oid = Number(P(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
                   VALUES (?,?,?,?,?,?,?,?)`).run(code, cid, date, 'normal', cleanTxt(o.notes, 300) || null, req.user.id, crypto.randomBytes(12).toString('hex'), stype).lastInsertRowid);
-                if (accountId) db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(accountId, oid);
+                if (accountId) P('UPDATE orders SET account_id=? WHERE id=?').run(accountId, oid);
                 if (product) {
-                  db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
+                  P('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, product.id, qty);
                   moveStock(product.id, 'salida', qty, `Pedido ${code}`, req.user.id);
                   stockNeeded += qty;
                 }
@@ -2407,7 +2415,8 @@ app.post(
       audit(req, 'clientes.importar', `${summary.nuevos} nuevos, ${summary.actualizados} actualizados, ${summary.pedidos} pedidos${notifyNow ? ' (con aviso)' : ' (sin aviso)'}`);
       setImmediate(geocodePending);
     }
-    res.json({ dry_run: dry, summary, results });
+    const detail = [...results.filter((x) => x.action === 'error'), ...results.filter((x) => x.action !== 'error')].slice(0, 1000);
+    res.json({ dry_run: dry, summary, results: detail, detail_truncated: results.length > detail.length });
   })
 );
 

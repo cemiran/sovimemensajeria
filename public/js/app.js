@@ -3873,6 +3873,7 @@ function importCustomers(opts) {
         <div class="kpi card"><div class="label">Errores</div><div class="value" style="color:${s.errores ? 'var(--bad)' : 'inherit'}">${s.errores}</div></div></div>
       ${orders.create && orders.product_id ? `<small class="muted">Existencia del producto después de importar: <b>${s.stock_disponible}</b> (se usan ${s.stock_necesario}).</small>` : ''}
       ${orders.create && !orders.notify ? '<small class="muted">🔕 No se avisará a los clientes al crear los pedidos.</small>' : ''}
+      ${s.total > 300 ? `<small class="muted">Detalle: ${s.errores ? 'primero los errores, luego ' : ''}las primeras ${Math.min(300, r.results.length)} filas de ${s.total}.</small>` : ''}
       <div class="table-wrap" style="max-height:320px"><table><thead><tr><th>Fila</th><th>Cliente</th><th>Domicilio</th><th>Resultado</th><th>Pedido</th></tr></thead><tbody>
         ${r.results.slice(0, 300).map((x) => `<tr><td class="num">${x.line}</td><td><b>${esc(x.name || '')}</b><br><small class="muted">${esc(x.phone || '')}</small></td><td><small>${esc(x.address || '')}</small></td>
           <td><span class="chip ${ACT[x.action][1]}">${ACT[x.action][0]}</span>${x.error ? `<br><small style="color:var(--bad)">${esc(x.error)}</small>` : ''}</td><td><small class="mono">${esc(x.order || '')}</small></td></tr>`).join('')}
