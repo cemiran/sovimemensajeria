@@ -5318,7 +5318,8 @@ async function viewSettings(v) {
           <label class="f">Dirección de la API (URL)<input name="psc_url" value="${esc(it.psc_url || '')}" placeholder="https://…" /></label></div>
           <label class="f">Clave de la API<input name="psc_api_key" type="password" value="" placeholder="${it.psc_api_key ? esc(it.psc_api_key) + ' (guardada)' : 'Pega aquí la clave del PSC'}" autocomplete="off" /></label>
           <small class="muted">La app envía <span class="mono">{ hash, algorithm: "SHA-256", name, reference }</span> con la clave como <span class="mono">Authorization: Bearer</span> y guarda la respuesta (<span class="mono">folio</span> y <span class="mono">constancia</span>). Si tu PSC usa otro formato, compárteme su documentación y lo adapto.</small></fieldset>
-        <div class="row"><button class="btn primary">Guardar</button></div></form></div>`;
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn primary">Guardar</button><button type="button" class="btn" id="psTest">${icon('send')} Enviarme un contrato de prueba</button></div></form></div>`;
+    $('#psTest', box).onclick = async (e) => { e.currentTarget.disabled = true; try { const r = await POST('/api/contracts/test', {}); toast(r.sent ? `Contrato de prueba ${r.folio} enviado a ${r.to}` : `Contrato de prueba listo (el correo no está configurado): ${r.link}`, 'ok'); } catch (er) { toast(er.message, 'bad'); } e.currentTarget.disabled = false; };
     $('#psF', box).onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;

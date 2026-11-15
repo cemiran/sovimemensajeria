@@ -1356,6 +1356,31 @@ app.post('/api/users/:id/contract', auth('admin'), wrap(async (req, res) => {
   audit(req, 'contrato.enviar', `${u.name}: ${folio}${sent.length ? ' por ' + sent.join(' y ') : ' (comparte el enlace)'}`);
   res.status(201).json({ folio, link, sent });
 }));
+// contrato de prueba para el administrador (datos de ejemplo, folio PRUEBA): sirve para revisar el envío, la sesión de firma y el PDF
+async function sendTestContract(userId, byUserId) {
+  const u = db.prepare('SELECT id, name, email, phone FROM users WHERE id=?').get(userId);
+  if (!u?.email) throw new HttpError(400, 'Tu usuario no tiene correo');
+  const s = getSettings();
+  const vars = { prestador_tipo_persona: 'Física', prestador_nombre_o_razon_social: `PRUEBA — ${u.name}`, prestador_regimen_fiscal: 'Régimen Simplificado de Confianza (RESICO)',
+    prestador_rfc: 'XAXX010101000', prestador_curp: 'XEXX010101HNEXXXA4', prestador_tipo_identificacion: 'Credencial para Votar (INE)', prestador_numero_identificacion: '0000000000000',
+    prestador_domicilio_completo: 'Domicilio de prueba, C.P. 22000, Tijuana, B.C.', prestador_telefono: u.phone || '—', prestador_email: u.email,
+    prestador_clabe: '000000000000000000', prestador_banco: 'Banco de prueba', prestador_titular_cuenta: 'PRUEBA', vehiculo_tipo: 'Motocicleta', vehiculo_marca_modelo: 'Vehículo de prueba',
+    vehiculo_placas: 'PRUEBA', vehiculo_licencia_numero: 'PRUEBA', vehiculo_licencia_vigencia: '2030-12-31', seguro_aseguradora: 'Aseguradora de prueba', seguro_poliza_numero: 'PRUEBA' };
+  const html = contract.fill(s.contract_template || null, vars);
+  const folio = `PRUEBA-${today().replace(/-/g, '')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+  const token = crypto.randomBytes(24).toString('base64url');
+  db.prepare('INSERT INTO contracts (user_id, folio, token, vars_json, html, text_sha256, issued_by, company_sha256, is_test) VALUES (?,?,?,?,?,?,?,?,1)')
+    .run(u.id, folio, token, JSON.stringify(vars), html, sha256(html), byUserId, sha256(folio + html), );
+  const link = `${notify.baseUrl(s)}/firma/${token}`;
+  const r = await notify.sendEmail(s, u.email, `Prueba: contrato para firma electrónica (${folio})`,
+    `Este es un contrato de PRUEBA con datos de ejemplo para revisar la firma electrónica.\n\nÁbrelo desde tu celular: ${link}\n\nPasos: leer y aceptar, permitir la ubicación, tomar selfie y fotos de INE, subir CSF y póliza (pueden ser fotos cualesquiera para la prueba), firmar con el dedo y escribir el código que llegará por SMS y correo.\n\nAl firmarlo se genera el PDF con su certificado; no se guarda en ningún expediente.`);
+  return { folio, link, sent: !r?.simulated, to: u.email };
+}
+app.post('/api/contracts/test', auth('admin'), wrap(async (req, res) => {
+  const r = await sendTestContract(req.user.id, req.user.id);
+  audit(req, 'contrato.prueba', `${r.folio} enviado a ${r.to}`);
+  res.status(201).json(r);
+}));
 app.post('/api/contracts/:id/cancel', auth('admin'), wrap((req, res) => {
   const c = db.prepare('SELECT c.*, u.name FROM contracts c JOIN users u ON u.id=c.user_id WHERE c.id=?').get(Number(req.params.id));
   if (!c) throw new HttpError(404, 'No encontrado');
@@ -1468,14 +1493,17 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
   tx(() => {
     db.prepare("UPDATE contracts SET status='firmado', otp_verified_at=datetime('now'), kyc_json=?, meta_json=?, signed_at=datetime('now'), pdf_file=?, pdf_sha256=?, html=? WHERE id=?")
       .run(JSON.stringify(files), JSON.stringify(meta), pdfName, pdfHash, html, c.id);
-    // el expediente queda con el contrato firmado y los documentos de la sesión por revisar
+    // el expediente queda con el contrato firmado y los documentos de la sesión por revisar (un contrato de prueba no lo toca)
+    if (!c.is_test) {
     const docs = docsOf(c.user_id);
     const put = (k, file, ok) => { docs[k] = { ...(docs[k] || {}), file, ok, status: ok ? 'aprobado' : 'pendiente', uploaded_at: now.toISOString() }; };
     put('contrato', pdfName, true); put('ine', files.ine_front, false); put('csf', files.csf, false); put('seguro', files.poliza, false);
     saveDocs(c.user_id, docs);
+    }
     db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (?, ?, ?)').run(c.user_id, 'contrato.firmar', `${c.folio} firmado · IP ${meta.ip} · GPS ${lat.toFixed(5)},${lng.toFixed(5)} · OTP por ${c.otp_channel}`);
   });
-  await requestNom151(c.id);
+  if (!c.is_test) await requestNom151(c.id);
+  else db.prepare("UPDATE contracts SET nom151_status='prueba', nom151_error='Contrato de prueba: no se solicita constancia NOM-151' WHERE id=?").run(c.id);
   const done = db.prepare('SELECT status, nom151_status, nom151_error FROM contracts WHERE id=?').get(c.id);
   res.json({ ok: true, folio: c.folio, status: done.status, pdf_sha256: pdfHash, nom151: done.nom151_status, nom151_error: done.nom151_error });
 }));
@@ -5624,5 +5652,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract };
 module.exports = app;
