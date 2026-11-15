@@ -5420,13 +5420,40 @@ async function viewSettings(v) {
           <label class="f">Dirección de la API (URL)<input name="psc_url" value="${esc(it.psc_url || '')}" placeholder="https://…" /></label></div>
           <label class="f">Clave de la API<input name="psc_api_key" type="password" value="" placeholder="${it.psc_api_key ? esc(it.psc_api_key) + ' (guardada)' : 'Pega aquí la clave del PSC'}" autocomplete="off" /></label>
           <small class="muted">La app envía <span class="mono">{ hash, algorithm: "SHA-256", name, reference }</span> con la clave como <span class="mono">Authorization: Bearer</span> y guarda la respuesta (<span class="mono">folio</span> y <span class="mono">constancia</span>). Si tu PSC usa otro formato, compárteme su documentación y lo adapto.</small></fieldset>
+        <label class="f">Correo para derechos ARCO (aviso de privacidad)<input name="privacy_email" type="email" value="${esc(s.privacy_email || '')}" placeholder="privacidad@…" /></label>
         <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn primary">Guardar</button><button type="button" class="btn" id="psTest">${icon('send')} Enviarme un contrato de prueba</button></div></form></div>`;
+    // documentos legales (Anexo A, Aviso de privacidad, Términos): borradores, versiones y publicación
+    const LG_ST = { borrador: ['Borrador', 'warn'], vigente: ['Vigente', 'ok'], reemplazado: ['Reemplazado', 'off'] };
+    const lg = await GET('/api/legal').catch(() => []);
+    box.insertAdjacentHTML('beforeend', `<div class="card stack" style="max-width:760px;margin-top:14px"><h2 style="margin:0">${icon('sheet')} Documentos legales del prestador</h2>
+      <p class="muted" style="margin:0">Anexo A (tarifario, con las tarifas de cada persona), Aviso de Privacidad Integral y Términos y Condiciones. Son <b>borradores para revisión de tu abogado</b>: no se muestran a nadie hasta que publiques una versión. Al publicarla, cada prestador la acepta al entrar a la app (con IP, ubicación, dispositivo y huella del texto) y en la firma de su contrato queda incluida en el PDF.</p>
+      <div class="table-wrap"><table><tbody>${lg.map((d) => `<tr><td><b>${esc(d.title)}</b> <small class="muted">v${d.version}</small><br><small class="muted">${d.published_at ? 'Publicado ' + fmtDT(d.published_at) + ' · ' : ''}${d.accepted} aceptaciones</small></td><td><span class="chip ${LG_ST[d.status][1]}">${LG_ST[d.status][0]}</span></td>
+        <td class="r"><div class="row" style="gap:4px;justify-content:flex-end"><button type="button" class="btn sm" data-lge="${d.id}">${d.status === 'borrador' ? icon('edit') + ' Editar' : 'Ver / nueva versión'}</button>${d.status === 'borrador' ? `<button type="button" class="btn sm primary" data-lgp="${d.id}">Publicar</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div></div>`);
+    $$('[data-lge]', box).forEach((b) => (b.onclick = () => {
+      const d = lg.find((x) => x.id === Number(b.dataset.lge));
+      const m = modal(`${d.title} · v${d.version}`, `<p class="muted" style="margin-top:0">${d.status === 'borrador' ? 'Edita el texto (HTML simple: h1, h2, p, ul/li, strong). Las {{variables}} se llenan con los datos de cada prestador.' : 'Esta versión ya está publicada: al guardar se crea una versión nueva en borrador.'}</p>
+        <div class="grid g2"><textarea id="lgTx" style="min-height:52vh;font:12px/1.4 ui-monospace,monospace">${esc(d.html)}</textarea><div id="lgPv" style="max-height:52vh;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:13px;text-align:justify"></div></div>`,
+        { wide: true, footer: '<button class="btn" data-close>Cerrar</button><button class="btn primary" id="lgSave">Guardar</button>' });
+      const pv = () => ($('#lgPv', m.el).innerHTML = $('#lgTx', m.el).value);
+      $('#lgTx', m.el).oninput = pv; pv();
+      $('#lgSave', m.el).onclick = async () => { try { const r2 = await PUT('/api/legal/' + d.id, { html: $('#lgTx', m.el).value }); toast(r2.version ? `Versión ${r2.version} creada en borrador` : 'Guardado', 'ok'); m.close(); render(); } catch (e) { toast(e.message, 'bad'); } };
+    }));
+    $$('[data-lgp]', box).forEach((b) => (b.onclick = async () => {
+      const d = lg.find((x) => x.id === Number(b.dataset.lgp));
+      if (!(await confirmDlg(`¿Publicar ${d.title} v${d.version}? Todos los prestadores tendrán que aceptarlo.`))) return;
+      try { await POST(`/api/legal/${d.id}/publish`, {}); toast('Publicado', 'ok'); render(); }
+      catch (e) {
+        if (!/BORRADOR/.test(e.message)) return toast(e.message, 'bad');
+        if (!(await confirmDlg(`${e.message}. ¿Publicarlo así de todos modos?`))) return;
+        try { await POST(`/api/legal/${d.id}/publish`, { confirm: true }); toast('Publicado', 'ok'); render(); } catch (e2) { toast(e2.message, 'bad'); }
+      }
+    }));
     $('#psTest', box).onclick = async (e) => { e.currentTarget.disabled = true; try { const r = await POST('/api/contracts/test', {}); toast(r.sent ? `Contrato de prueba ${r.folio} enviado a ${r.to}` : `Contrato de prueba listo (el correo no está configurado): ${r.link}`, 'ok'); } catch (er) { toast(er.message, 'bad'); } e.currentTarget.disabled = false; };
     $('#psF', box).onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
       try {
-        await PUT('/api/settings', { contract_company_signer: f.contract_company_signer.value.trim() });
+        await PUT('/api/settings', { contract_company_signer: f.contract_company_signer.value.trim(), privacy_email: f.privacy_email.value.trim() });
         const body = { psc_name: f.psc_name.value.trim(), psc_url: f.psc_url.value.trim() };
         if (f.psc_api_key.value.trim()) body.psc_api_key = f.psc_api_key.value.trim();
         await saveInt(body);
@@ -5992,7 +6019,8 @@ function checkBanner() {
   }).catch(() => {});
 }
 async function viewMyRoute(v) {
-  const r = await GET('/api/my/route');
+  const [r, rates] = await Promise.all([GET('/api/my/route'), GET('/api/my/rates').catch(() => null)]);
+  window.__rates = rates;
   const queued = outbox.list();
   const queuedIds = new Set(queued.map((q) => Number(q.url.split('/')[3])));
   startTracking();
@@ -6007,6 +6035,7 @@ async function viewMyRoute(v) {
   <span data-gps></span><div id="ckBanner"></div>
   ${!navigator.onLine ? '<div class="offline-bar">Sin conexión. Puedes seguir registrando entregas.</div>' : ''}
   ${queued.length ? `<div class="offline-bar">${queued.length} evidencias en cola de envío</div>` : ''}
+  ${rates?.entrega ? `<div class="info-bar" style="margin-bottom:12px">💲 Tu tarifa: <b>${money(rates.entrega)}</b> por entrega${rates.visita ? ` · <b>${money(rates.visita)}</b> por visita sin entrega` : ''}. Puedes no tomar cualquier servicio sin penalización.</div>` : ''}
   ${r.status === 'planificada' && open.length ? `<div class="card" style="margin-bottom:12px;border:2px solid var(--brand,#1d5a96)"><div class="row between"><div><b style="font-size:17px">Ruta lista: ${open.length} parada${open.length === 1 ? '' : 's'}</b><br><small class="muted">Al iniciar se avisa a tus clientes que vas en camino y a la primera parada que llegas pronto.</small></div>
       <button class="btn primary lg" id="startRoute">▶ Iniciar ruta</button></div></div>`
     : r.started_at ? `<div class="info-bar" style="margin-bottom:12px">${icon('route')} Ruta en curso desde las ${new Date(r.started_at.replace(' ', 'T') + 'Z').toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</div>` : ''}
@@ -6625,6 +6654,27 @@ function viewNewCustomer(v) {
 }
 
 // ================= Router =================
+// aviso de privacidad, términos o tarifario publicados que la persona aún no acepta: se muestran al entrar
+let legalAsked = 0;
+async function pendingLegal() {
+  if (Date.now() - legalAsked < 10 * 60000 || $('.modal-bg[data-legal]')) return;
+  legalAsked = Date.now();
+  const list = await GET('/api/my/legal').catch(() => []);
+  for (const d of list) {
+    await new Promise((done) => {
+      const m = modal(d.title, `<div class="doc-legal" style="max-height:55vh;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:13.5px;line-height:1.55;text-align:justify">${d.html}</div>
+        <label class="row" style="gap:8px;margin-top:10px"><input type="checkbox" id="lgOk" /> <span>Leí y acepto <b>${esc(d.title)}</b> (versión ${d.version}).</span></label>`,
+        { wide: true, footer: '<button class="btn primary" id="lgGo">Aceptar</button>', onClose: done });
+      m.el.dataset.legal = '1';
+      $('#lgGo', m.el).onclick = async () => {
+        if (!$('#lgOk', m.el).checked) return toast('Marca que lo leíste y lo aceptas', 'bad');
+        const pos = await getPosition().catch(() => null);
+        try { await POST(`/api/my/legal/${d.id}/accept`, { gps: pos ? { lat: pos.lat, lng: pos.lng } : null, device: navigator.userAgent.slice(0, 150) }); toast('Aceptado', 'ok'); m.close(); }
+        catch (e) { toast(e.message, 'bad'); }
+      };
+    });
+  }
+}
 async function render() {
   clearInterval(liveTimer);
   stopNav();
@@ -6638,6 +6688,7 @@ async function render() {
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, liq: viewMySettlement, 'new-customer': viewNewCustomer }
     : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settle: viewSettlements, settings: viewSettings };
+  if (store.user.role !== 'admin') pendingLegal();
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());

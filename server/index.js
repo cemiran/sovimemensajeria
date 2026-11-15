@@ -1458,7 +1458,7 @@ app.get('/api/firma/:token', wrap((req, res) => {
   const c = contractByToken(req.params.token);
   if (!c || c.status === 'anulado') throw new HttpError(404, 'Este enlace no es válido o el contrato fue reemplazado');
   const mask = (x, n) => (x ? String(x).slice(0, 2) + '•••' + String(x).slice(-n) : null);
-  res.json({ folio: c.folio, status: c.status, name: c.name, html: c.html, signed_at: c.signed_at, company: getSettings().company_name || 'Sovime',
+  res.json({ folio: c.folio, status: c.status, name: c.name, html: c.html, signed_at: c.signed_at, company: getSettings().company_name || 'Sovime', annexes: legalFor(c.user_id).filter((d) => c.is_test || !d.accepted),
     phone: mask(String(c.phone || '').replace(/\D/g, ''), 4), email: c.email ? c.email.replace(/^(.{2}).*(@.*)$/, '$1•••$2') : null, practice: getSettings().practice_mode === '1' });
 }));
 // código de un solo uso (OTP) por SMS y correo; vence en 10 minutos
@@ -1490,6 +1490,11 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
   if (sha256(c.token + String(b.otp || '').trim()) !== c.otp_hash) { db.prepare('UPDATE contracts SET otp_tries=otp_tries+1 WHERE id=?').run(c.id); throw new HttpError(400, 'El código no coincide'); }
   const lat = Number(b.gps?.lat), lng = Number(b.gps?.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new HttpError(400, 'Activa la ubicación del teléfono: es parte del registro de la firma');
+  // anexos vigentes: todos deben aceptarse en esta sesión
+  const annexes = legalFor(c.user_id).filter((d) => c.is_test || !d.accepted);
+  const acc = (b.accept_annex || []).map(Number);
+  const notAcc = annexes.filter((d) => !acc.includes(d.id));
+  if (notAcc.length) throw new HttpError(400, `Acepta también: ${notAcc.map((d) => d.title).join(', ')}`);
   const need = [['selfie', 'Selfie (prueba de vida)'], ['ine_front', 'INE (frente)'], ['ine_back', 'INE (reverso)'], ['csf', 'Constancia de Situación Fiscal'], ['poliza', 'Póliza de seguro'], ['signature', 'Firma']];
   const miss = need.filter(([k]) => !b[k]).map(([, l]) => l);
   if (miss.length) throw new HttpError(400, `Falta: ${miss.join(', ')}`);
@@ -1511,7 +1516,7 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
     signer: { name: c.name, rfc: vars.prestador_rfc, curp: vars.prestador_curp, id: `${vars.prestador_tipo_identificacion} ${vars.prestador_numero_identificacion}`, email: c.email, phone: c.phone },
     cert: { text_sha256: c.text_sha256, company_sha256: c.company_sha256, otp: `Código de 6 dígitos enviado por ${c.otp_channel} (${c.phone || ''}${c.email ? ' / ' + c.email : ''})`, otp_verified_at: meta.signed_local,
       signed_local: meta.signed_local, signed_utc: meta.signed_utc.replace('T', ' ').slice(0, 19), ip: meta.ip, gps: `${lat.toFixed(6)}, ${lng.toFixed(6)}${meta.gps.acc ? ` (±${Math.round(meta.gps.acc)} m)` : ''}`, device: meta.device || '—', ua, evidence, nom151: null },
-    images: { signature: images.signature, selfie: images.selfie, ine_front: images.ine_front, ine_back: images.ine_back } });
+    images: { signature: images.signature, selfie: images.selfie, ine_front: images.ine_front, ine_back: images.ine_back }, annexes: annexes.map((d) => ({ title: d.title, version: d.version, html: d.html, sha256: sha256(d.html) })) });
   const pdfName = `contrato_${c.id}_${c.folio}.pdf`;
   fs.writeFileSync(path.join(DOCS_DIR, pdfName), pdf);
   const pdfHash = sha256(pdf);
@@ -1525,6 +1530,7 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
     put('contrato', pdfName, true); put('ine', files.ine_front, false); put('csf', files.csf, false); put('seguro', files.poliza, false);
     saveDocs(c.user_id, docs);
     }
+    if (!c.is_test) for (const d of annexes) acceptLegal(c.user_id, d, { ip: meta.ip, ua, gps: `${lat.toFixed(6)},${lng.toFixed(6)}`, device: meta.device, via: `firma ${c.folio} · OTP ${c.otp_channel}`, contract_id: c.id });
     db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (?, ?, ?)').run(c.user_id, 'contrato.firmar', `${c.folio} firmado · IP ${meta.ip} · GPS ${lat.toFixed(5)},${lng.toFixed(5)} · OTP por ${c.otp_channel}`);
   });
   if (!c.is_test) await requestNom151(c.id);
@@ -1532,6 +1538,63 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
   const done = db.prepare('SELECT status, nom151_status, nom151_error FROM contracts WHERE id=?').get(c.id);
   res.json({ ok: true, folio: c.folio, status: done.status, pdf_sha256: pdfHash, nom151: done.nom151_status, nom151_error: done.nom151_error });
 }));
+
+// ---------- Documentos legales del prestador ----------
+const legal = require('./legal');
+const money0 = (n) => '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function legalVars(uid) {
+  const u = db.prepare('SELECT name FROM users WHERE id=?').get(uid) || {};
+  const p = db.prepare('SELECT * FROM staff_profiles WHERE user_id=?').get(uid) || {};
+  const s = getSettings();
+  const coord = [p.team_pay_per_delivery > 0 ? `${money0(p.team_pay_per_delivery)} por cada servicio entregado por los prestadores que coordina` : '', p.team_pay_pct > 0 ? `${p.team_pay_pct}% de la liquidación de los prestadores que coordina` : ''].filter(Boolean).join(' y ');
+  return { prestador_nombre: u.name, tarifa_entrega: p.pay_per_delivery > 0 ? money0(p.pay_per_delivery) + ' MXN' : 'la tarifa que se muestra en la Plataforma',
+    tarifa_visita: p.pay_per_failed > 0 ? money0(p.pay_per_failed) + ' MXN' : 'sin costo adicional', tarifa_coordinacion: coord || 'no aplica',
+    correo_privacidad: s.privacy_email || s.company_email || s.smtp_from || 'el correo de contacto de ANDERNS' };
+}
+// documentos vigentes que la persona aún no acepta (con su texto ya llenado)
+const legalFor = (uid) => db.prepare("SELECT * FROM legal_docs WHERE status='vigente' ORDER BY CASE kind WHEN 'anexo_a' THEN 1 WHEN 'aviso' THEN 2 ELSE 3 END").all()
+  .map((d) => ({ id: d.id, kind: d.kind, title: d.title, version: d.version, html: legal.fillLegal(d.html, legalVars(uid)), accepted: !!db.prepare('SELECT 1 FROM legal_acceptances WHERE user_id=? AND doc_id=?').get(uid, d.id) }));
+function acceptLegal(uid, doc, meta) {
+  db.prepare('INSERT OR IGNORE INTO legal_acceptances (user_id, doc_id, sha256, ip, ua, gps, device, via, contract_id) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(uid, doc.id, sha256(doc.html), meta.ip || null, meta.ua || null, meta.gps || null, meta.device || null, meta.via || 'app', meta.contract_id || null);
+}
+app.get('/api/legal', auth('admin'), wrap((req, res) => {
+  res.json(db.prepare('SELECT d.*, (SELECT COUNT(*) FROM legal_acceptances a WHERE a.doc_id = d.id) accepted FROM legal_docs d ORDER BY d.kind, d.version DESC').all());
+}));
+app.put('/api/legal/:id', auth('admin'), wrap((req, res) => {
+  const d = db.prepare('SELECT * FROM legal_docs WHERE id=?').get(Number(req.params.id));
+  if (!d) throw new HttpError(404, 'No encontrado');
+  const html = String(req.body?.html || '').trim();
+  if (html.length < 50) throw new HttpError(400, 'El texto está vacío');
+  if (d.status === 'borrador') { db.prepare('UPDATE legal_docs SET html=?, title=? WHERE id=?').run(html, String(req.body?.title || d.title).slice(0, 120), d.id); audit(req, 'legal.editar', `${d.title} v${d.version}`); return res.json({ id: d.id }); }
+  // una versión publicada no se modifica: se crea una nueva versión en borrador
+  const v = db.prepare('SELECT MAX(version) v FROM legal_docs WHERE kind=?').get(d.kind).v + 1;
+  const r = db.prepare('INSERT INTO legal_docs (kind, version, title, html) VALUES (?,?,?,?)').run(d.kind, v, String(req.body?.title || d.title).slice(0, 120), html);
+  audit(req, 'legal.version', `${d.title} v${v} (borrador)`);
+  res.json({ id: Number(r.lastInsertRowid), version: v });
+}));
+app.post('/api/legal/:id/publish', auth('admin'), wrap((req, res) => {
+  const d = db.prepare("SELECT * FROM legal_docs WHERE id=? AND status='borrador'").get(Number(req.params.id));
+  if (!d) throw new HttpError(409, 'Solo se publica una versión en borrador');
+  if (/BORRADOR PARA REVISIÓN LEGAL/.test(d.html) && !req.body?.confirm) throw new HttpError(409, 'El texto aún dice "BORRADOR PARA REVISIÓN LEGAL": quítalo cuando tu abogado lo apruebe');
+  tx(() => {
+    db.prepare("UPDATE legal_docs SET status='reemplazado' WHERE kind=? AND status='vigente'").run(d.kind);
+    db.prepare("UPDATE legal_docs SET status='vigente', published_at=datetime('now'), published_by=? WHERE id=?").run(req.user.id, d.id);
+  });
+  audit(req, 'legal.publicar', `${d.title} v${d.version} publicado: los prestadores deben aceptarlo`);
+  res.json({ ok: true });
+}));
+// prestador: lo que tiene pendiente de aceptar, y aceptar
+app.get('/api/my/legal', auth(), wrap((req, res) => res.json(legalFor(req.user.id).filter((d) => !d.accepted))));
+app.post('/api/my/legal/:id/accept', auth(), wrap((req, res) => {
+  const d = legalFor(req.user.id).find((x) => x.id === Number(req.params.id));
+  if (!d) throw new HttpError(404, 'Documento no vigente');
+  const g = req.body?.gps;
+  acceptLegal(req.user.id, d, { ip: req.ip, ua: String(req.headers['user-agent'] || '').slice(0, 300), gps: g && Number.isFinite(Number(g.lat)) ? `${Number(g.lat).toFixed(6)},${Number(g.lng).toFixed(6)}` : null, device: String(req.body?.device || '').slice(0, 160), via: 'app' });
+  audit(req, 'legal.aceptar', `${req.user.name} aceptó ${d.title} v${d.version}`);
+  res.json({ ok: true });
+}));
+app.get('/api/my/rates', auth(), wrap((req, res) => { const p = db.prepare('SELECT pay_per_delivery, pay_per_failed FROM staff_profiles WHERE user_id=?').get(req.user.id) || {}; res.json({ entrega: p.pay_per_delivery || 0, visita: p.pay_per_failed || 0 }); }));
 
 // ---------- Liquidación semanal (lunes a domingo) ----------
 const cfdi = require('./cfdi');

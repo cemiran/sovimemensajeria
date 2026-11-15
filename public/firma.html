@@ -61,8 +61,9 @@
       <div class="card"><div class="row between" style="flex-wrap:wrap;gap:6px"><b>${esc(c.company)}</b><small class="muted mono">Folio ${esc(c.folio)}</small></div>
         <h1 style="margin:8px 0 0;font-size:20px">Firma electrónica de tu contrato</h1>
         <p class="muted" style="margin:6px 0 0">${esc(c.name)}: lee el contrato, toma las fotos que se piden, firma con el dedo y confirma con el código que te enviaremos. Se registra tu IP, ubicación, fecha, hora y el modelo de tu teléfono.</p></div>
-      <section class="card step"><h2><span class="n">1</span> Lee el contrato</h2><div class="doc" id="doc">${c.html}</div>
-        <label class="row" style="gap:8px"><input type="checkbox" id="acc" /> <span>Leí el contrato completo y acepto sus términos y condiciones.</span></label></section>
+      <section class="card step"><h2><span class="n">1</span> Lee el contrato${(c.annexes || []).length ? ' y sus anexos' : ''}</h2><div class="doc" id="doc">${c.html}</div>
+        <label class="row" style="gap:8px"><input type="checkbox" id="acc" /> <span>Leí el contrato completo y acepto sus términos y condiciones.</span></label>
+        ${(c.annexes || []).map((a) => `<div class="doc" style="max-height:34vh">${a.html}</div><label class="row" style="gap:8px"><input type="checkbox" data-ax="${a.id}" /> <span>Leí y acepto: <b>${esc(a.title)}</b> (versión ${a.version}).</span></label>`).join('')}</section>
       <section class="card step"><h2><span class="n">2</span> Tu ubicación</h2><div class="state" id="gpsS">Pidiendo tu ubicación…</div><button type="button" class="btn" id="gpsB" hidden>📍 Volver a intentar</button></section>
       <section class="card step"><h2><span class="n">3</span> Prueba de vida y documentos</h2><p class="muted" style="margin:0">Toma la selfie en este momento, de frente y con buena luz. Sube tu INE vigente por ambos lados, tu Constancia de Situación Fiscal y tu póliza de seguro (foto o PDF).</p>
         <div class="kyc">${KYC.map(([k, l, a, cap]) => `<label id="k_${k}"><input type="file" accept="${a}" ${cap ? `capture="${cap}"` : ''} data-k="${k}" hidden /><span>${l}</span><small class="muted">Toca para ${cap ? 'tomar la foto' : 'subir'}</small></label>`).join('')}</div></section>
@@ -108,6 +109,8 @@
       const b = e.currentTarget;
       const miss = [];
       if (!$('#acc').checked) miss.push('aceptar el contrato');
+      const ax = [...document.querySelectorAll('[data-ax]')];
+      if (ax.some((x) => !x.checked)) miss.push('aceptar los anexos');
       if (!state.gps) miss.push('tu ubicación');
       for (const [k, l] of KYC) if (!state.files[k]) miss.push(l.replace(/^\S+\s/, ''));
       if (!signed) miss.push('tu firma');
@@ -115,7 +118,7 @@
       if (miss.length) { $('#goS').textContent = 'Falta: ' + miss.join(', '); return; }
       b.disabled = true; $('#goS').textContent = 'Firmando y sellando tu contrato…';
       try {
-        const r = await api('POST', `/api/firma/${token}/sign`, { accepted: true, otp: $('#otp').value.trim(), gps: state.gps, device: state.device, tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        const r = await api('POST', `/api/firma/${token}/sign`, { accepted: true, accept_annex: [...document.querySelectorAll('[data-ax]')].map((x) => Number(x.dataset.ax)), otp: $('#otp').value.trim(), gps: state.gps, device: state.device, tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
           ...state.files, signature: cv.toDataURL('image/png') });
         app.innerHTML = `<div class="card done"><h1 style="margin-top:0">✅ Contrato firmado</h1><p>Tu contrato <b class="mono">${esc(r.folio)}</b> quedó firmado electrónicamente.</p>
           <p class="muted">Huella del documento (SHA-256):<br><span class="mono">${esc(r.pdf_sha256)}</span></p>

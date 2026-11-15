@@ -537,6 +537,18 @@ db.exec(`CREATE TABLE IF NOT EXISTS settlements (
   UNIQUE (user_id, week_from)
 );
 CREATE INDEX IF NOT EXISTS idx_settle_week ON settlements(week_from, status);`);
+// Documentos legales del prestador (Anexo A, Aviso de privacidad, Términos) con versiones y aceptaciones
+db.exec(`CREATE TABLE IF NOT EXISTS legal_docs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, version INTEGER NOT NULL, title TEXT NOT NULL, html TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'borrador' CHECK (status IN ('borrador','vigente','reemplazado')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')), published_at TEXT, published_by INTEGER REFERENCES users(id), UNIQUE (kind, version)
+);
+CREATE TABLE IF NOT EXISTS legal_acceptances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id), doc_id INTEGER NOT NULL REFERENCES legal_docs(id),
+  accepted_at TEXT NOT NULL DEFAULT (datetime('now')), sha256 TEXT, ip TEXT, ua TEXT, gps TEXT, device TEXT, via TEXT, contract_id INTEGER, UNIQUE (user_id, doc_id)
+);`);
+if (!db.prepare('SELECT COUNT(*) n FROM legal_docs').get().n) for (const [k, t, h] of require('./legal').DEFAULTS) db.prepare('INSERT INTO legal_docs (kind, version, title, html) VALUES (?, 1, ?, ?)').run(k, t, h);
+ins.run('privacy_email', '');
 ins.run('cfdi_receptor_rfc', 'ASI050304FIA');
 ins.run('psc_name', ''); ins.run('psc_url', ''); ins.run('psc_api_key', ''); ins.run('contract_company_signer', 'C. César Andrés Miranda Valadez');
 // Capital Humano: pagos, anticipos, bonos y descuentos de cada colaborador

@@ -93,7 +93,7 @@ function writeRuns(doc, rs, opts) {
   rs.forEach((r, i) => doc.font(r.b ? 'Helvetica-Bold' : 'Helvetica').text(r.t, { ...opts, continued: i < rs.length - 1 }));
 }
 // genera el PDF y regresa un Buffer
-function buildPdf({ html, folio, company, signer, cert, images = {} }) {
+function buildPdf({ html, folio, company, signer, cert, images = {}, annexes = [] }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'LETTER', bufferPages: true, margins: { top: 54, bottom: 60, left: 60, right: 60 }, info: { Title: `Contrato ${folio}`, Author: 'Anderns Servicios Integrales, S.C.', Subject: 'Contrato mercantil de prestación de servicios independientes de logística y reparto' } });
     const chunks = [];
@@ -101,12 +101,13 @@ function buildPdf({ html, folio, company, signer, cert, images = {} }) {
     const W = doc.page.width - 120;
     const footer = () => { const keep = { x: doc.x, y: doc.y, b: doc.page.margins.bottom }; doc.page.margins.bottom = 0; const y = doc.page.height - 40; doc.font('Helvetica').fontSize(7.5).fillColor('#666').text(`Folio ${folio} · Documento firmado electrónicamente · Huella SHA-256 del texto: ${cert.text_sha256.slice(0, 32)}…`, 60, y, { width: W, align: 'center', lineBreak: false }); doc.fillColor('#111'); doc.page.margins.bottom = keep.b; doc.x = keep.x; doc.y = keep.y; };
     doc.fontSize(10.5).fillColor('#111');
-    for (const b of blocks(html)) {
+    const renderHtml = (h) => { for (const b of blocks(h)) {
       if (b.tag === 'h1') { doc.moveDown(0.3); doc.font('Helvetica-Bold').fontSize(12.5).text(b.runs.map((r) => r.t).join(''), { align: 'center' }); doc.moveDown(0.8); doc.fontSize(10.5); }
       else if (b.tag === 'h2') { doc.moveDown(0.6); doc.font('Helvetica-Bold').fontSize(11).text(b.runs.map((r) => r.t).join(''), { align: 'center' }); const y = doc.y + 2; doc.moveTo(60, y).lineTo(60 + W, y).lineWidth(0.6).stroke('#333'); doc.moveDown(0.7); doc.fontSize(10.5); }
       else if (b.tag === 'li') { doc.x = 76; writeRuns(doc, [{ t: '•  ', b: false }, ...b.runs], { align: 'justify', width: W - 16, lineGap: 1.5 }); doc.moveDown(0.35); doc.x = 60; }
       else { doc.x = 60; writeRuns(doc, b.runs, { align: 'justify', width: W, lineGap: 1.5 }); doc.moveDown(0.6); }
-    }
+    } };
+    renderHtml(html);
     // firmas
     if (doc.y > doc.page.height - 260) doc.addPage();
     doc.moveDown(1.5);
@@ -120,6 +121,8 @@ function buildPdf({ html, folio, company, signer, cert, images = {} }) {
     doc.moveTo(x2 + 10, top + 48).lineTo(x2 + colW - 10, top + 48).lineWidth(0.8).stroke('#000');
     doc.font('Helvetica-Bold').fontSize(9.5).text(signer.name, x2, top + 52, { width: colW, align: 'center' });
     doc.font('Helvetica').fontSize(8.5).text(`Aceptación electrónica\n${cert.signed_local}`, x2, doc.y, { width: colW, align: 'center' });
+    // anexos aceptados en la misma sesión (Anexo A, Aviso de privacidad, Términos)
+    for (const a of annexes) { doc.addPage(); doc.x = 60; doc.y = 54; renderHtml(a.html); }
     // certificado de firma y auditoría
     doc.addPage();
     doc.font('Helvetica-Bold').fontSize(12).text('CERTIFICADO DE FIRMA ELECTRÓNICA Y REGISTRO DE AUDITORÍA', 60, 54, { align: 'center', width: W });
@@ -138,6 +141,7 @@ function buildPdf({ html, folio, company, signer, cert, images = {} }) {
     for (const e of cert.evidence) row(e.label, `SHA-256 ${e.sha256}`);
     sec('Integridad');
     row('Huella del texto del contrato', `SHA-256 ${cert.text_sha256}`);
+    for (const a of annexes) row(`${a.title} (v${a.version})`, `Aceptado · SHA-256 ${a.sha256}`);
     row('Emisión por la contratante', `${company.issued_by} · ${company.issued_at} · SHA-256 ${cert.company_sha256}`);
     row('Constancia NOM-151-SCFI-2016', cert.nom151 || 'Se solicita al Prestador de Servicios de Certificación sobre la huella SHA-256 de este PDF; su folio y archivo de constancia quedan en el expediente.');
     // fotos de la prueba de vida
