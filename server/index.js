@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { db, tx, getSettings, DATA_DIR, UPLOAD_DIR } = require('./db');
-const { haversine, optimizeRoute } = require('./routing');
+const { haversine, optimizeRoute, balancedZones } = require('./routing');
 const gmaps = require('./gmaps');
 const notify = require('./notify');
 
@@ -2407,6 +2407,21 @@ app.post('/api/assign/resolve', auth(...STAFF), wrap((req, res) => {
   res.json({ rows: out, drivers });
 }));
 // Tablero: avance por oficina y por ciudad (hoy y acumulado)
+const DASH_MEMO = new Map();
+// reportes pesados (historial completo): la respuesta se guarda 60 s por alcance del usuario y filtros
+const REPORT_CACHE = new Map();
+function cachedReport(req, name, fn) {
+  const key = [name, req.user.id, req.user.office, (req.user.cities || []).join(','), (req.user.team || []).join(','), JSON.stringify(req.query)].join('|');
+  const h = REPORT_CACHE.get(key);
+  if (h && Date.now() - h.at < 60000) return h.v;
+  const v = fn();
+  if (REPORT_CACHE.size > 500) REPORT_CACHE.clear();
+  REPORT_CACHE.set(key, { at: Date.now(), v });
+  return v;
+}
+// rango de días locales como rango de fecha UTC (para usar índices en delivered_at / created_at)
+const utcDay = (d) => new Date(`${d}T00:00:00`).toISOString().replace('T', ' ').slice(0, 19);
+const utcRange = (f, t) => [utcDay(f), utcDay(new Date(new Date(t + 'T12:00:00Z').getTime() + 864e5).toISOString().slice(0, 10))];
 app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
   const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
   const to = okD(req.query.to) ? req.query.to : today();
@@ -2427,45 +2442,52 @@ app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
   if (city) { cw.push('lower(TRIM(c.city)) = lower(TRIM(?))'); ca.push(city); }
   if (drv) { cw.push('o.driver_id = ?'); ca.push(drv); }
   const W = cw.length ? ' AND ' + cw.join(' AND ') : '';
-  const J = 'FROM orders o JOIN customers c ON c.id = o.customer_id';
+  // sin filtros de oficina/ciudad no hace falta cruzar con clientes; las fechas van como rango de delivered_at (usa índice)
+  const J = W.includes('c.') ? 'FROM orders o JOIN customers c ON c.id = o.customer_id' : 'FROM orders o';
+  const JC = 'FROM orders o JOIN customers c ON c.id = o.customer_id';
+  const utc = (d) => new Date(`${d}T00:00:00`).toISOString().replace('T', ' ').slice(0, 19);
+  const rng = (f, t) => [utc(f), utc(iso(dd(t).getTime() + dayMs))];
+  // totales de cartera (todo el historial): cambian despacio, se guardan 60 s por filtro
+  const memo = (k, fn) => { const key = k + '|' + W + '|' + JSON.stringify(ca); const h = DASH_MEMO.get(key); if (h && Date.now() - h.at < 60000) return h.v; const v = fn(); DASH_MEMO.set(key, { at: Date.now(), v }); if (DASH_MEMO.size > 300) DASH_MEMO.clear(); return v; };
+  const IN_D = 'o.delivered_at >= ? AND o.delivered_at < ?';
   const DONE = "date(o.delivered_at,'localtime')";
   const per = (f, t) => db.prepare(`SELECT SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
       SUM(o.status='entregado' AND o.attempts <= 1) first_try, COUNT(DISTINCT CASE WHEN o.status='entregado' THEN o.driver_id END) drivers,
       COUNT(DISTINCT CASE WHEN o.status='entregado' THEN ${DONE} END) days
-    ${J} WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W}`).get(f, t, ...ca);
+    ${J} WHERE o.status IN ('entregado','fallido') AND ${IN_D}${W}`).get(...rng(f, t), ...ca);
   const cur = per(from, to), prev = per(pFrom, pTo);
   // tendencia: el periodo (o los últimos 14 días si es un solo día)
   const sFrom = nDays < 7 ? iso(dd(to) - 13 * dayMs) : from;
   const rows = db.prepare(`SELECT ${DONE} d, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed
-    ${J} WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W} GROUP BY d`).all(sFrom, to, ...ca);
+    ${J} WHERE o.status IN ('entregado','fallido') AND ${IN_D}${W} GROUP BY d`).all(...rng(sFrom, to), ...ca);
   const byD = new Map(rows.map((r) => [r.d, r]));
   const series = [];
   for (let t = dd(sFrom).getTime(); t <= dd(to).getTime(); t += dayMs) { const k = iso(t); series.push({ d: k, delivered: byD.get(k)?.delivered || 0, failed: byD.get(k)?.failed || 0 }); }
   // ranking de repartidores del periodo
   const drivers = db.prepare(`SELECT u.id, u.name, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed, SUM(o.status='entregado' AND o.attempts <= 1) first_try,
       COUNT(DISTINCT CASE WHEN o.status='entregado' THEN ${DONE} END) days
-    ${J} JOIN users u ON u.id = o.driver_id WHERE o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?${W} GROUP BY u.id ORDER BY delivered DESC`).all(from, to, ...ca);
+    ${J} JOIN users u ON u.id = o.driver_id WHERE o.status IN ('entregado','fallido') AND ${IN_D}${W} GROUP BY u.id ORDER BY delivered DESC`).all(...rng(from, to), ...ca);
   // cartera (todo lo que no está cancelado, sin importar fechas)
-  const port = db.prepare(`SELECT SUM(o.status='entregado') delivered, SUM(o.status IN ('pendiente','asignado','cargado','fallido')) open,
+  const port = memo('port' + today(), () => db.prepare(`SELECT SUM(o.status='entregado') delivered, SUM(o.status IN ('pendiente','asignado','cargado','fallido')) open,
       SUM(o.status IN ('pendiente','asignado','cargado','fallido') AND o.scheduled_date < ?) overdue, SUM(o.status IN ('asignado','cargado')) in_route
-    ${J} WHERE o.status <> 'cancelado'${W}`).get(today(), ...ca);
+    ${J} WHERE o.status <> 'cancelado'${W}`).get(today(), ...ca));
   // por oficina (para la tarjeta de resultados)
-  const offices = db.prepare(`SELECT ${OFFICE_OF('c')} id, (SELECT name FROM warehouses WHERE id = ${OFFICE_OF('c')}) name,
-      SUM(o.status='entregado' AND ${DONE} BETWEEN ? AND ?) delivered, SUM(o.status='fallido' AND ${DONE} BETWEEN ? AND ?) failed,
+  const offices = memo('off' + from + to, () => db.prepare(`SELECT ${OFFICE_OF('c')} id, (SELECT name FROM warehouses WHERE id = ${OFFICE_OF('c')}) name,
+      SUM(o.status='entregado' AND ${IN_D}) delivered, SUM(o.status='fallido' AND ${IN_D}) failed,
       SUM(o.status='entregado') delivered_all, SUM(o.status IN ('pendiente','asignado','cargado','fallido')) open,
       SUM(o.status IN ('pendiente','asignado','cargado','fallido') AND o.scheduled_date < ?) overdue
-    ${J} WHERE o.status <> 'cancelado'${W} GROUP BY 1 ORDER BY delivered_all DESC`).all(from, to, from, to, today(), ...ca);
+    ${JC} WHERE o.status <> 'cancelado'${W} GROUP BY 1 ORDER BY delivered_all DESC`).all(...rng(from, to), ...rng(from, to), today(), ...ca));
   // alertas
   const openW = `o.status IN ('pendiente','asignado','cargado','fallido')${W}`;
   const alerts = {
     overdue: port.overdue || 0,
-    geo_check: db.prepare(`SELECT COUNT(DISTINCT c.id) n ${J} WHERE ${openW} AND (c.lat IS NULL OR c.geo_quality IN ('calle','colonia','cp','ciudad'))`).get(...ca).n,
+    geo_check: memo('geo', () => db.prepare(`SELECT COUNT(DISTINCT c.id) n ${JC} WHERE ${openW} AND (c.lat IS NULL OR c.geo_quality IN ('calle','colonia','cp','ciudad'))`).get(...ca).n),
     no_route_today: db.prepare(`SELECT COUNT(*) n ${J} WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?${W}`).get(today(), ...ca).n,
     sms_failed: db.prepare("SELECT COUNT(*) n FROM messages WHERE channel='sms' AND status='error' AND error NOT LIKE 'Vencido%' AND created_at >= datetime('now','-1 day')").get().n,
   };
   res.json({ from, to, prev: { from: pFrom, to: pTo }, days: nDays, cur, prevp: prev, series, drivers, portfolio: port, offices, alerts });
 }));
-app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
+app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => res.json(cachedReport(req, 'breakdown', () => {
   const off = req.user.office || Number(req.query.office_id) || null;
   const city = String(req.query.city || '').trim();
   const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
@@ -2490,8 +2512,8 @@ app.get('/api/dashboard/breakdown', auth(...STAFF), wrap((req, res) => {
   const cities = db.prepare(`SELECT COALESCE(NULLIF(TRIM(c.city),''),'Sin ciudad') city, ${cols} ${from} ${W} GROUP BY lower(TRIM(COALESCE(c.city,''))) ORDER BY clientes DESC`).all(...A);
   // ciudades disponibles para filtrar (dentro de la oficina)
   const list = db.prepare(`SELECT DISTINCT TRIM(c.city) city FROM customers c WHERE TRIM(COALESCE(c.city,'')) <> '' ${off ? `AND ${OFFICE_OF('c')} = ${Number(off)}` : ''}${cityIn(req)} GROUP BY lower(TRIM(c.city)) ORDER BY city`).all().map((r) => r.city);
-  res.json({ offices, cities, city_list: list });
-}));
+  return { offices, cities, city_list: list };
+}))));
 // Renglones del resumen para la hoja: oficinas (con inventario) y ciudades
 function resumenRows() {
   const now = new Date().toISOString();
@@ -4327,12 +4349,13 @@ app.post(
     else if (req.user.office) driverIds = driverIds.filter((id) => offDrivers.includes(id));
     void depot;
     const drivers = driverIds.map((id) => db.prepare("SELECT id, name, capacity, active FROM users WHERE id=? AND active=1").get(id)).filter(Boolean);
+    const only = Array.isArray(req.body.order_ids) ? req.body.order_ids.map(Number).filter(Boolean).slice(0, 5000) : null;
     const pend = db
       .prepare(
         `SELECT o.id, o.priority, c.lat, c.lng, c.city customer_city, ${OFFICE_OF('c')} off FROM orders o JOIN customers c ON c.id=o.customer_id
-         WHERE o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ? ${inOffice(req, 'c')}`
+         WHERE ${only ? `o.id IN (${only.join(',') || 0}) AND o.status IN ('pendiente','fallido','asignado')` : "o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?"} ${inOffice(req, 'c')}`
       )
-      .all(date);
+      .all(...(only ? [] : [date]));
     if (!pend.length) throw new HttpError(400, 'No hay pedidos pendientes por rutear');
     // Misma lógica que en Pedidos: cada oficina con sus repartidores; los pedidos en orden de ciudad y cercanía
     // desde la oficina, en tramos seguidos (una zona compacta por repartidor, según su capacidad);
@@ -4342,16 +4365,21 @@ app.post(
     const created = [];
     const overflow = [];
     for (const [off, list] of byOff) {
-      const team = drivers.filter((d) => userOffice(d.id) === off);
-      const ordered = geoSort(list).filter((o) => o.lat != null);
+      // al repartir una selección se respetan los repartidores elegidos aunque sean de otra oficina
+      const team = only ? drivers : drivers.filter((d) => userOffice(d.id) === off);
+      const located = list.filter((o) => o.lat != null);
       overflow.push(...list.filter((o) => o.lat == null));
-      if (!team.length) { overflow.push(...ordered); continue; }
-      const cap = (d) => Math.max(1, Number(d.capacity) || 30);
-      const capSum = team.reduce((a, d) => a + cap(d), 0);
+      if (!team.length) { overflow.push(...located); continue; }
+      // cupo de cada uno: lo que le queda de capacidad hoy, repartido en proporción para que todos lleven carga parecida
+      const cap = (d) => Math.max(0, (Number(d.capacity) || 30) - (db.prepare("SELECT COUNT(*) n FROM orders o JOIN routes r ON r.id=o.route_id WHERE r.driver_id=? AND r.date=? AND o.status IN ('asignado','cargado')").get(d.id, date).n));
+      const caps0 = team.map(cap);
+      const capSum = caps0.reduce((a, c) => a + c, 0);
+      const caps = caps0.map((c) => (capSum ? Math.min(c, Math.ceil((located.length * c) / capSum)) : 0));
+      const zones = balancedZones(located, caps);
+      const placed = new Set(zones.flat().map((o) => o.id));
       let k = 0;
-      for (const d of team) {
-        const share = Math.min(cap(d), Math.ceil((ordered.length * cap(d)) / capSum));
-        const chunk = ordered.slice(k, k + share);
+      for (const [zi, d] of team.entries()) {
+        const chunk = zones[zi] || [];
         k += chunk.length;
         if (!chunk.length) continue;
         const r = assignOrdersTo(req, d, chunk.map((o) => o.id), date);
@@ -4359,7 +4387,8 @@ app.post(
         const rt = db.prepare('SELECT distance_km, original_distance_km, est_minutes FROM routes WHERE id=?').get(r.route_id);
         created.push({ driver: d.name, route_id: r.route_id, stops: r.assigned, ...rt });
       }
-      overflow.push(...ordered.slice(k));
+      overflow.push(...located.filter((o) => !placed.has(o.id)));
+      void k;
     }
     res.status(201).json({ created, overflow: overflow.map((o) => o.id) });
   })
@@ -4583,8 +4612,8 @@ app.get(
     const cityW = cityA ? ` AND lower(TRIM(c2.city)) = '${cityA.toLowerCase().replace(/'/g, "''")}'` : '';
     const drvA = Number(req.query.driver_id) || null;
     const OFF = (offA || cityA || cityIn(req) ? ` AND o.customer_id IN (SELECT c2.id FROM customers c2 WHERE 1 ${inOffice(sreq, 'c2')}${cityW})` : '') + (drvA ? ` AND o.driver_id = ${drvA}` : '');
-    const IN = `((o.status IN ('entregado','fallido') AND ${DONE} BETWEEN ? AND ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
-    const R = [from, to, from, to];
+    const IN = `((o.status IN ('entregado','fallido') AND o.delivered_at >= ? AND o.delivered_at < ?) OR (o.status NOT IN ('entregado','fallido') AND o.scheduled_date BETWEEN ? AND ?))${OFF}`;
+    const R = [...utcRange(from, to), from, to];
     const totals = db.prepare(`SELECT COUNT(*) total, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed,
         SUM(o.status IN ('pendiente','asignado','cargado')) open, SUM(o.status='cancelado') cancelled FROM orders o WHERE ${IN}`).get(...R);
     const routes = db.prepare(`SELECT COUNT(*) routes, ROUND(SUM(distance_km),1) km, ROUND(SUM(original_distance_km),1) original_km,
@@ -5295,6 +5324,7 @@ if (require.main === module) {
   setInterval(() => routedRefine(), 10 * 60000).unref();
   setTimeout(neighborRefine, 120000);
   setInterval(neighborRefine, 6 * 3600000).unref();
+  setInterval(() => { try { db.exec('PRAGMA optimize'); } catch {} }, 24 * 3600000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }

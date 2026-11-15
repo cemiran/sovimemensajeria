@@ -254,4 +254,30 @@ function splitAmongDrivers(depot, stops, drivers) {
   return { assignments: result, overflow };
 }
 
-module.exports = { haversine, optimizeRoute, splitAmongDrivers };
+// Zonas compactas balanceadas: k grupos (uno por repartidor) de puntos cercanos entre sí, cada uno con su cupo
+// (proporcional a la capacidad). k-means con asignación por "arrepentimiento" para respetar cupos.
+function balancedZones(points, caps, iters = 10) {
+  const k = caps.length, n = points.length;
+  if (!k || !n) return caps.map(() => []);
+  const d = (a, b) => { const dy = a.lat - b.lat, dx = (a.lng - b.lng) * Math.cos((a.lat * Math.PI) / 180); return dx * dx + dy * dy; };
+  // semillas separadas: el más lejano del centro y luego el más lejano de las ya elegidas
+  const c0 = { lat: points.reduce((a, p) => a + p.lat, 0) / n, lng: points.reduce((a, p) => a + p.lng, 0) / n };
+  let cent = [points.reduce((b, p) => (d(p, c0) > d(b, c0) ? p : b), points[0])];
+  while (cent.length < Math.min(k, n)) cent.push(points.reduce((b, p) => (Math.min(...cent.map((c) => d(p, c))) > Math.min(...cent.map((c) => d(b, c))) ? p : b), points[0]));
+  while (cent.length < k) cent.push(cent[cent.length - 1]);
+  cent = cent.map((c) => ({ lat: c.lat, lng: c.lng }));
+  let groups = [];
+  for (let it = 0; it < iters; it++) {
+    const left = caps.slice();
+    groups = caps.map(() => []);
+    // primero los puntos que más pierden si no van a su zona más cercana
+    const order = points.map((p, i) => { const ds = cent.map((c, j) => [d(p, c), j]).sort((a, b) => a[0] - b[0]); return { i, ds, regret: (ds[1]?.[0] ?? ds[0][0]) - ds[0][0] }; }).sort((a, b) => b.regret - a.regret);
+    for (const o of order) { const pick = o.ds.find(([, j]) => left[j] > 0) || o.ds[0]; groups[pick[1]].push(o.i); left[pick[1]]--; }
+    let moved = 0;
+    cent = cent.map((c, j) => { const g = groups[j]; if (!g.length) return c; const nc = { lat: g.reduce((a, i) => a + points[i].lat, 0) / g.length, lng: g.reduce((a, i) => a + points[i].lng, 0) / g.length }; moved += d(nc, c); return nc; });
+    if (moved < 1e-10) break;
+  }
+  return groups.map((g) => g.map((i) => points[i]));
+}
+
+module.exports = { haversine, optimizeRoute, splitAmongDrivers, balancedZones };

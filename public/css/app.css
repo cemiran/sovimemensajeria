@@ -810,3 +810,7 @@ label:has(> input[type="file"]) { position: relative; }
 /* pin marcado en el mapa de la ruta */
 .leaflet-marker-icon.pin-sel { filter: drop-shadow(0 0 0 #ef7d2d) drop-shadow(0 0 4px #ef7d2d) drop-shadow(0 0 2px #ef7d2d); transform-origin: center bottom; z-index: 1000 !important; }
 .leaflet-marker-icon.pin-sel::after { content: '✓'; position: absolute; top: -6px; right: -6px; background: #ef7d2d; color: #fff; border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; font-weight: 700; }
+
+/* mapa de rutas a pantalla completa */
+.card.map-full { position: fixed; inset: 0; z-index: 900; margin: 0 !important; border-radius: 0; overflow: auto; padding-top: max(12px, env(safe-area-inset-top, 0px)); }
+.card.map-full #rmap { height: calc(100vh - 150px) !important; }

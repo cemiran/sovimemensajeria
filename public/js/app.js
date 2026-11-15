@@ -667,7 +667,7 @@ function openScanner({ title = 'Escanear código', continuous = false, onCode, h
   return m;
 }
 
-function compressImage(file, maxSide = 1280, quality = 0.7) {
+function compressImage(file, maxSide = 1024, quality = 0.65) {
   return loadImage(file).then((img) => {
     {
       const k = Math.min(1, maxSide / Math.max(imgW(img), imgH(img)));
@@ -1698,7 +1698,9 @@ async function viewRoutes(v) {
     <div class="card"><div class="row map-tools" style="margin-bottom:8px">
         <button class="btn sm" id="selLasso" title="Encierra con el dedo o el ratón las entregas que quieras">${icon('edit')} Dibujar zona</button>
         <button class="btn sm" id="selTap" title="Toca cada pin para agregarlo o quitarlo">${icon('check')} Tocar pines</button>
+        <select id="selZip" style="width:auto;max-width:170px" title="Marca todos los pedidos sin ruta de un código postal"><option value="">📮 Por CP…</option></select>
         <button class="btn sm ghost" id="selClear" hidden>Quitar selección</button>
+        <button class="btn sm ghost" id="mapFull" title="Mapa a pantalla completa">⛶</button>
         <small class="muted grow" id="selHint">Selecciona entregas en el mapa para asignarlas y optimizar su ruta.</small></div>
       <div id="rmap" class="map tall"></div>
       <div id="mapSelBar" class="bulk-bar" hidden></div><div class="legend" style="margin-top:8px">${routes.map((r, i) => `<span><i style="background:${ROUTE_COLORS[i % ROUTE_COLORS.length]}"></i>${esc(r.driver_name)}</span>`).join('')}<span><i style="background:#7b8a85"></i>Pendiente sin ruta</span></div></div>
@@ -1741,13 +1743,23 @@ async function viewRoutes(v) {
   const dets = await Promise.all(routes.map((r) => GET('/api/routes/' + r.id)));
   const pinsSel = [];
   dets.forEach((d, i) => all.push(...drawRoute(map, d.stops, ROUTE_COLORS[i % ROUTE_COLORS.length], { depot: false, fit: false, onEdit: () => render(), collect: pinsSel })));
-  for (const o of pending) if (o.lat != null) {
-    const mk = L.marker([o.lat, o.lng], { icon: pinIcon('•', '#7b8a85') }).addTo(map).bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}<br>${esc(o.tracking_code)} · sin ruta${stopEditButtons()}`);
-    wireStopEdit(map, mk, o, () => render());
+  // todos los pedidos sin ruta (pendientes o fallidos) como puntos ligeros: el mapa sigue rápido con miles
+  const cv = L.canvas({ padding: 0.4 });
+  const PEND_STYLE = (o) => ({ renderer: cv, radius: 6, weight: o.priority === 'alta' ? 3 : 1.5, color: o.priority === 'alta' ? '#c0392b' : o.status === 'fallido' ? '#e67e22' : '#46525e', fillColor: o.status === 'fallido' ? '#f5b041' : '#8795a1', fillOpacity: 0.9 });
+  for (const o of pick.rows) if (o.lat != null && !pinsSel.some((p) => p.s.id === o.id)) {
+    const mk = L.circleMarker([o.lat, o.lng], PEND_STYLE(o)).addTo(map)
+      .bindPopup(`<b>${esc(o.customer_name)}</b><br>${esc(o.address || '')}${o.customer_zip ? ' · CP ' + esc(o.customer_zip) : ''}<br>${esc(o.tracking_code)} · ${o.status === 'fallido' ? 'no entregado, sin ruta' : 'sin ruta'}${o.priority === 'alta' ? ' · <b style="color:#c0392b">urgente</b>' : ''}<br><button class="btn sm" data-od="${o.id}">Ver pedido</button>`);
+    mk.on('popupopen', (e) => e.popup.getElement().querySelector('[data-od]')?.addEventListener('click', () => { map.closePopup(); orderDetail(o.id); }));
+    mk._base = PEND_STYLE(o);
     pinsSel.push({ s: o, mk });
     all.push([o.lat, o.lng]);
   }
-  mapSelection(v, map, pinsSel, drivers, date);
+  mapSelection(v, map, pinsSel, drivers, date, routes);
+  // por CP: marca de un jalón los pedidos sin ruta de ese código postal
+  const zips = new Map();
+  for (const p of pinsSel) if (!p.s.route_id && p.s.customer_zip) { const z = String(p.s.customer_zip).replace(/\D/g, '').slice(0, 5); if (z) zips.set(z, (zips.get(z) || 0) + 1); }
+  $('#selZip', v).insertAdjacentHTML('beforeend', [...zips.entries()].sort((a, b) => b[1] - a[1]).map(([z, n]) => `<option value="${z}">CP ${z} · ${n}</option>`).join(''));
+  $('#mapFull', v).onclick = () => { $('#rmap', v).closest('.card').classList.toggle('map-full'); setTimeout(() => map.invalidateSize(), 50); };
   if (all.length > 1) map.fitBounds(all, { padding: [30, 30] });
   // Panel "Asignar por ciudad y ubicación": los marcados se ven en azul en el mapa, con su orden de cercanía
   const pickLayer = L.layerGroup().addTo(map);
@@ -2759,13 +2771,20 @@ function bulkStatus(status, kind, ids, onDone) {
 
 // ================= Selección de entregas en el mapa (lazo o toque) =================
 // Solo se pueden mover las que aún no salen: pendientes o asignadas (no cargadas, entregadas ni fallidas).
-function mapSelection(v, map, pins, drivers, date) {
-  const movable = pins.filter((p) => ['pendiente', 'asignado'].includes(p.s.status));
+function mapSelection(v, map, pins, drivers, date, routes = []) {
+  const movable = pins.filter((p) => ['pendiente', 'asignado'].includes(p.s.status) || (p.s.status === 'fallido' && !p.s.route_id));
   const sel = new Set();
   let mode = null;
   const bar = $('#mapSelBar', v);
   const box = map.getContainer();
-  const mark = (p, on) => { if (p.mk._icon) p.mk._icon.classList.toggle('pin-sel', on); };
+  const mark = (p, on) => {
+    if (p.mk.setStyle) p.mk.setStyle(on ? { ...p.mk._base, color: '#ef7d2d', fillColor: '#ef7d2d', weight: 3, radius: 8 } : p.mk._base);
+    else if (p.mk._icon) p.mk._icon.classList.toggle('pin-sel', on);
+  };
+  // carga de cada repartidor en la fecha: paradas pendientes en su ruta y horas estimadas
+  const work = Number(SETTINGS.workday_minutes) || 540;
+  const load = (d) => { const rs = routes.filter((r) => r.driver_id === d.id); return { stops: rs.reduce((a, r) => a + Math.max(0, (r.stops || 0) - (r.delivered || 0) - (r.failed || 0)), 0), min: rs.reduce((a, r) => a + (r.est_minutes || 0), 0) }; };
+  const loadTxt = (d) => { const l = load(d); const cap = d.capacity || 30; return `${l.stops}/${cap}${l.min ? ' · ' + fmtN(l.min / 60, 1) + ' h' : ''}`; };
   const draw = () => {
     movable.forEach((p) => mark(p, sel.has(p.s.id)));
     $('#selClear', v).hidden = !sel.size;
@@ -2776,10 +2795,30 @@ function mapSelection(v, map, pins, drivers, date) {
     const list = movable.filter((p) => sel.has(p.s.id));
     const from = [...new Set(list.map((p) => p.s.driver_name || 'sin ruta'))];
     bar.innerHTML = `<b>${sel.size} entrega${sel.size === 1 ? '' : 's'}</b><small class="muted">${esc(from.join(', '))}</small>
-      <select id="msDrv"><option value="">Asignar a…</option>${act.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
+      <select id="msDrv"><option value="">Asignar a…</option>${act.map((d) => { const l = load(d); const over = l.stops + sel.size > (d.capacity || 30) || l.min > work; return `<option value="${d.id}">${over ? '⚠ ' : ''}${esc(d.name)} · ${loadTxt(d)}</option>`; }).join('')}</select>
       <input type="date" id="msDate" value="${prev.f || date}" />
-      <button class="btn primary" id="msGo">${icon('route')} Asignar y optimizar</button>`;
+      <button class="btn primary" id="msGo">${icon('route')} Asignar y optimizar</button>
+      <button class="btn" id="msSplit" title="Reparte lo marcado entre varios repartidores en zonas compactas y parejas">${icon('users')} Repartir entre varios</button>
+      <small id="msWarn" class="muted"></small>`;
     if (prev.d) $('#msDrv', bar).value = prev.d;
+    const warn = () => { const d = act.find((x) => String(x.id) === $('#msDrv', bar).value); if (!d) return ($('#msWarn', bar).textContent = ''); const l = load(d); const tot = l.stops + sel.size; $('#msWarn', bar).innerHTML = `${esc(d.name)} quedaría con <b>${tot}</b> de ${d.capacity || 30}${tot > (d.capacity || 30) ? ' <b style="color:var(--bad)">· pasa su capacidad</b>' : ''}`; };
+    $('#msDrv', bar).onchange = warn; warn();
+    $('#msSplit', bar).onclick = () => {
+      const m2 = modal(`Repartir ${sel.size} entregas entre varios`, `<p class="muted" style="margin-top:0">Se forman zonas compactas (pedidos cercanos entre sí), una por repartidor, en proporción a lo que le queda de capacidad. Cada ruta se optimiza sola.</p>
+        <div class="stack" style="max-height:50vh;overflow:auto">${act.map((d) => `<label class="row" style="gap:8px"><input type="checkbox" value="${d.id}" /> <span class="grow">${esc(d.name)}</span><small class="muted">${loadTxt(d)}</small></label>`).join('')}</div>
+        <label class="f" style="margin-top:8px">Fecha<input type="date" id="spD" value="${$('#msDate', bar).value || date}" /></label>`,
+        { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="spGo">Repartir y optimizar</button>' });
+      $('#spGo', m2.el).onclick = async (e2) => {
+        const ids = $$('input[type=checkbox]:checked', m2.el).map((x) => Number(x.value));
+        if (ids.length < 2) return toast('Elige al menos dos repartidores', 'bad');
+        e2.currentTarget.disabled = true;
+        try {
+          const r = await POST('/api/routes/auto', { date: $('#spD', m2.el).value, driver_ids: ids, order_ids: [...sel] });
+          toast(`${r.created.reduce((a, x) => a + x.stops, 0)} entregas en ${r.created.length} rutas${r.overflow.length ? ` · ${r.overflow.length} sin lugar (capacidad o sin ubicación)` : ''}`, r.overflow.length ? '' : 'ok');
+          m2.close(); render();
+        } catch (er) { toast(er.message, 'bad'); e2.currentTarget.disabled = false; }
+      };
+    };
     $('#msGo', bar).onclick = async (e) => {
       const btn = e.currentTarget;
       const drv = $('#msDrv', bar);
@@ -2803,6 +2842,7 @@ function mapSelection(v, map, pins, drivers, date) {
   };
   $('#selLasso', v).onclick = () => setMode('lasso');
   $('#selTap', v).onclick = () => setMode('tap');
+  $('#selZip', v)?.addEventListener('change', (e) => { const z = e.target.value; e.target.value = ''; if (!z) return; let n = 0; for (const p of movable) if (!p.s.route_id && String(p.s.customer_zip || '').replace(/\D/g, '').slice(0, 5) === z && !sel.has(p.s.id)) { sel.add(p.s.id); n++; } toast(`CP ${z}: ${n} entrega(s) marcadas`, n ? 'ok' : ''); draw(); });
   $('#selClear', v).onclick = () => { sel.clear(); draw(); };
   // tocar pines
   for (const p of movable) p.mk.on('click', (e) => {

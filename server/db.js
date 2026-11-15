@@ -511,6 +511,19 @@ db.exec(`CREATE TABLE IF NOT EXISTS staff_payments (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_staff_pay_user ON staff_payments(user_id, date);`);
+// Índices para 1,000 entregas diarias: evidencias por repartidor y fecha (pagos, análisis), entregas por fecha, rutas por estado
+db.exec(`CREATE INDEX IF NOT EXISTS idx_evid_driver_time ON evidences(driver_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_evid_time ON evidences(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_delivered ON orders(delivered_at);
+CREATE INDEX IF NOT EXISTS idx_orders_st_deliv ON orders(status, delivered_at);
+CREATE INDEX IF NOT EXISTS idx_orders_sched ON orders(scheduled_date, status);
+CREATE INDEX IF NOT EXISTS idx_items_product ON order_items(product_id);
+CREATE INDEX IF NOT EXISTS idx_routes_status ON routes(status, date);
+CREATE INDEX IF NOT EXISTS idx_customers_geo ON customers(geo_quality);
+CREATE INDEX IF NOT EXISTS idx_sheet_order ON sheet_sync(order_id);
+CREATE INDEX IF NOT EXISTS idx_custody_product ON custody_log(product_id, driver_id);`);
+// estadísticas para que SQLite elija bien los índices (con miles de pedidos al día): la primera vez completas, luego las ajusta sola
+try { if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").get()) db.exec('ANALYZE'); else db.exec('PRAGMA optimize'); } catch {}
 // Pedidos por surtir: piezas de cada artículo ya descontadas del inventario (lo demás espera existencia)
 if (!db.prepare('PRAGMA table_info(order_items)').all().some((c) => c.name === 'filled')) {
   db.exec('ALTER TABLE order_items ADD COLUMN filled INTEGER NOT NULL DEFAULT 0');
