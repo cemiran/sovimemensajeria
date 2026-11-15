@@ -3212,6 +3212,14 @@ async function warehouseDetail(id, whs) {
 
 // ================= Documentos del expediente =================
 const DOC_ST = { aprobado: ['Aprobado', 'ok'], pendiente: ['En revisión', 'warn'], rechazado: ['Rechazado', 'off'] };
+// resultado de la revisión automática de la CSF (fecha, RFC, estatus, régimen y titular)
+function csfCheckHtml(c) {
+  if (!c) return '';
+  if (c.manual) return `<div class="info-bar" style="margin:4px 0 0">${icon('info')} ${c.issues.map(esc).join(' · ')}</div>`;
+  const okl = [c.fecha ? `emitida ${esc(c.fecha)} (${c.dias} días)` : '', c.rfc ? 'RFC ' + esc(c.rfc) : '', c.estatus ? esc(c.estatus) : '', ...(c.regimenes || []).map(esc), c.nombre ? esc(c.nombre) : ''].filter(Boolean).join(' · ');
+  return c.ok ? `<small style="color:var(--ok)">✓ Revisión automática: ${okl}</small>`
+    : `<div class="offline-bar" style="margin:4px 0 0"><b>Revisión automática de la CSF:</b><br>${c.issues.map((x) => '• ' + esc(x)).join('<br>')}${okl ? `<br><small class="muted">Leído: ${okl}</small>` : ''}</div>`;
+}
 function staffDocChip(d) {
   if (!d) return '';
   const venc = d.expires && d.expires < today();
@@ -3248,10 +3256,13 @@ async function myDocuments(box, u) {
   const done = need.filter((d) => r.docs[d.key]?.ok && !(r.docs[d.key]?.expires && r.docs[d.key].expires < today())).length;
   box.innerHTML = `<h2>Mis documentos</h2>
     <p class="muted" style="margin:0">Sube una foto clara o el PDF de cada documento. El administrador lo revisa y queda en tu expediente.</p>
+    ${r.suspended ? `<div class="offline-bar" style="background:var(--bad-soft,#fde8e6);color:var(--bad)">⛔ ${esc(r.suspended)}. Sube el documento renovado para volver a recibir servicios.</div>` : r.blockers?.length ? `<div class="offline-bar">Para firmar tu contrato y recibir servicios falta: ${r.blockers.map(esc).join(', ')}</div>` : ''}
     <div class="row"><b>${done}/${need.length} aprobados</b><div class="progress grow"><i style="width:${need.length ? (done / need.length) * 100 : 0}%;background:var(--ok)"></i></div></div>
     ${r.doc_list.map((d) => { const x = r.docs[d.key] || {}; return `<div class="doc-row stack" style="gap:6px">
       <div class="row between"><span><b>${esc(d.label)}</b>${d.optional ? ' <small class="muted">(opcional)</small>' : ''}</span>${staffDocChip(x) || '<span class="chip">Falta</span>'}</div>
       ${x.status === 'rechazado' && x.note ? `<small style="color:var(--bad)">${esc(x.note)}</small>` : ''}
+      ${d.key === 'csf' && x.check && !x.check.ok ? csfCheckHtml(x.check) : ''}
+      ${d.expiring && !d.optional ? '<small class="muted">Indica la fecha de vencimiento: te avisamos 15 días antes.</small>' : ''}
       <div class="row" style="gap:6px;flex-wrap:wrap">
         <label class="btn sm ${x.has_file ? '' : 'primary'}">${icon('camera')} ${x.has_file ? 'Reemplazar' : 'Subir foto o PDF'}<input type="file" accept="image/*,application/pdf" data-mup="${d.key}" hidden /></label>
         ${x.has_file ? `<button type="button" class="btn sm" data-mview="${d.key}">${icon('ext')} Ver</button>` : ''}
@@ -3285,7 +3296,8 @@ async function contractBox(el, u) {
   el.innerHTML = `<legend>${icon('sign')} Contrato electrónico</legend>
     <p class="muted" style="margin-top:0">Contrato mercantil de prestación de servicios con sus datos. Se firma desde el celular con código por SMS o correo, selfie, INE, Constancia de Situación Fiscal y póliza, y queda registrada su IP, ubicación GPS, fecha, hora y dispositivo.${r.psc ? ' Al firmar se solicita la constancia NOM-151 al PSC configurado.' : ' <b>La constancia NOM-151 se emite cuando configures tu PSC en Configuración → Firma electrónica.</b>'}</p>
     ${r.missing.length ? `<div class="offline-bar">Para generar el contrato completa y guarda: ${r.missing.map(esc).join(', ')}.</div>` : ''}
-    <div class="row" style="gap:6px;flex-wrap:wrap"><button type="button" class="btn primary" id="ctGo" ${r.missing.length ? 'disabled' : ''}>${icon('send')} ${open ? 'Generar de nuevo y reenviar' : 'Generar y enviar para firma'}</button></div>
+    ${r.blockers?.length ? `<div class="offline-bar">Faltan documentos aprobados: ${r.blockers.map(esc).join(', ')}.</div>` : ''}
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button type="button" class="btn primary" id="ctGo" ${r.missing.length || r.blockers?.length ? 'disabled' : ''}>${icon('send')} ${open ? 'Generar de nuevo y reenviar' : 'Generar y enviar para firma'}</button></div>
     ${r.contracts.length ? `<div class="table-wrap" style="margin-top:8px"><table><tbody>${r.contracts.map((c) => `<tr><td><b class="mono">${esc(c.folio)}</b><br><small class="muted">Emitido ${fmtDT(c.issued_at)}${c.signed_at ? ' · firmado ' + fmtDT(c.signed_at) : ''}</small>
         ${c.meta ? `<br><small class="muted">IP ${esc(c.meta.ip)} · GPS ${c.meta.gps.lat.toFixed(5)}, ${c.meta.gps.lng.toFixed(5)} · ${esc(c.meta.device || '')} · OTP por ${esc(c.otp_channel || '')}</small>` : ''}
         ${c.nom151_error ? `<br><small style="color:var(--warn,#b26d00)">NOM-151: ${esc(c.nom151_error)}</small>` : c.nom151_folio ? `<br><small>NOM-151 folio ${esc(c.nom151_folio)}</small>` : ''}</td>
@@ -3293,6 +3305,7 @@ async function contractBox(el, u) {
       <td class="r"><div class="row" style="gap:4px;justify-content:flex-end;flex-wrap:wrap">
         ${c.link ? `<button type="button" class="btn sm" data-ctcopy="${esc(c.link)}">${icon('copy')} Copiar enlace</button><button type="button" class="btn sm ghost" data-ctx="${c.id}" style="color:var(--bad)">Anular</button>` : ''}
         ${c.pdf ? `<button type="button" class="btn sm" data-ctpdf="${c.id}">${icon('ext')} PDF</button>` : ''}
+        ${c.pdf ? (c.identity_ok_at ? `<span class="chip ok" title="Selfie verificada contra la INE">✓ identidad</span>` : `<button type="button" class="btn sm primary" data-ctid="${c.id}">Validar identidad</button>`) : ''}
         ${c.pdf && c.status !== 'sellado' ? `<button type="button" class="btn sm" data-ctnom="${c.id}">Solicitar NOM-151</button>` : ''}
         ${c.status === 'sellado' ? `<button type="button" class="btn sm" data-ctnomd="${c.id}">${icon('download')} Constancia</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : ''}`;
   const again = () => contractBox(el, u);
@@ -3305,6 +3318,15 @@ async function contractBox(el, u) {
   $$('[data-ctcopy]', el).forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.ctcopy); toast('Enlace copiado', 'ok'); } catch { prompt('Copia el enlace', b.dataset.ctcopy); } }));
   $$('[data-ctx]', el).forEach((b) => (b.onclick = async () => { if (!(await confirmDlg('¿Anular este contrato? El enlace dejará de funcionar.'))) return; try { await POST(`/api/contracts/${b.dataset.ctx}/cancel`, {}); again(); } catch (er) { toast(er.message, 'bad'); } }));
   $$('[data-ctpdf]', el).forEach((b) => (b.onclick = () => openAuthFile(`/api/contracts/${b.dataset.ctpdf}/pdf`)));
+  $$('[data-ctid]', el).forEach((b) => (b.onclick = async () => {
+    const id = b.dataset.ctid;
+    const img = async (k) => { const r2 = await fetch(`/api/contracts/${id}/kyc/${k}`, { headers: { Authorization: 'Bearer ' + store.token } }); return r2.ok ? URL.createObjectURL(await r2.blob()) : ''; };
+    const [sf, fr, bk] = await Promise.all([img('selfie'), img('ine_front'), img('ine_back')]);
+    const m = modal('Validar identidad', `<p class="muted" style="margin-top:0">Compara la selfie tomada al firmar con la fotografía de la INE: rostro, nombre y vigencia.</p>
+      <div class="grid g3" style="align-items:start">${[['Selfie al firmar', sf], ['INE (frente)', fr], ['INE (reverso)', bk]].map(([l, u2]) => `<figure style="margin:0;text-align:center">${u2 ? `<img src="${u2}" alt="${l}" style="max-width:100%;max-height:300px;border-radius:8px" />` : '<p class="muted">Sin imagen</p>'}<figcaption class="muted">${l}</figcaption></figure>`).join('')}</div>`,
+      { wide: true, footer: '<button class="btn" data-close>No coincide</button><button class="btn ok" id="idOk">✓ Es la misma persona</button>' });
+    $('#idOk', m.el).onclick = async () => { try { await POST(`/api/contracts/${id}/identity`, {}); toast('Identidad verificada', 'ok'); m.close(); again(); } catch (er) { toast(er.message, 'bad'); } };
+  }));
   $$('[data-ctnomd]', el).forEach((b) => (b.onclick = () => openAuthFile(`/api/contracts/${b.dataset.ctnomd}/nom151`)));
   $$('[data-ctnom]', el).forEach((b) => (b.onclick = async () => { b.disabled = true; try { const x = await POST(`/api/contracts/${b.dataset.ctnom}/nom151`, {}); toast(x.nom151_status === 'emitida' ? 'Constancia NOM-151 emitida' : `No se emitió: ${x.nom151_error || 'revisa el PSC'}`, x.nom151_status === 'emitida' ? 'ok' : 'bad'); again(); } catch (er) { toast(er.message, 'bad'); b.disabled = false; } }));
 }
@@ -3341,7 +3363,8 @@ async function staffProfile(box, u) {
       <div class="grid g3"><label class="f">Número de licencia<input name="licencia_numero" value="${esc(p.licencia_numero)}" /></label>
       <label class="f">Vigencia de la licencia<input type="date" name="licencia_vigencia" value="${esc(p.licencia_vigencia)}" /></label>
       <label class="f">Aseguradora<input name="seguro_aseguradora" value="${esc(p.seguro_aseguradora)}" /></label></div>
-      <div class="grid g3"><label class="f">Número de póliza<input name="seguro_poliza" value="${esc(p.seguro_poliza)}" /></label></div></fieldset>
+      <div class="grid g3"><label class="f">Número de póliza<input name="seguro_poliza" value="${esc(p.seguro_poliza)}" /></label>
+      <label class="f"><span>¿Tiene empleados propios? <small class="muted">(pide REPSE)</small></span><select name="tiene_empleados"><option value="no" ${p.tiene_empleados !== 'si' ? 'selected' : ''}>No</option><option value="si" ${p.tiene_empleados === 'si' ? 'selected' : ''}>Sí</option></select></label></div></fieldset>
     <fieldset id="ctBox"><legend>${icon('sign')} Contrato electrónico</legend><p class="muted" style="margin:0">Cargando…</p></fieldset>
     <fieldset><legend>${icon('key')} Datos bancarios</legend><div class="grid g2">
       <label class="f">Banco<input name="bank_name" value="${esc(p.bank_name)}" /></label><label class="f">Titular de la cuenta<input name="account_holder" value="${esc(p.account_holder)}" /></label>
@@ -3357,7 +3380,7 @@ async function staffProfile(box, u) {
       <div id="payOut" class="muted" style="margin-top:6px"></div></fieldset>
     <fieldset><legend>${icon('shield')} Cumplimiento mínimo (documentos)</legend>
       ${p.pending_docs ? `<div class="info-bar">${icon('info')} ${p.pending_docs} documento(s) subido(s) por el colaborador esperan tu revisión.</div>` : ''}
-      ${p.doc_list.map(([k, l]) => { const d = p.docs[k] || {}; return `<div class="row doc-row"><label class="row grow"><input type="checkbox" data-doc="${k}" ${d.ok ? 'checked' : ''} /> ${esc(l)}${k === 'seguro' || (k === 'licencia' && u.role !== 'repartidor') ? ' <small class="muted">(opcional)</small>' : ''} ${staffDocChip(d)}</label>
+      ${p.doc_list.map(([k, l]) => { const d = p.docs[k] || {}; return `<div class="row doc-row"><label class="row grow"><input type="checkbox" data-doc="${k}" ${d.ok ? 'checked' : ''} /> ${esc(l)}${(p.required || []).includes(k) ? '' : ' <small class="muted">(opcional)</small>'} ${staffDocChip(d)}${d.override ? ' <span class="chip warn" title="Aprobado a pesar de la revisión automática">aprobado manualmente</span>' : ''}</label>
         <div class="row" style="gap:6px">${d.has_file ? `<button type="button" class="btn sm" data-view="${k}">${icon('ext')} Ver</button>` : ''}
           ${d.status === 'pendiente' ? `<button type="button" class="btn sm ok" data-ok="${k}">Aprobar</button><button type="button" class="btn sm bad" data-no="${k}">Rechazar</button>` : ''}
           <label class="btn sm">${icon('upload')} Subir<input type="file" accept="image/*,application/pdf" data-up="${k}" hidden /></label>
@@ -3391,7 +3414,11 @@ async function staffProfile(box, u) {
   // documentos: ver, subir (queda aprobado), aprobar o rechazar lo que subió el colaborador
   const docAct = async (k, body, msg) => { try { await POST(`/api/users/${u.id}/documents/${k}`, body); toast(msg, 'ok'); staffProfile(box, u); } catch (e) { toast(e.message, 'bad'); } };
   $$('[data-view]', box).forEach((b) => (b.onclick = () => openDocFile(u.id, b.dataset.view)));
-  $$('[data-ok]', box).forEach((b) => (b.onclick = () => docAct(b.dataset.ok, { status: 'aprobado', expires: $(`[data-exp="${b.dataset.ok}"]`, box).value || undefined }, 'Documento aprobado')));
+  $$('[data-ok]', box).forEach((b) => (b.onclick = async () => { const d = p.docs[b.dataset.ok] || {}; if (d.check && !d.check.ok && !(await confirmDlg(`La revisión automática encontró: ${d.check.issues.join('; ')}. ¿Aprobar de todos modos?`))) return; docAct(b.dataset.ok, { status: 'aprobado', expires: $(`[data-exp="${b.dataset.ok}"]`, box).value || undefined }, 'Documento aprobado'); }));
+  // revisión de la CSF bajo su renglón
+  if (p.docs.csf?.check) $('[data-doc="csf"]', box)?.closest('.doc-row')?.insertAdjacentHTML('afterend', `<div style="margin:-4px 0 8px 26px">${csfCheckHtml(p.docs.csf.check)} <button type="button" class="btn sm ghost" id="csfRe">Revisar de nuevo</button></div>`);
+  $('#csfRe', box)?.addEventListener('click', () => docAct('csf', { recheck: true }, 'CSF revisada de nuevo'));
+  if (p.blockers?.length) $('[data-doc]', box)?.closest('fieldset')?.insertAdjacentHTML('afterbegin', `<div class="offline-bar" style="margin-bottom:8px"><b>Para firmar el contrato y recibir servicios falta:</b> ${p.blockers.map(esc).join(', ')}</div>`);
   $$('[data-no]', box).forEach((b) => (b.onclick = () => { const note = prompt('Motivo del rechazo (lo verá el colaborador):', 'Ilegible, vuelve a subirlo'); if (note !== null) docAct(b.dataset.no, { status: 'rechazado', note }, 'Documento rechazado'); }));
   $$('[data-up]', box).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; try { docAct(i.dataset.up, { file: await fileToDataUrl(f), expires: $(`[data-exp="${i.dataset.up}"]`, box).value || undefined }, 'Documento guardado'); } catch (e) { toast(e.message, 'bad'); } }));
   contractBox($('#ctBox', box), u);
@@ -4640,7 +4667,7 @@ async function viewUsers(v) {
       ? `<div class="empty">${icon('users')}<p><b>Sin resultados</b><br>Prueba con otro nombre o quita los filtros.</p></div>`
       : `<div class="table-wrap desk-only"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Teléfono</th><th>Vehículo</th><th class="r">Entregas</th><th>Último acceso</th><th>Estado</th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="click" data-id="${u.id}"><td><div class="ucell">${avatar(u)}<div><b>${esc(u.name)}</b>${u.id === me.id ? ' <small class="muted">(tú)</small>' : ''}<br><small class="muted">${esc(u.email)}</small></div></div></td>
-          <td>${roleChip(roleOf(u), u)}${u.team_size ? `<br><small class="muted">${icon('users')} ${u.team_size} a cargo</small>` : ''}${u.reports_to_name ? `<br><small class="muted">A cargo de ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
+          <td>${roleChip(roleOf(u), u)}${u.suspended_reason ? `<br><span class="chip off" title="${esc(u.suspended_reason)}">⛔ suspendido</span>` : ''}${u.team_size ? `<br><small class="muted">${icon('users')} ${u.team_size} a cargo</small>` : ''}${u.reports_to_name ? `<br><small class="muted">A cargo de ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
           <td class="r num">${u.role === 'repartidor' ? u.delivered : '—'}</td><td><small>${ago(u.last_login)}</small></td><td>${statusBadge(u)}</td></tr>`).join('')}
         </tbody></table></div>
         <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(roleOf(u), u)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;

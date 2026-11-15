@@ -193,7 +193,7 @@ app.post(
 );
 
 // ---------- Usuarios (administración) ----------
-const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id, u.reports_to,
+const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id, u.reports_to, u.suspended_reason,
   (SELECT s2.name FROM users s2 WHERE s2.id = u.reports_to) reports_to_name, (SELECT COUNT(*) FROM users t WHERE t.reports_to = u.id AND t.active = 1 AND t.deleted_at IS NULL) team_size,
   u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
 
@@ -1118,11 +1118,21 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
 const PROFILE_TXT = ['hire_type', 'hire_date', 'end_date', 'birth_date', 'address', 'emergency_name', 'emergency_phone', 'rfc', 'curp', 'nss',
   'bank_name', 'clabe', 'account_number', 'account_holder', 'pay_period', 'notes',
   'persona_tipo', 'regimen_fiscal', 'id_tipo', 'id_numero', 'rep_legal_nombre', 'escritura_dato', 'vehiculo_tipo', 'vehiculo_marca_modelo', 'vehiculo_placas',
-  'licencia_numero', 'licencia_vigencia', 'seguro_aseguradora', 'seguro_poliza'];
+  'licencia_numero', 'licencia_vigencia', 'seguro_aseguradora', 'seguro_poliza', 'tiene_empleados'];
 // Cumplimiento mínimo para dar de alta a personal (sobre todo externo)
-const STAFF_DOCS = [['ine', 'INE / identificación oficial'], ['domicilio', 'Comprobante de domicilio'], ['csf', 'Constancia de situación fiscal (RFC)'],
-  ['curp', 'CURP'], ['licencia', 'Licencia de manejo vigente'], ['antecedentes', 'Carta de no antecedentes penales'], ['contrato', 'Contrato / convenio firmado'],
-  ['banco', 'Estado de cuenta (CLABE)'], ['seguro', 'Seguro de la unidad (si usa vehículo propio)']];
+const kyc = require('./kyc');
+const STAFF_DOCS = kyc.DOCS;
+// documentos obligatorios de una persona: los de identidad, fiscales y bancarios; los del vehículo si reparte; REPSE si es persona moral o tiene empleados
+function requiredDocs(userId) {
+  const u = db.prepare('SELECT role, can_deliver FROM users WHERE id=?').get(userId) || {};
+  const p = db.prepare('SELECT persona_tipo, tiene_empleados FROM staff_profiles WHERE user_id=?').get(userId) || {};
+  return kyc.required({ conduce: u.role === 'repartidor' || !!u.can_deliver, repse: /moral/i.test(p.persona_tipo || '') || p.tiene_empleados === 'si' });
+}
+// lo que impide firmar el contrato u operar: documentos obligatorios sin aprobar o vencidos
+function docBlockers(userId) {
+  const docs = docsOf(userId); const t = today();
+  return requiredDocs(userId).map((k) => { const d = docs[k] || {}; const l = STAFF_DOCS.find(([x]) => x === k)[1]; if (!d.ok) return `${l}${d.status === 'pendiente' ? ' (por revisar)' : d.status === 'rechazado' ? ' (rechazado)' : ''}`; if (d.expires && d.expires < t) return `${l} (vencido el ${d.expires})`; return null; }).filter(Boolean);
+}
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/;
 const CURP_RE = /^[A-Z][AEIOUX][A-Z]{2}\d{6}[HM][A-Z]{2}[B-DF-HJ-NP-TV-Z]{3}[A-Z0-9]\d$/;
 function clabeOk(c) {
@@ -1135,12 +1145,12 @@ function profileOf(userId) {
   const p = db.prepare('SELECT * FROM staff_profiles WHERE user_id=?').get(userId) || { user_id: Number(userId), hire_type: 'externo', pay_per_delivery: 0, pay_per_failed: 0, pay_period: 'semanal' };
   const docs = (() => { try { return JSON.parse(p.docs_json || '{}'); } catch { return {}; } })();
   const today0 = today();
-  // la licencia solo se pide a repartidores; el seguro de unidad es opcional
-  const role = db.prepare('SELECT role FROM users WHERE id=?').get(userId)?.role;
-  const need = STAFF_DOCS.filter(([k]) => k !== 'seguro' && (k !== 'licencia' || role === 'repartidor'));
+  // obligatorios según su perfil (reparte, persona moral o con empleados)
+  const reqK = requiredDocs(userId);
+  const need = STAFF_DOCS.filter(([k]) => reqK.includes(k));
   const missing = need.filter(([k]) => !docs[k]?.ok).map(([, l]) => l);
   const expired = STAFF_DOCS.filter(([k]) => docs[k]?.ok && docs[k]?.expires && docs[k].expires < today0).map(([, l]) => l);
-  return { ...p, docs: publicDocs(docs), doc_list: STAFF_DOCS, missing, expired, complete: !missing.length && !expired.length,
+  return { ...p, docs: publicDocs(docs), doc_list: STAFF_DOCS, required: reqK, missing, expired, complete: !missing.length && !expired.length, blockers: docBlockers(userId),
     pending_docs: Object.values(docs).filter((d) => d.status === 'pendiente').length };
 }
 app.get('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
@@ -1321,13 +1331,13 @@ function contractVars(uid) {
   };
 }
 const contractRow = (c) => c && ({ id: c.id, folio: c.folio, status: c.status, issued_at: c.issued_at, signed_at: c.signed_at, otp_channel: c.otp_channel,
-  pdf: !!c.pdf_file, pdf_sha256: c.pdf_sha256, nom151_status: c.nom151_status, nom151_folio: c.nom151_folio, nom151_error: c.nom151_error, nom151_at: c.nom151_at,
+  pdf: !!c.pdf_file, pdf_sha256: c.pdf_sha256, identity_ok_at: c.identity_ok_at, is_test: !!c.is_test, nom151_status: c.nom151_status, nom151_folio: c.nom151_folio, nom151_error: c.nom151_error, nom151_at: c.nom151_at,
   link: c.status === 'enviado' ? `${notify.baseUrl(getSettings())}/firma/${c.token}` : null, meta: (() => { try { return JSON.parse(c.meta_json || 'null'); } catch { return null; } })() });
 app.get('/api/users/:id/contract', auth('admin'), wrap((req, res) => {
   const u = db.prepare('SELECT id FROM users WHERE id=?').get(Number(req.params.id));
   if (!u) throw new HttpError(404, 'No encontrado');
   const vars = contractVars(u.id);
-  res.json({ vars, missing: contract.missingVars(vars), psc: !!getSettings().psc_url, contracts: db.prepare('SELECT * FROM contracts WHERE user_id=? ORDER BY id DESC').all(u.id).map(contractRow) });
+  res.json({ vars, missing: contract.missingVars(vars), blockers: docBlockers(u.id), psc: !!getSettings().psc_url, contracts: db.prepare('SELECT * FROM contracts WHERE user_id=? ORDER BY id DESC').all(u.id).map(contractRow) });
 }));
 // genera el contrato con sus datos y le envía el enlace para firmarlo (SMS y correo)
 app.post('/api/users/:id/contract', auth('admin'), wrap(async (req, res) => {
@@ -1336,6 +1346,8 @@ app.post('/api/users/:id/contract', auth('admin'), wrap(async (req, res) => {
   const vars = contractVars(u.id);
   const miss = contract.missingVars(vars);
   if (miss.length) throw new HttpError(400, `Completa en el expediente: ${miss.join(', ')}`);
+  const blk = docBlockers(u.id);
+  if (blk.length) throw new HttpError(400, `Faltan documentos aprobados: ${blk.join(', ')}`);
   const s = getSettings();
   const html = contract.fill(s.contract_template || null, vars);
   const folio = `CT-${today().replace(/-/g, '')}-${String(u.id).padStart(4, '0')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
@@ -1395,6 +1407,19 @@ app.get('/api/contracts/:id/pdf', auth('admin'), wrap((req, res) => {
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="${c.folio}.pdf"`);
   res.sendFile(path.join(DOCS_DIR, c.pdf_file));
+}));
+app.get('/api/contracts/:id/kyc/:k', auth('admin'), wrap((req, res) => {
+  const c = db.prepare('SELECT kyc_json FROM contracts WHERE id=?').get(Number(req.params.id));
+  const f = (() => { try { return JSON.parse(c?.kyc_json || '{}'); } catch { return {}; } })()[req.params.k];
+  if (!f) throw new HttpError(404, 'Sin archivo');
+  res.sendFile(path.join(DOCS_DIR, f));
+}));
+app.post('/api/contracts/:id/identity', auth('admin'), wrap((req, res) => {
+  const c = db.prepare('SELECT c.*, u.name FROM contracts c JOIN users u ON u.id=c.user_id WHERE c.id=?').get(Number(req.params.id));
+  if (!c?.kyc_json) throw new HttpError(409, 'El contrato aún no está firmado');
+  db.prepare("UPDATE contracts SET identity_ok_by=?, identity_ok_at=datetime('now') WHERE id=?").run(req.user.id, c.id);
+  audit(req, 'contrato.identidad', `${c.name}: identidad verificada (selfie contra INE) en ${c.folio}`);
+  res.json({ ok: true });
 }));
 app.get('/api/contracts/:id/nom151', auth('admin'), wrap((req, res) => {
   const c = db.prepare('SELECT * FROM contracts WHERE id=?').get(Number(req.params.id));
@@ -1527,8 +1552,8 @@ function saveDocs(userId, docs) {
   db.prepare(`INSERT INTO staff_profiles (user_id, docs_json, updated_at) VALUES (?, ?, datetime('now'))
     ON CONFLICT(user_id) DO UPDATE SET docs_json=excluded.docs_json, updated_at=datetime('now')`).run(userId, JSON.stringify(docs));
 }
-const docListFor = (role) => STAFF_DOCS.map(([k, l]) => ({ key: k, label: l, optional: k === 'seguro' || (k === 'licencia' && role !== 'repartidor') }));
-const publicDocs = (docs) => Object.fromEntries(Object.entries(docs).map(([k, d]) => [k, { ok: !!d.ok, status: d.status || (d.ok ? 'aprobado' : null), expires: d.expires || null, has_file: !!d.file, uploaded_at: d.uploaded_at || null, uploaded_by: d.uploaded_by || null, note: d.note || null, mime: d.file ? (d.file.endsWith('.pdf') ? 'pdf' : 'img') : null }]));
+const docListFor = (userId) => { const r = requiredDocs(userId); return STAFF_DOCS.filter(([k]) => k !== 'contrato').map(([k, l]) => ({ key: k, label: l, optional: !r.includes(k), expiring: kyc.EXPIRING.includes(k) })); };
+const publicDocs = (docs) => Object.fromEntries(Object.entries(docs).map(([k, d]) => [k, { ok: !!d.ok, status: d.status || (d.ok ? 'aprobado' : null), expires: d.expires || null, has_file: !!d.file, check: d.check || null, override: !!d.override, uploaded_at: d.uploaded_at || null, uploaded_by: d.uploaded_by || null, note: d.note || null, mime: d.file ? (d.file.endsWith('.pdf') ? 'pdf' : 'img') : null }]));
 function putDoc(req, userId, doc, { admin }) {
   if (!STAFF_DOCS.some(([k]) => k === doc)) throw new HttpError(400, 'Documento no válido');
   const b = req.body || {};
@@ -1548,27 +1573,45 @@ function putDoc(req, userId, doc, { admin }) {
   if (admin && ['aprobado', 'rechazado'].includes(b.status)) {
     if (!d.file && b.status === 'aprobado' && !b.file) d.status = 'aprobado';
     d.status = b.status; d.ok = b.status === 'aprobado';
+    d.override = b.status === 'aprobado' && d.check && !d.check.ok ? true : undefined;
     d.note = b.status === 'rechazado' ? String(b.note || '').trim().slice(0, 200) || 'Rechazado: vuelve a subirlo' : null;
   }
   docs[doc] = d;
   saveDocs(userId, docs);
   return d;
 }
+// revisa la CSF recién subida contra el expediente y guarda el resultado en el documento
+async function csfReview(userId) {
+  const docs = docsOf(userId); const d = docs.csf;
+  if (!d?.file) return null;
+  if (!/\.pdf$/i.test(d.file)) { d.check = { ok: false, manual: true, issues: ['Es una foto: súbela en PDF (descárgala del portal del SAT) o revísala a mano'] }; }
+  else {
+    const p = db.prepare('SELECT rfc, account_holder FROM staff_profiles WHERE user_id=?').get(userId) || {};
+    const u = db.prepare('SELECT name FROM users WHERE id=?').get(userId);
+    d.check = await kyc.checkCsf(fs.readFileSync(path.join(DOCS_DIR, d.file)), { rfc: p.rfc, holder: p.account_holder, name: u?.name, today: today() });
+  }
+  d.check.at = new Date().toISOString();
+  saveDocs(userId, { ...docsOf(userId), csf: d });
+  return d.check;
+}
 // Colaborador: sus documentos
 app.get('/api/me/documents', auth(), wrap((req, res) => {
-  res.json({ doc_list: docListFor(req.user.role), docs: publicDocs(docsOf(req.user.id)) });
+  res.json({ doc_list: docListFor(req.user.id), docs: publicDocs(docsOf(req.user.id)), blockers: docBlockers(req.user.id), suspended: db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(req.user.id)?.suspended_reason || null });
 }));
-app.post('/api/me/documents/:doc', auth(), wrap((req, res) => {
+app.post('/api/me/documents/:doc', auth(), wrap(async (req, res) => {
   if (!req.body?.file) throw new HttpError(400, 'Adjunta la foto o el PDF del documento');
-  const d = putDoc(req, req.user.id, req.params.doc, { admin: false });
+  let d = putDoc(req, req.user.id, req.params.doc, { admin: false });
+  if (req.params.doc === 'csf') { await csfReview(req.user.id); d = docsOf(req.user.id).csf; }
   audit(req, 'personal.documento', `${req.user.name} subió ${STAFF_DOCS.find(([k]) => k === req.params.doc)[1]}`);
   res.json(publicDocs({ [req.params.doc]: d })[req.params.doc]);
 }));
 // Administrador: subir, aprobar o rechazar
-app.post('/api/users/:id/documents/:doc', auth('admin'), wrap((req, res) => {
+app.post('/api/users/:id/documents/:doc', auth('admin'), wrap(async (req, res) => {
   const u = db.prepare('SELECT id, name FROM users WHERE id=?').get(req.params.id);
   if (!u) throw new HttpError(404, 'No encontrado');
-  const d = putDoc(req, u.id, req.params.doc, { admin: true });
+  let d = putDoc(req, u.id, req.params.doc, { admin: true });
+  if (req.params.doc === 'csf' && (req.body?.file || req.body?.recheck)) { await csfReview(u.id); d = docsOf(u.id).csf; }
+  if (d.ok) liftDocSuspension(u.id);
   audit(req, 'personal.documento', `${u.name}: ${STAFF_DOCS.find(([k]) => k === req.params.doc)[1]} ${d.status || ''}`);
   res.json(publicDocs({ [req.params.doc]: d })[req.params.doc]);
 }));
@@ -3239,6 +3282,42 @@ async function pinCheck({ dry = false } = {}) {
   pinJob.last = { at: new Date().toISOString(), ...res };
   return res;
 }
+// ---------- Vencimiento de documentos: aviso 15 días antes y suspensión al vencer (se levanta sola al aprobar el nuevo) ----------
+function liftDocSuspension(uid) {
+  const u = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(uid);
+  if (!u?.suspended_reason || !u.suspended_reason.startsWith('Documento vencido')) return;
+  const t = today(); const docs = docsOf(uid);
+  const still = requiredDocs(uid).filter((k) => kyc.EXPIRING.includes(k) && docs[k]?.expires && docs[k].expires < t);
+  if (!still.length) { db.prepare('UPDATE users SET suspended_reason=NULL WHERE id=?').run(uid); db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('personal.reactivar', `Cuenta reactivada: documentos al corriente (usuario ${uid})`); }
+}
+async function docExpiryJob() {
+  const s = getSettings(); const t = today();
+  const soon = new Date(Date.now() + 15 * 864e5).toLocaleDateString('en-CA');
+  for (const u of db.prepare("SELECT id, name, phone, email, suspended_reason FROM users WHERE active=1 AND deleted_at IS NULL AND (role='repartidor' OR can_deliver=1)").all()) {
+    const docs = docsOf(u.id); let changed = false;
+    const req = requiredDocs(u.id).filter((k) => kyc.EXPIRING.includes(k));
+    const expired = [];
+    for (const k of req) {
+      const d = docs[k]; if (!d?.expires) continue;
+      const l = STAFF_DOCS.find(([x]) => x === k)[1];
+      if (d.expires < t) expired.push(l);
+      else if (d.expires <= soon && d.alerted !== d.expires) {
+        const msg = `${s.company_name || 'Sovime'}: tu ${l.toLowerCase()} vence el ${d.expires}. Sube la renovación en la app (Mi perfil → Mis documentos) antes de esa fecha para seguir recibiendo servicios.`;
+        if (s.practice_mode !== '1') {
+          if (u.phone) await notify.sendSMS(s, notify.phoneE164(u.phone), msg).catch(() => null);
+          if (u.email) await notify.sendEmail(s, u.email, `Tu ${l.toLowerCase()} vence pronto`, msg).catch(() => null);
+        }
+        d.alerted = d.expires; changed = true;
+        db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('personal.vencimiento', `${u.name}: aviso de vencimiento de ${l} (${d.expires})`);
+      }
+    }
+    if (changed) saveDocs(u.id, docs);
+    if (expired.length && !u.suspended_reason) {
+      db.prepare('UPDATE users SET suspended_reason=? WHERE id=?').run(`Documento vencido: ${expired.join(', ')}`, u.id);
+      db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('personal.suspender', `${u.name}: suspendido por documento vencido (${expired.join(', ')})`);
+    } else if (!expired.length) liftDocSuspension(u.id);
+  }
+}
 async function geocodeAddress(args) {
   const r = await geocodeAddressRaw(args);
   if (r && r.quality === 'exacta') return r;
@@ -4393,6 +4472,8 @@ function reactivateOrder(req, orderId, body) {
 }
 function assignOrdersTo(req, drv, ids, date) {
   {
+    const susp = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(drv.id)?.suspended_reason;
+    if (susp) throw new HttpError(409, `${drv.name} no puede recibir servicios: ${susp}`);
     const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
     const skipped = [];
     const take = [];
@@ -5636,6 +5717,8 @@ if (require.main === module) {
   setInterval(neighborRefine, 6 * 3600000).unref();
   setTimeout(() => pinCheck(), 300000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
+  setTimeout(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 240000);
+  setInterval(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 6 * 3600000).unref();
   setInterval(() => { try { db.exec('PRAGMA optimize'); } catch {} }, 24 * 3600000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
@@ -5652,5 +5735,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob };
 module.exports = app;

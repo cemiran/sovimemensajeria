@@ -518,7 +518,10 @@ db.exec(`CREATE TABLE IF NOT EXISTS contracts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_contracts_user ON contracts(user_id, id);`);
-addCols('contracts', [['is_test', 'INTEGER NOT NULL DEFAULT 0']]);
+addCols('contracts', [['is_test', 'INTEGER NOT NULL DEFAULT 0'], ['identity_ok_by', 'INTEGER REFERENCES users(id)'], ['identity_ok_at', 'TEXT']]);
+// prestador con empleados propios (pide REPSE) y suspensión por documentos vencidos
+addCols('staff_profiles', [['tiene_empleados', 'TEXT']]);
+addCols('users', [['suspended_reason', 'TEXT']]);
 ins.run('psc_name', ''); ins.run('psc_url', ''); ins.run('psc_api_key', ''); ins.run('contract_company_signer', 'C. César Andrés Miranda Valadez');
 // Capital Humano: pagos, anticipos, bonos y descuentos de cada colaborador
 db.exec(`CREATE TABLE IF NOT EXISTS staff_payments (
