@@ -57,10 +57,16 @@ async function route(points, { steps = false } = {}) {
   };
 }
 
+// punto de calle más cercano a un pin (y a cuántos metros está)
+async function nearest(p) {
+  const j = await call(`/nearest/v1/driving/${coord(p)}?number=1`, 5000);
+  const w = j?.waypoints?.[0];
+  return w ? { lat: w.location[1], lng: w.location[0], m: w.distance } : null;
+}
 async function status() {
   if (!BASE) return { configured: false };
   const j = await call('/nearest/v1/driving/-117.0382,32.5149', 5000);
   return { configured: true, ok: !!j, last_error: lastError, ...stats };
 }
 
-module.exports = { enabled: () => !!BASE && Date.now() >= downUntil, table, route, status };
+module.exports = { enabled: () => !!BASE && Date.now() >= downUntil, table, route, nearest, status };

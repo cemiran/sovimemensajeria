@@ -2943,6 +2943,73 @@ function neighborRefine() {
   finally { nbJob.running = false; nbJob.last = { at: new Date().toISOString(), ...out }; }
   return out;
 }
+// ---------- Revisión de pins (cada 6 h): cada cliente en su ciudad, en su CP y sobre una calle ----------
+const PIN_HUMAN = new Set(['manual', 'gps_entrega', 'repartidor']); // los confirmó una persona o la entrega: no se tocan
+const cityBox = (city) => CITY_CENTERS[normCity(osmCity(city))] || null;
+const inCityBox = (p, c) => Math.abs(p.lat - c.lat) < c.r && Math.abs(p.lng - c.lng) < c.r * 1.2;
+const zipAreaOf = (zip) => { const z = String(zip || '').replace(/\D/g, '').slice(0, 5); return z.length === 5 ? db.prepare('SELECT * FROM gm_zip WHERE zip=? AND lat IS NOT NULL').get(z) : null; };
+// ¿el pin está claramente mal? (devuelve el motivo)
+function pinProblem(c) {
+  if (c.lat == null || PIN_HUMAN.has(c.geo_quality)) return null;
+  if (c.lat < 30 || c.lat > 33 || c.lng < -117.4 || c.lng > -114.3) return 'fuera de la región';
+  const z = zipAreaOf(c.zip);
+  if (z && gmaps.inZip(c, z, 0.6)) return null; // coincide con su código postal: se respeta
+  const own = cityBox(c.city);
+  if (!own || inCityBox(c, own)) return null;
+  const other = Object.entries(CITY_CENTERS).find(([, b]) => inCityBox(c, b));
+  if (other) return `en otra ciudad (${other[0]})`;
+  if (haversine(c, own) > 60) return 'muy lejos de su ciudad';
+  return null;
+}
+// mejor punto de reemplazo dentro de su ciudad: vecinos de su calle, centro de su CP (si es de su ciudad), centro de su colonia o de la ciudad
+function pinReplacement(c) {
+  const own = cityBox(c.city);
+  const ok = (p) => p && (!own || inCityBox(p, own));
+  const nb = neighborPin(c); if (ok(nb)) return { lat: nb.lat, lng: nb.lng, quality: 'calle', how: 'vecinos de su calle' };
+  const z = zipAreaOf(c.zip); if (ok(z)) return { lat: z.lat, lng: z.lng, quality: 'cp', how: 'centro de su CP' };
+  const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+  const cc = colA ? colonyCenter(colA, c.city, c.id) : null; if (ok(cc)) return { lat: cc.lat, lng: cc.lng, quality: 'colonia', how: 'centro de su colonia' };
+  if (own) return { lat: own.lat, lng: own.lng, quality: 'ciudad', how: 'centro de su ciudad' };
+  return null;
+}
+const pinJob = { running: false, last: null };
+async function pinCheck({ dry = false } = {}) {
+  if (pinJob.running) return { busy: true };
+  pinJob.running = true;
+  const out = { revisados: 0, mal_ubicados: 0, corregidos: 0, lejos_de_calle: 0, a_la_calle: 0, motivos: {}, prev: [] };
+  try {
+    const rows = db.prepare('SELECT id, address, colonia, city, zip, lat, lng, geo_quality FROM customers WHERE lat IS NOT NULL').all();
+    const up = db.prepare('UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND lat=? AND lng=?');
+    for (const c of rows) {
+      out.revisados++;
+      const why = pinProblem(c);
+      if (why) {
+        out.mal_ubicados++; out.motivos[why] = (out.motivos[why] || 0) + 1;
+        const r = pinReplacement(c);
+        if (r && !dry && up.run(r.lat, r.lng, r.quality, c.id, c.lat, c.lng).changes) { out.corregidos++; out.prev.push({ id: c.id, lat: c.lat, lng: c.lng, q: c.geo_quality, why, how: r.how }); }
+        else if (r && dry) out.corregidos++;
+        continue;
+      }
+      // aproximados: si quedaron lejos de toda calle (en un cerro, un baldío o el mar), se pasan a la calle más cercana
+      if (APPROX_GEO.includes(c.geo_quality) && osrm.enabled()) {
+        const n = await osrm.nearest(c);
+        if (n && n.m > 300 && n.m < 5000) {
+          out.lejos_de_calle++;
+          if (!dry && up.run(n.lat, n.lng, c.geo_quality, c.id, c.lat, c.lng).changes) { out.a_la_calle++; out.prev.push({ id: c.id, lat: c.lat, lng: c.lng, q: c.geo_quality, why: `a ${Math.round(n.m)} m de la calle`, how: 'calle más cercana' }); }
+          else if (dry) out.a_la_calle++;
+        }
+      }
+    }
+    if (!dry && out.prev.length) {
+      fs.writeFileSync(path.join(DATA_DIR, `pins_prev_${today()}.json`), JSON.stringify(out.prev));
+      db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `Revisión de pins: ${out.corregidos} mal ubicados corregidos (${Object.entries(out.motivos).map(([k, v]) => k + ': ' + v).join(', ')}); ${out.a_la_calle} aproximados movidos a la calle más cercana`.slice(0, 900));
+    }
+  } catch (e) { console.error('pinCheck', e.message); }
+  finally { pinJob.running = false; }
+  const { prev, ...res } = out; void prev;
+  pinJob.last = { at: new Date().toISOString(), ...res };
+  return res;
+}
 async function geocodeAddress(args) {
   const r = await geocodeAddressRaw(args);
   if (r && r.quality === 'exacta') return r;
@@ -5337,6 +5404,8 @@ if (require.main === module) {
   setInterval(() => routedRefine(), 10 * 60000).unref();
   setTimeout(neighborRefine, 120000);
   setInterval(neighborRefine, 6 * 3600000).unref();
+  setTimeout(() => pinCheck(), 300000);
+  setInterval(() => pinCheck(), 6 * 3600000).unref();
   setInterval(() => { try { db.exec('PRAGMA optimize'); } catch {} }, 24 * 3600000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
@@ -5353,5 +5422,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck };
 module.exports = app;
