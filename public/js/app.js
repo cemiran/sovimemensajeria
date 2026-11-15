@@ -723,12 +723,12 @@ const logo = (cls = '') => HAS_LOGO_IMG
   ? `<img class="logo-img ${cls}" src="/img/logo.png" alt="Sovime Mensajería" />`
   : `<span class="wordmark ${cls}" role="img" aria-label="Sovime Mensajería"><span class="wm-top"><b>S</b>ovime</span><span class="wm-sub">Mensajería</span></span>`;
 
-const ROLE = { admin: 'Administrador', supervisor: 'Supervisor', despachador: 'Despachador', repartidor: 'Repartidor' };
+const ROLE = { admin: 'Administrador', supervisor: 'Coordinador', despachador: 'Despachador', repartidor: 'Repartidor' };
 // el supervisor por ciudad se guarda como despachador con sus ciudades
 const roleOf = (u) => (u?.role === 'despachador' && u.cities ? 'supervisor' : u?.role);
 const ROLE_DESC = {
   admin: 'Control total: usuarios, configuración, operación y reportes.',
-  supervisor: 'Supervisa una o varias ciudades: ve y opera solo sus clientes, pedidos, rutas y análisis.',
+  supervisor: 'Coordina una o varias ciudades: ve y opera solo sus clientes, pedidos, rutas y análisis.',
   despachador: 'Opera el día: pedidos, rutas, inventario, clientes y análisis.',
   repartidor: 'App móvil: su ruta, carga por escaneo y evidencias de entrega.',
 };
@@ -1708,7 +1708,7 @@ async function viewRoutes(v) {
       const done = r.delivered + r.failed;
       return `<div class="card" style="border-left:5px solid ${ROUTE_COLORS[i % ROUTE_COLORS.length]}">
         <div class="row between"><b>${esc(r.driver_name || 'Sin repartidor')}</b>${badge(r.status)}</div>
-        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num" ${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? `style="color:var(--bad);font-weight:700" title="Excede la jornada de ${fmtN((Number(SETTINGS.workday_minutes) || 540) / 60, 1)} h: reparte paradas con otro repartidor u otro día"` : ''}>⏱️ ${fmtN(r.est_minutes / 60, 1)} h${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? ' ⚠️' : ''}</small>${r.original_distance_km ? (() => { const sv = ((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100; return sv >= 0.5 ? `<small class="num" style="color:var(--ok)" title="Ahorro contra el orden original">−${fmtN(sv, 0)}%</small>` : sv <= -0.5 ? `<small class="num" style="color:var(--warn)" title="Más km que el plan original: se agregaron o movieron paradas">+${fmtN(-sv, 0)}%</small>` : ''; })() : ''}</div>
+        <div class="row" style="margin:6px 0;gap:14px"><small class="num">📦 ${r.stops} paradas</small><small class="num">🛣️ ${fmtN(r.distance_km, 1)} km</small><small class="num" ${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? `style="color:var(--bad);font-weight:700" title="Pasa del tiempo de ruta sugerido de ${fmtN((Number(SETTINGS.workday_minutes) || 540) / 60, 1)} h: reparte paradas con otro repartidor u otro día"` : ''}>⏱️ ${fmtN(r.est_minutes / 60, 1)} h${r.est_minutes > (Number(SETTINGS.workday_minutes) || 540) ? ' ⚠️' : ''}</small>${r.original_distance_km ? (() => { const sv = ((r.original_distance_km - r.distance_km) / r.original_distance_km) * 100; return sv >= 0.5 ? `<small class="num" style="color:var(--ok)" title="Ahorro contra el orden original">−${fmtN(sv, 0)}%</small>` : sv <= -0.5 ? `<small class="num" style="color:var(--warn)" title="Más km que el plan original: se agregaron o movieron paradas">+${fmtN(-sv, 0)}%</small>` : ''; })() : ''}</div>
         <div class="progress"><i style="width:${r.stops ? (r.delivered / r.stops) * 100 : 0}%;background:var(--ok)"></i><i style="width:${r.stops ? (r.failed / r.stops) * 100 : 0}%;background:var(--bad)"></i></div>
         <div class="row between" style="margin-top:8px"><small class="muted">${done}/${r.stops} visitadas · ${r.loaded} en vehículo</small><button class="btn sm" data-route="${r.id}">Ver detalle</button></div></div>`;
     }).join('') || '<div class="card empty">No hay rutas para esta fecha.<br>Usa <b>Auto-planificar</b> para repartir los pedidos entre tus repartidores.</div>'}</div>
@@ -2123,7 +2123,7 @@ async function viewCompliance(v) {
 
   if (tab === 'personal') {
     const vehicles = await GET('/api/vehicles');
-    box.innerHTML = `<div class="card"><h2>Recurso confiable y capacitación</h2><div class="table-wrap"><table><thead><tr><th>Colaborador</th><th>Certificado</th><th>Vigencia</th><th>Capacitaciones</th><th>Unidad</th></tr></thead><tbody>
+    box.innerHTML = `<div class="card"><h2>Recurso confiable y capacitación</h2><div class="table-wrap"><table><thead><tr><th>Prestador</th><th>Certificado</th><th>Vigencia</th><th>Capacitaciones</th><th>Unidad</th></tr></thead><tbody>
       ${c.personnel_full.filter((p) => p.active).map((p) => `<tr class="click" data-p="${p.id}"><td>${avatar(p)} <b>${esc(p.name)}</b><br><small class="muted">${ROLE[p.role]}</small></td>
         <td>${p.trusted_cert_folio ? `<span class="mono">${esc(p.trusted_cert_folio)}</span><br><small class="muted">${esc(p.trusted_cert_issuer || '')}</small> ${docLink(p.trusted_cert_file, 'Ver')}` : '<small class="muted">Sin certificado</small>'}</td>
         <td>${docChip(p.trusted_state)}${p.trusted_cert_expires ? `<br><small class="muted">${fmtD(p.trusted_cert_expires)}</small>` : ''}</td>
@@ -2227,7 +2227,7 @@ async function openCertificate(x) {
         <td>${esc(v.insurer || '—')}${v.policy_no ? `<br><small>Póliza ${esc(v.policy_no)}</small>` : ''}<br><small>${DOC_STATE[v.insurance_state][0]}${v.insurance_expires ? ' · ' + fmtD(v.insurance_expires) : ''}</small></td>
         <td>${esc(v.fumigation_provider || '—')}${v.fumigation_cert ? `<br><small>Cert. ${esc(v.fumigation_cert)}</small>` : ''}<br><small>${DOC_STATE[v.fumigation_state][0]}${v.fumigation_expires ? ' · ' + fmtD(v.fumigation_expires) : ''}</small></td>
         <td class="c">${yes(v.branded)}</td><td>${v.refrigerated ? `Refrigerada ${fmtRange(v.temp_min, v.temp_max)}${v.thermometer_id ? `<br><small>Termómetro ${esc(v.thermometer_id)}${v.thermometer_calibrated ? ' · calibrado a ' + fmtD(v.thermometer_calibrated) : ''}</small>` : ''}` : 'Ambiente'}</td></tr>`).join('')}</tbody></table>
-    <h3>Personal</h3><table class="cert-table"><thead><tr><th>Colaborador</th><th>Recurso confiable</th><th>Capacitación</th></tr></thead><tbody>
+    <h3>Personal</h3><table class="cert-table"><thead><tr><th>Prestador</th><th>Recurso confiable</th><th>Capacitación</th></tr></thead><tbody>
       ${d.personnel.map((p) => `<tr><td>${esc(p.name)}<br><small>${ROLE[p.role]}</small></td><td>${p.trusted_cert_folio ? `Folio ${esc(p.trusted_cert_folio)}${p.trusted_cert_issuer ? ' · ' + esc(p.trusted_cert_issuer) : ''}<br><small>${DOC_STATE[p.trusted_state][0]}${p.trusted_cert_expires ? ' · ' + fmtD(p.trusted_cert_expires) : ''}</small>` : '<small>Sin certificado</small>'}</td>
         <td><small>${p.trainings.map((x) => esc(x.name)).join(', ') || '—'}</small></td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</tbody></table>
     <h3>Prácticas aplicadas</h3>${d.practices.length ? `<ul class="cert-list">${d.practices.map((p) => `<li>${esc(p.label)}</li>`).join('')}</ul>` : '<p>—</p>'}
@@ -2601,7 +2601,7 @@ async function bulkAssign(v, kind) {
         const r = await POST('/api/routes/assign', body);
         if (Number(drv.value) === store.user.id && !store.user.can_deliver) { store.user = { ...store.user, can_deliver: 1 }; setTimeout(() => toast('Te asignaste pedidos: usa el botón "Modo repartidor" para verlos en tu ruta y entregarlos', ''), 1500); }
         toast(`${r.assigned} pedido(s) asignados a ${r.driver}${r.skipped.length ? ` · ${r.skipped.length} no se movieron` : ''}${r.unlocated ? ` · ${r.unlocated} sin ubicación en el mapa` : ''}`, r.skipped.length ? '' : 'ok');
-        if (r.over_workday) toast(`⚠️ La ruta de ${r.driver} ya suma ~${fmtN(r.est_minutes / 60, 1)} h: excede la jornada por ${r.over_workday} h. Pasa pedidos a otro repartidor u otro día.`, 'bad');
+        if (r.over_workday) toast(`⚠️ La ruta de ${r.driver} ya suma ~${fmtN(r.est_minutes / 60, 1)} h: pasa del tiempo de ruta sugerido por ${r.over_workday} h. Pasa pedidos a otro repartidor u otro día.`, 'bad');
         if (r.skipped.length) {
           const m = modal('Pedidos que no se movieron', `<div class="table-wrap"><table><tbody>${r.skipped.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>`, { footer: '<button class="btn primary" data-close>Entendido</button>', onClose: () => render() });
           void m;
@@ -3369,13 +3369,13 @@ async function staffProfile(box, u) {
     <fieldset><legend>${icon('key')} Datos bancarios</legend><div class="grid g2">
       <label class="f">Banco<input name="bank_name" value="${esc(p.bank_name)}" /></label><label class="f">Titular de la cuenta<input name="account_holder" value="${esc(p.account_holder)}" /></label>
       <label class="f">CLABE (18 dígitos)<input name="clabe" value="${esc(p.clabe)}" inputmode="numeric" maxlength="18" /></label><label class="f">Número de cuenta / tarjeta<input name="account_number" value="${esc(p.account_number)}" inputmode="numeric" /></label></div></fieldset>
-    <fieldset><legend>💲 Pago</legend><div class="grid g3">
-      <label class="f">Pago por entrega exitosa ($)<input type="number" name="pay_per_delivery" min="0" step="0.01" value="${p.pay_per_delivery || ''}" placeholder="0.00" /></label>
-      <label class="f">Pago por intento fallido ($)<input type="number" name="pay_per_failed" min="0" step="0.01" value="${p.pay_per_failed || ''}" placeholder="0.00" /></label>
-      <label class="f">Periodo de pago<select name="pay_period">${['semanal', 'quincenal', 'mensual'].map((x) => `<option ${p.pay_period === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
-      <div class="grid g2" style="margin-top:6px"><label class="f"><span>Por cada entrega de su personal a cargo ($) <small class="muted">(supervisor / líder)</small></span><input type="number" name="team_pay_per_delivery" min="0" step="0.01" value="${p.team_pay_per_delivery || ''}" placeholder="0.00" /></label>
-      <label class="f"><span>% de lo que gana su personal a cargo</span><input type="number" name="team_pay_pct" min="0" max="100" step="0.1" value="${p.team_pay_pct || ''}" placeholder="0" /></label></div>
-      <small class="muted">El personal a cargo se asigna en Usuarios → el supervisor → Personal a cargo. Lo que gana por su equipo se suma en Capital Humano.</small>
+    <fieldset><legend>💲 Tarifas y liquidación</legend><div class="grid g3">
+      <label class="f">Tarifa por entrega exitosa ($)<input type="number" name="pay_per_delivery" min="0" step="0.01" value="${p.pay_per_delivery || ''}" placeholder="0.00" /></label>
+      <label class="f">Tarifa por visita sin entrega ($)<input type="number" name="pay_per_failed" min="0" step="0.01" value="${p.pay_per_failed || ''}" placeholder="0.00" /></label>
+      <label class="f">Periodo de liquidación<select name="pay_period">${['semanal', 'quincenal', 'mensual'].map((x) => `<option ${p.pay_period === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+      <div class="grid g2" style="margin-top:6px"><label class="f"><span>Por cada entrega de los prestadores que coordina ($) <small class="muted">(coordinador)</small></span><input type="number" name="team_pay_per_delivery" min="0" step="0.01" value="${p.team_pay_per_delivery || ''}" placeholder="0.00" /></label>
+      <label class="f"><span>% de la liquidación de los prestadores que coordina</span><input type="number" name="team_pay_pct" min="0" max="100" step="0.1" value="${p.team_pay_pct || ''}" placeholder="0" /></label></div>
+      <small class="muted">Los prestadores que coordina se marcan en Usuarios → el coordinador → Prestadores que coordina. Lo que gana por ellos se suma a su liquidación.</small>
       <div class="row" style="margin-top:6px"><input type="date" id="payFrom" value="${first}" style="width:auto" /><input type="date" id="payTo" value="${today()}" style="width:auto" /><button type="button" class="btn sm" id="payGo">Calcular pago</button></div>
       <div id="payOut" class="muted" style="margin-top:6px"></div></fieldset>
     <fieldset><legend>${icon('shield')} Cumplimiento mínimo (documentos)</legend>
@@ -3419,7 +3419,7 @@ async function staffProfile(box, u) {
   if (p.docs.csf?.check) $('[data-doc="csf"]', box)?.closest('.doc-row')?.insertAdjacentHTML('afterend', `<div style="margin:-4px 0 8px 26px">${csfCheckHtml(p.docs.csf.check)} <button type="button" class="btn sm ghost" id="csfRe">Revisar de nuevo</button></div>`);
   $('#csfRe', box)?.addEventListener('click', () => docAct('csf', { recheck: true }, 'CSF revisada de nuevo'));
   if (p.blockers?.length) $('[data-doc]', box)?.closest('fieldset')?.insertAdjacentHTML('afterbegin', `<div class="offline-bar" style="margin-bottom:8px"><b>Para firmar el contrato y recibir servicios falta:</b> ${p.blockers.map(esc).join(', ')}</div>`);
-  $$('[data-no]', box).forEach((b) => (b.onclick = () => { const note = prompt('Motivo del rechazo (lo verá el colaborador):', 'Ilegible, vuelve a subirlo'); if (note !== null) docAct(b.dataset.no, { status: 'rechazado', note }, 'Documento rechazado'); }));
+  $$('[data-no]', box).forEach((b) => (b.onclick = () => { const note = prompt('Motivo del rechazo (lo verá el prestador):', 'Ilegible, vuelve a subirlo'); if (note !== null) docAct(b.dataset.no, { status: 'rechazado', note }, 'Documento rechazado'); }));
   $$('[data-up]', box).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; try { docAct(i.dataset.up, { file: await fileToDataUrl(f), expires: $(`[data-exp="${i.dataset.up}"]`, box).value || undefined }, 'Documento guardado'); } catch (e) { toast(e.message, 'bad'); } }));
   contractBox($('#ctBox', box), u);
   $('#pfSave', box).onclick = async (e) => {
@@ -3626,7 +3626,7 @@ function assignToDriver(drivers, products, preDriver) {
   const m = modal('Asignar inventario a repartidor', `<div class="stack">
     <div class="grid g2"><label class="f">Repartidor<select id="adDrv">${act.filter((d) => !d.open).map((d) => `<option value="${d.id}" ${d.id === preDriver ? 'selected' : ''}>${esc(d.name)}${d.total ? ` (ya trae ${d.total})` : ''}</option>`).join('')}
         <option value="open" ${preDriver === 'open' ? 'selected' : ''}>🔓 Abierto · lo entrega cualquier repartidor${(drivers.find((d) => d.open)?.total) ? ` (ya hay ${drivers.find((d) => d.open).total})` : ''}</option></select></label>
-      <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, turno…" maxlength="80" /></label></div>
+      <label class="f">Referencia<input id="adRef" placeholder="Salida del ${today()}, zona…" maxlength="80" /></label></div>
     <div class="pill-tabs" id="adMode"><button class="on" data-m="pick">${icon('check')} Elegir del almacén</button><button data-m="sn">${icon('scan')} Escanear o pegar S/N</button></div>
     <div data-p="pick" class="stack">
       <div class="row"><input id="adQ" class="grow" placeholder="Buscar producto, S/N, pedido o cliente" /><button class="btn sm primary" id="adAll" title="Marca todos los equipos y productos que se ven en la lista (respeta la búsqueda)">${icon('check')} Seleccionar todo</button><button class="btn sm" id="adNone">Quitar selección</button></div>
@@ -4667,7 +4667,7 @@ async function viewUsers(v) {
       ? `<div class="empty">${icon('users')}<p><b>Sin resultados</b><br>Prueba con otro nombre o quita los filtros.</p></div>`
       : `<div class="table-wrap desk-only"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Teléfono</th><th>Vehículo</th><th class="r">Entregas</th><th>Último acceso</th><th>Estado</th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="click" data-id="${u.id}"><td><div class="ucell">${avatar(u)}<div><b>${esc(u.name)}</b>${u.id === me.id ? ' <small class="muted">(tú)</small>' : ''}<br><small class="muted">${esc(u.email)}</small></div></div></td>
-          <td>${roleChip(roleOf(u), u)}${u.suspended_reason ? `<br><span class="chip off" title="${esc(u.suspended_reason)}">⛔ suspendido</span>` : ''}${u.team_size ? `<br><small class="muted">${icon('users')} ${u.team_size} a cargo</small>` : ''}${u.reports_to_name ? `<br><small class="muted">A cargo de ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
+          <td>${roleChip(roleOf(u), u)}${u.suspended_reason ? `<br><span class="chip off" title="${esc(u.suspended_reason)}">⛔ suspendido</span>` : ''}${u.team_size ? `<br><small class="muted">${icon('users')} coordina ${u.team_size}</small>` : ''}${u.reports_to_name ? `<br><small class="muted">Coordinado por ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
           <td class="r num">${u.role === 'repartidor' ? u.delivered : '—'}</td><td><small>${ago(u.last_login)}</small></td><td>${statusBadge(u)}</td></tr>`).join('')}
         </tbody></table></div>
         <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(roleOf(u), u)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;
@@ -4688,7 +4688,7 @@ async function viewUsers(v) {
   <div class="card" style="margin-top:14px">
     <div class="toolbar">
       <label class="search">${icon('search')}<input id="uq" type="search" placeholder="Buscar por nombre, correo, teléfono…" value="${esc(uState.q)}" /></label>
-      <div class="pill-tabs" id="uRole">${[['', 'Todos'], ['admin', 'Admin'], ['supervisor', 'Supervisores'], ['despachador', 'Despacho'], ['repartidor', 'Repartidores']].map(([k, l]) => `<button data-r="${k}" class="${uState.role === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="pill-tabs" id="uRole">${[['', 'Todos'], ['admin', 'Admin'], ['supervisor', 'Coordinadores'], ['despachador', 'Despacho'], ['repartidor', 'Repartidores']].map(([k, l]) => `<button data-r="${k}" class="${uState.role === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <select id="uSt" aria-label="Estado"><option value="1">Activos</option><option value="0">Inactivos</option><option value="">Todos los estados</option></select>
     </div>
     <div id="uList"></div>
@@ -4735,11 +4735,11 @@ const formBody = (f) => { const b = Object.fromEntries(new FormData(f)); b.citie
 function teamFields(u, people) {
   const sups = people.filter((p) => p.id !== u.id && p.active && p.role === 'despachador');
   const staff = people.filter((p) => p.id !== u.id && p.active && p.role !== 'admin' && !p.cities);
-  return `<label class="f boss-only">A cargo de (supervisor)<select name="reports_to"><option value="">— Nadie —</option>${sups.map((p) => `<option value="${p.id}" ${u.reports_to === p.id ? 'selected' : ''}>${esc(p.name)}${p.cities ? ' · ' + esc(p.cities) : ''}</option>`).join('')}</select><small class="muted">Su supervisor lo ve y opera en rutas, pedidos y análisis.</small></label>
-    <fieldset class="sup-only"><legend>${icon('users')} Personal a cargo</legend>
+  return `<label class="f boss-only">Coordinado por<select name="reports_to"><option value="">— Nadie —</option>${sups.map((p) => `<option value="${p.id}" ${u.reports_to === p.id ? 'selected' : ''}>${esc(p.name)}${p.cities ? ' · ' + esc(p.cities) : ''}</option>`).join('')}</select><small class="muted">Su coordinador lo ve en rutas, pedidos y análisis.</small></label>
+    <fieldset class="sup-only"><legend>${icon('users')} Prestadores que coordina</legend>
       <input class="grow" id="teamQ" placeholder="Buscar persona…" autocomplete="off" style="margin-bottom:6px" />
       <div class="stack" id="teamL" style="max-height:220px;overflow:auto;gap:4px">${staff.map((p) => `<label class="row" style="gap:8px" data-tn="${esc((p.name + ' ' + (p.reports_to_name || '')).toLowerCase())}"><input type="checkbox" name="team" value="${p.id}" ${p.reports_to === u.id && u.id ? 'checked' : ''} /> <span class="grow">${esc(p.name)} <small class="muted">${ROLE[p.role]}${p.reports_to && p.reports_to !== u.id ? ' · hoy con ' + esc(p.reports_to_name || '') : ''}</small></span></label>`).join('') || '<small class="muted">No hay repartidores ni despachadores activos.</small>'}</div>
-      <small class="muted">Si marcas personal, este supervisor solo ve y asigna a su equipo (y quedan en su oficina). Sin personal marcado ve a todos los de su oficina. Puede haber varios supervisores en la misma ciudad.</small></fieldset>`;
+      <small class="muted">Si marcas prestadores, este coordinador solo ve y asigna servicios a ellos (y quedan en su oficina). Sin marcar ve a todos los de su oficina. Puede haber varios coordinadores en la misma ciudad.</small></fieldset>`;
 }
 function userFields(u, offs = [], people = []) {
   return `${roleCards(roleOf(u))}
@@ -4756,7 +4756,7 @@ function userFields(u, offs = [], people = []) {
         <option value="continua" ${u.route_mode !== 'dia' ? 'selected' : ''}>Continua: lo que no entregue sigue con él al día siguiente, hasta terminar</option>
         <option value="dia" ${u.route_mode === 'dia' ? 'selected' : ''}>Por día: a medianoche lo no entregado se libera para asignarlo a quien elijas</option></select>
         <small class="muted">En cualquier momento puedes pasar su ruta a otro repartidor, quitarle paradas, liberarlas o cancelarlas desde Rutas → la ruta → Cerrar ruta.</small></label></fieldset>
-    <label class="f">Notas internas<textarea name="notes" placeholder="Turno, zona, contacto de emergencia…">${esc(u.notes)}</textarea></label>`;
+    <label class="f">Notas internas<textarea name="notes" placeholder="Zona, disponibilidad, contacto de emergencia…">${esc(u.notes)}</textarea></label>`;
 }
 function wireRole(f) {
   // los datos del vehículo solo aplican a repartidores: ocultos se desactivan para que no bloqueen el "Guardar"
@@ -4930,11 +4930,11 @@ async function viewHR(v) {
   const qs = hrState.from && hrState.to ? `from=${hrState.from}&to=${hrState.to}` : `offset=${hrState.offset}`;
   const r = await GET('/api/hr?' + qs);
   const sum = (k) => r.rows.reduce((a, x) => a + (x[k] || 0), 0);
-  v.innerHTML = topbar('Capital Humano', '<button class="btn" id="hrX">' + icon('download') + ' Excel</button>', 'Ganancias por entregas según el periodo de pago de cada colaborador, pagos, anticipos, bonos, descuentos y saldo por pagar.') + `
+  v.innerHTML = topbar('Capital Humano', '<button class="btn" id="hrX">' + icon('download') + ' Excel</button>', 'Liquidación de cada prestador según sus servicios y su periodo: tarifas, pagos, anticipos, bonos, descuentos y saldo por liquidar.') + `
   <div class="toolbar card" style="margin-bottom:12px">
     <div class="pill-tabs" id="hrPer">${[[0, 'Periodo actual'], [-1, 'Periodo anterior'], [-2, 'Hace 2 periodos'], ['c', 'Fechas…']].map(([k, l]) => `<button data-o="${k}" class="${(k === 'c' ? !!hrState.from : !hrState.from && hrState.offset === k) ? 'on' : ''}">${l}</button>`).join('')}</div>
     <span id="hrDates" class="row" style="gap:6px" ${hrState.from ? '' : 'hidden'}><input type="date" id="hrF" value="${hrState.from}" /><input type="date" id="hrT" value="${hrState.to}" /><button class="btn sm" id="hrGo">Ver</button></span>
-    <label class="search">${icon('search')}<input id="hrQ" type="search" placeholder="Buscar colaborador…" value="${esc(hrState.q)}" /></label>
+    <label class="search">${icon('search')}<input id="hrQ" type="search" placeholder="Buscar prestador…" value="${esc(hrState.q)}" /></label>
   </div>
   <div class="grid g4">
     <div class="card kpi"><div class="label">Ganado en el periodo</div><div class="value">${money(sum('earned'))}</div><div class="sub">${fmtN(sum('delivered'))} entregas · ${fmtN(sum('failed'))} intentos</div></div>
@@ -4942,13 +4942,13 @@ async function viewHR(v) {
     <div class="card kpi"><div class="label">Saldo del periodo</div><div class="value" style="color:${sum('balance') > 0 ? 'var(--warn,#b26d00)' : 'var(--ok)'}">${money(sum('balance'))}</div><div class="sub">ganado + bonos − descuentos − pagado</div></div>
     <div class="card kpi"><div class="label">Saldo acumulado por pagar</div><div class="value" style="color:${sum('total_balance') > 0 ? 'var(--bad)' : 'var(--ok)'}">${money(sum('total_balance'))}</div><div class="sub">desde su alta</div></div>
   </div>
-  <div class="card" style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>Colaborador</th><th>Periodo</th><th class="r">Entregas</th><th class="r">Fallidos</th><th class="r">Ganado</th><th class="r">Bonos / desc.</th><th class="r">Pagado</th><th class="r">Saldo periodo</th><th class="r">Acumulado</th><th></th></tr></thead><tbody id="hrBody"></tbody></table></div>
+  <div class="card" style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>Prestador</th><th>Periodo</th><th class="r">Entregas</th><th class="r">Fallidos</th><th class="r">Ganado</th><th class="r">Bonos / desc.</th><th class="r">Pagado</th><th class="r">Saldo periodo</th><th class="r">Acumulado</th><th></th></tr></thead><tbody id="hrBody"></tbody></table></div>
   <small class="muted">La ganancia usa la tarifa por entrega y por intento fallido del expediente de cada persona (Usuarios → la persona → Expediente y pago).</small></div>`;
   const draw = () => {
     const q = normH(hrState.q);
     const rows = r.rows.filter((x) => !q || normH(x.name + ' ' + (x.office || '')).includes(q));
     $('#hrBody', v).innerHTML = rows.map((x) => `<tr class="click" data-hr="${x.id}"><td><b>${esc(x.name)}</b>${x.active ? '' : ' <span class="chip off">Inactivo</span>'}<br><small class="muted">${x.hire_type === 'interno' ? 'Interno' : 'Externo'}${x.office ? ' · ' + esc(x.office) : ''} · ${PER_TXT[x.pay_period] || x.pay_period}${x.rate_delivery ? ' · ' + money(x.rate_delivery) + '/entrega' : ' · <b style="color:var(--bad)">sin tarifa</b>'}</small></td>
-      <td><small>${perLbl(x)}</small></td><td class="r num">${fmtN(x.delivered)}</td><td class="r num">${fmtN(x.failed)}</td><td class="r num">${money(x.earned)}${x.team?.pay ? `<br><small class="muted" title="Por su personal a cargo">${icon('users')} equipo ${money(x.team.pay)} · ${fmtN(x.team.delivered)} entregas</small>` : ''}</td>
+      <td><small>${perLbl(x)}</small></td><td class="r num">${fmtN(x.delivered)}</td><td class="r num">${fmtN(x.failed)}</td><td class="r num">${money(x.earned)}${x.team?.pay ? `<br><small class="muted" title="Por los prestadores que coordina">${icon('users')} equipo ${money(x.team.pay)} · ${fmtN(x.team.delivered)} entregas</small>` : ''}</td>
       <td class="r num"><small>${x.bono ? '+' + money(x.bono) : ''}${x.bono && x.descuento ? '<br>' : ''}${x.descuento ? '−' + money(x.descuento) : ''}${x.bono || x.descuento ? '' : '—'}</small></td>
       <td class="r num">${money(x.paid)}</td><td class="r num"><b style="color:${x.balance > 0 ? 'var(--warn,#b26d00)' : x.balance < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(x.balance)}</b></td>
       <td class="r num">${money(x.total_balance)}</td><td class="r"><button class="btn sm primary" data-pay="${x.id}">Registrar pago</button></td></tr>`).join('') || '<tr><td colspan="10" class="empty">Sin colaboradores con entregas o tarifa.</td></tr>';
@@ -5191,7 +5191,7 @@ async function viewSettings(v) {
       <label class="switch"><input type="checkbox" name="require_photo" ${s.require_photo === '1' ? 'checked' : ''} /><span></span><div><b>Fotografía obligatoria</b><br><small class="muted">Foto del paquete entregado con fecha y hora impresas.</small></div></label>
       <h2 style="margin-top:8px">Intentos y jornada</h2>
       <div class="grid g2"><label class="f">Distancia máxima al domicilio para registrar un fallo (m)<input type="number" name="fail_geofence_m" min="50" max="5000" value="${esc(s.fail_geofence_m || '300')}" /><small class="muted">"Cliente ausente", "Rechazado" u "Otro" solo se registran en el domicilio. Con pin aproximado se permiten hasta 2 km.</small></label>
-      <label class="f">Jornada del repartidor (horas)<input type="number" name="workday_h" min="4" max="14" step="0.5" value="${(Number(s.workday_minutes) || 540) / 60}" /><small class="muted">Las rutas que pasen de esto se marcan en rojo al asignar.</small></label></div>
+      <label class="f">Tiempo máximo sugerido por ruta (horas)<input type="number" name="workday_h" min="4" max="14" step="0.5" value="${(Number(s.workday_minutes) || 540) / 60}" /><small class="muted">Las rutas que pasen de esto se marcan en rojo al asignar.</small></label></div>
       <h2 style="margin-top:8px">Navegación del repartidor</h2>
       <label class="f">Servidor de rutas (OSRM)<input name="osrm_url" value="${esc(s.osrm_url)}" placeholder="https://router.project-osrm.org" />
         <small class="muted">Traza el camino por calles e indicaciones paso a paso. El servidor público de demostración sirve para pruebas; para producción usa uno propio. Déjalo vacío para usar línea recta.</small></label>
@@ -5913,7 +5913,7 @@ function checkBanner() {
     if (!b || !r.vehicles.length) return;
     b.innerHTML = r.check
       ? `<a class="ck-banner ok" href="#/check">${icon('check')} Checklist de hoy: ${esc(r.check.vehicle_name)} · ${r.check.passed ? 'aprobado' : 'con observaciones'}</a>`
-      : `<a class="ck-banner ${r.required ? 'bad' : 'warn'}" href="#/check">${icon('truck')} <span><b>Llena el checklist de tu unidad</b>${r.required ? ' · obligatorio antes de cargar' : ''}</span>${icon('chev')}</a>`;
+      : `<a class="ck-banner ${r.required ? 'bad' : 'warn'}" href="#/check">${icon('truck')} <span><b>Llena el checklist de tu unidad</b>${r.required ? ' · requerido por seguridad antes de cargar' : ''}</span>${icon('chev')}</a>`;
   }).catch(() => {});
 }
 async function viewMyRoute(v) {
@@ -6007,7 +6007,12 @@ async function viewMyRoute(v) {
     openNav(st, app);
   }));
   // "Estoy aquí": el repartidor fija la ubicación del cliente con su GPS
-  $$('[data-here]', v).forEach((b) => (b.onclick = async () => {
+  // rechazar un servicio: regresa a la oficina para reasignarlo, sin penalización
+  $('[data-decline]', v).forEach((b) => (b.onclick = async () => {
+    if (!(await confirmDlg('¿No tomar este servicio? Regresa a la oficina para que lo asignen a alguien más. No tiene ninguna penalización.'))) return;
+    try { await POST(`/api/my/orders/${b.dataset.decline}/decline`, {}); toast('Listo: el servicio regresó a la oficina', 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }
+  }));
+  $('[data-here]', v).forEach((b) => (b.onclick = async () => {
     const st = r.stops.find((x) => String(x.id) === b.dataset.here);
     b.disabled = true;
     const p = await getPosition(12000) || GPS.last;
@@ -6081,7 +6086,7 @@ async function viewNavigate(v, id) {
       <div class="row" style="margin-top:8px">
         <a class="btn sm grow primary" data-open-nav="google" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}" title="Con tráfico en tiempo real">${icon('nav')} Google Maps</a>
         <a class="btn sm grow" data-open-nav="waze" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>${IS_IOS ? '<a class="btn sm grow" data-open-nav="apple" href="#">Apple Maps</a>' : ''}
-        <a class="btn sm bad" href="#/fail/${s.id}">No entregado</a></div>
+        <a class="btn sm bad" href="#/fail/${s.id}">No entregado</a>${s.status === 'asignado' ? `<button class="btn sm ghost" data-decline="${s.id}" title="Puedes rechazar un servicio sin ninguna penalización">No tomar este servicio</button>` : ''}</div>
       <details class="nav-steps"><summary>Indicaciones paso a paso</summary><ol id="nSteps"><li class="muted">Calculando…</li></ol></details>
       ${after ? `<small class="muted">Después: ${esc(after.customer_name)} · ${esc(after.address)}</small>` : ''}
     </div></div>`;

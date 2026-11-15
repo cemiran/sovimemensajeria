@@ -4430,7 +4430,7 @@ app.post(
 const userOffice = (id) => db.prepare(`SELECT ${OFFICE_OF('u')} o FROM users u WHERE u.id = ?`).get(Number(id))?.o ?? null;
 function officeDriver(req, id) {
   if (req.user.office && userOffice(id) !== req.user.office) throw new HttpError(403, 'Ese repartidor es de otra oficina');
-  if (req.user.team?.length && req.user.role !== 'repartidor' && ![...req.user.team, req.user.id].includes(Number(id))) throw new HttpError(403, 'Ese repartidor no está a tu cargo');
+  if (req.user.team?.length && req.user.role !== 'repartidor' && ![...req.user.team, req.user.id].includes(Number(id))) throw new HttpError(403, 'Ese prestador no está en tu coordinación');
 }
 function officeRoute(req, r) { if (req.user.office && r.driver_id && userOffice(r.driver_id) !== req.user.office) throw new HttpError(403, 'Esta ruta es de otra oficina'); }
 function officeOrders(req, ids) {
@@ -4470,6 +4470,25 @@ function reactivateOrder(req, orderId, body) {
   audit(req, 'pedido.reactivar', `${o.tracking_code}: el cliente sí lo quiere → ruta de ${drv.name} (${today()})${lastFail?.reason ? ' · antes: ' + lastFail.reason : ''}`);
   return { ok: true, driver: drv.name, route_id: out.route_id, order: loadOrder(o.id) };
 }
+app.post('/api/my/orders/:id/decline', auth('repartidor'), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(req.params.id));
+  if (!o || o.driver_id !== req.user.id) throw new HttpError(404, 'Ese servicio no está en tu ruta');
+  if (o.status !== 'asignado') throw new HttpError(409, o.status === 'cargado' ? 'Ya lo cargaste: entrégalo o regrésalo a la oficina para que lo reasignen' : `El servicio está "${o.status}"`);
+  const why = String(req.body?.reason || '').trim().slice(0, 200);
+  const rid = o.route_id;
+  tx(() => {
+    db.prepare(`UPDATE orders SET status='pendiente', route_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, driver_id=NULL,
+      notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`).run(` | Rechazado por ${req.user.name} (${today()})${why ? ': ' + why : ''}: sin penalización, por reasignar`, o.id);
+    if (rid) {
+      const r = db.prepare('SELECT * FROM routes WHERE id=?').get(rid);
+      const rest = db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(rid).map((x) => x.id);
+      const done = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(rid).c;
+      if (rest.length && !done) persistRoute({ routeId: rid, driverId: r.driver_id, date: r.date, depot: { lat: r.depot_lat, lng: r.depot_lng }, orderIds: rest, settings: getSettings() });
+    }
+  });
+  audit(req, 'servicio.rechazo', `${o.tracking_code} rechazado por el prestador${why ? ': ' + why : ''}`);
+  res.json({ ok: true });
+}));
 function assignOrdersTo(req, drv, ids, date) {
   {
     const susp = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(drv.id)?.suspended_reason;
