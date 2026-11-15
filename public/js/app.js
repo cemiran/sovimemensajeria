@@ -3271,6 +3271,43 @@ async function myDocuments(box, u) {
 }
 
 // ================= Expediente del personal (interno o externo) =================
+// Contrato electrónico del colaborador: generar y enviar a firma, estado, PDF y constancia NOM-151
+const CT_ST = { enviado: ['Enviado · por firmar', 'warn'], firmado: ['Firmado · constancia NOM-151 pendiente', 'ok'], sellado: ['Firmado y sellado NOM-151', 'ok'], anulado: ['Anulado', 'off'] };
+async function openAuthFile(url) {
+  const w = window.open('', '_blank');
+  try { const r = await fetch(url, { headers: { Authorization: 'Bearer ' + store.token } }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'No disponible'); const b = URL.createObjectURL(await r.blob()); if (w) w.location = b; else location.href = b; }
+  catch (e) { w?.close(); toast(e.message, 'bad'); }
+}
+async function contractBox(el, u) {
+  const r = await GET(`/api/users/${u.id}/contract`).catch((e) => ({ error: e.message }));
+  if (r.error) { el.innerHTML = `<legend>${icon('sign')} Contrato electrónico</legend><p class="muted">${esc(r.error)}</p>`; return; }
+  const open = r.contracts.find((c) => c.status === 'enviado');
+  el.innerHTML = `<legend>${icon('sign')} Contrato electrónico</legend>
+    <p class="muted" style="margin-top:0">Contrato mercantil de prestación de servicios con sus datos. Se firma desde el celular con código por SMS o correo, selfie, INE, Constancia de Situación Fiscal y póliza, y queda registrada su IP, ubicación GPS, fecha, hora y dispositivo.${r.psc ? ' Al firmar se solicita la constancia NOM-151 al PSC configurado.' : ' <b>La constancia NOM-151 se emite cuando configures tu PSC en Configuración → Firma electrónica.</b>'}</p>
+    ${r.missing.length ? `<div class="offline-bar">Para generar el contrato completa y guarda: ${r.missing.map(esc).join(', ')}.</div>` : ''}
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button type="button" class="btn primary" id="ctGo" ${r.missing.length ? 'disabled' : ''}>${icon('send')} ${open ? 'Generar de nuevo y reenviar' : 'Generar y enviar para firma'}</button></div>
+    ${r.contracts.length ? `<div class="table-wrap" style="margin-top:8px"><table><tbody>${r.contracts.map((c) => `<tr><td><b class="mono">${esc(c.folio)}</b><br><small class="muted">Emitido ${fmtDT(c.issued_at)}${c.signed_at ? ' · firmado ' + fmtDT(c.signed_at) : ''}</small>
+        ${c.meta ? `<br><small class="muted">IP ${esc(c.meta.ip)} · GPS ${c.meta.gps.lat.toFixed(5)}, ${c.meta.gps.lng.toFixed(5)} · ${esc(c.meta.device || '')} · OTP por ${esc(c.otp_channel || '')}</small>` : ''}
+        ${c.nom151_error ? `<br><small style="color:var(--warn,#b26d00)">NOM-151: ${esc(c.nom151_error)}</small>` : c.nom151_folio ? `<br><small>NOM-151 folio ${esc(c.nom151_folio)}</small>` : ''}</td>
+      <td><span class="chip ${CT_ST[c.status][1]}">${CT_ST[c.status][0]}</span></td>
+      <td class="r"><div class="row" style="gap:4px;justify-content:flex-end;flex-wrap:wrap">
+        ${c.link ? `<button type="button" class="btn sm" data-ctcopy="${esc(c.link)}">${icon('copy')} Copiar enlace</button><button type="button" class="btn sm ghost" data-ctx="${c.id}" style="color:var(--bad)">Anular</button>` : ''}
+        ${c.pdf ? `<button type="button" class="btn sm" data-ctpdf="${c.id}">${icon('ext')} PDF</button>` : ''}
+        ${c.pdf && c.status !== 'sellado' ? `<button type="button" class="btn sm" data-ctnom="${c.id}">Solicitar NOM-151</button>` : ''}
+        ${c.status === 'sellado' ? `<button type="button" class="btn sm" data-ctnomd="${c.id}">${icon('download')} Constancia</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  const again = () => contractBox(el, u);
+  $('#ctGo', el).onclick = async (e) => {
+    if (open && !(await confirmDlg('El enlace anterior dejará de funcionar. ¿Generar y enviar uno nuevo?'))) return;
+    e.currentTarget.disabled = true;
+    try { const x = await POST(`/api/users/${u.id}/contract`, {}); toast(x.sent.length ? `Contrato ${x.folio} enviado por ${x.sent.join(' y ')}` : `Contrato ${x.folio} listo: copia el enlace y compártelo`, 'ok'); again(); }
+    catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+  };
+  $$('[data-ctcopy]', el).forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.ctcopy); toast('Enlace copiado', 'ok'); } catch { prompt('Copia el enlace', b.dataset.ctcopy); } }));
+  $$('[data-ctx]', el).forEach((b) => (b.onclick = async () => { if (!(await confirmDlg('¿Anular este contrato? El enlace dejará de funcionar.'))) return; try { await POST(`/api/contracts/${b.dataset.ctx}/cancel`, {}); again(); } catch (er) { toast(er.message, 'bad'); } }));
+  $$('[data-ctpdf]', el).forEach((b) => (b.onclick = () => openAuthFile(`/api/contracts/${b.dataset.ctpdf}/pdf`)));
+  $$('[data-ctnomd]', el).forEach((b) => (b.onclick = () => openAuthFile(`/api/contracts/${b.dataset.ctnomd}/nom151`)));
+  $$('[data-ctnom]', el).forEach((b) => (b.onclick = async () => { b.disabled = true; try { const x = await POST(`/api/contracts/${b.dataset.ctnom}/nom151`, {}); toast(x.nom151_status === 'emitida' ? 'Constancia NOM-151 emitida' : `No se emitió: ${x.nom151_error || 'revisa el PSC'}`, x.nom151_status === 'emitida' ? 'ok' : 'bad'); again(); } catch (er) { toast(er.message, 'bad'); b.disabled = false; } }));
+}
 async function staffProfile(box, u) {
   const p = await GET(`/api/users/${u.id}/profile`);
   const first = today().slice(0, 8) + '01';
@@ -3291,6 +3328,21 @@ async function staffProfile(box, u) {
       <label class="f">Contacto de emergencia<input name="emergency_name" value="${esc(p.emergency_name)}" /></label>
       <label class="f">Teléfono de emergencia<input name="emergency_phone" type="tel" value="${esc(p.emergency_phone)}" /></label></div>
       <label class="f">Domicilio<input name="address" value="${esc(p.address)}" /></label></fieldset>
+    <fieldset><legend>${icon('sign')} Datos para el contrato</legend><div class="grid g3">
+      <label class="f">Tipo de persona<select name="persona_tipo"><option ${!/moral/i.test(p.persona_tipo || '') ? 'selected' : ''}>Física</option><option ${/moral/i.test(p.persona_tipo || '') ? 'selected' : ''}>Moral</option></select></label>
+      <label class="f">Régimen fiscal<input name="regimen_fiscal" value="${esc(p.regimen_fiscal)}" placeholder="Régimen Simplificado de Confianza (RESICO)" /></label>
+      <label class="f">Identificación<input name="id_tipo" value="${esc(p.id_tipo || 'Credencial para Votar (INE)')}" /></label></div>
+      <div class="grid g3"><label class="f">Folio de la identificación<input name="id_numero" value="${esc(p.id_numero)}" /></label>
+      <label class="f"><span>Representante legal <small class="muted">(persona moral)</small></span><input name="rep_legal_nombre" value="${esc(p.rep_legal_nombre)}" /></label>
+      <label class="f"><span>Escritura constitutiva <small class="muted">(número y fecha)</small></span><input name="escritura_dato" value="${esc(p.escritura_dato)}" placeholder="número 1,234 de fecha 1 de enero de 2020" /></label></div>
+      <div class="grid g3"><label class="f">Tipo de vehículo<input name="vehiculo_tipo" value="${esc(p.vehiculo_tipo)}" placeholder="Motocicleta" /></label>
+      <label class="f">Marca y modelo<input name="vehiculo_marca_modelo" value="${esc(p.vehiculo_marca_modelo)}" /></label>
+      <label class="f">Placas<input name="vehiculo_placas" value="${esc(p.vehiculo_placas)}" style="text-transform:uppercase" /></label></div>
+      <div class="grid g3"><label class="f">Número de licencia<input name="licencia_numero" value="${esc(p.licencia_numero)}" /></label>
+      <label class="f">Vigencia de la licencia<input type="date" name="licencia_vigencia" value="${esc(p.licencia_vigencia)}" /></label>
+      <label class="f">Aseguradora<input name="seguro_aseguradora" value="${esc(p.seguro_aseguradora)}" /></label></div>
+      <div class="grid g3"><label class="f">Número de póliza<input name="seguro_poliza" value="${esc(p.seguro_poliza)}" /></label></div></fieldset>
+    <fieldset id="ctBox"><legend>${icon('sign')} Contrato electrónico</legend><p class="muted" style="margin:0">Cargando…</p></fieldset>
     <fieldset><legend>${icon('key')} Datos bancarios</legend><div class="grid g2">
       <label class="f">Banco<input name="bank_name" value="${esc(p.bank_name)}" /></label><label class="f">Titular de la cuenta<input name="account_holder" value="${esc(p.account_holder)}" /></label>
       <label class="f">CLABE (18 dígitos)<input name="clabe" value="${esc(p.clabe)}" inputmode="numeric" maxlength="18" /></label><label class="f">Número de cuenta / tarjeta<input name="account_number" value="${esc(p.account_number)}" inputmode="numeric" /></label></div></fieldset>
@@ -3298,6 +3350,9 @@ async function staffProfile(box, u) {
       <label class="f">Pago por entrega exitosa ($)<input type="number" name="pay_per_delivery" min="0" step="0.01" value="${p.pay_per_delivery || ''}" placeholder="0.00" /></label>
       <label class="f">Pago por intento fallido ($)<input type="number" name="pay_per_failed" min="0" step="0.01" value="${p.pay_per_failed || ''}" placeholder="0.00" /></label>
       <label class="f">Periodo de pago<select name="pay_period">${['semanal', 'quincenal', 'mensual'].map((x) => `<option ${p.pay_period === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label></div>
+      <div class="grid g2" style="margin-top:6px"><label class="f"><span>Por cada entrega de su personal a cargo ($) <small class="muted">(supervisor / líder)</small></span><input type="number" name="team_pay_per_delivery" min="0" step="0.01" value="${p.team_pay_per_delivery || ''}" placeholder="0.00" /></label>
+      <label class="f"><span>% de lo que gana su personal a cargo</span><input type="number" name="team_pay_pct" min="0" max="100" step="0.1" value="${p.team_pay_pct || ''}" placeholder="0" /></label></div>
+      <small class="muted">El personal a cargo se asigna en Usuarios → el supervisor → Personal a cargo. Lo que gana por su equipo se suma en Capital Humano.</small>
       <div class="row" style="margin-top:6px"><input type="date" id="payFrom" value="${first}" style="width:auto" /><input type="date" id="payTo" value="${today()}" style="width:auto" /><button type="button" class="btn sm" id="payGo">Calcular pago</button></div>
       <div id="payOut" class="muted" style="margin-top:6px"></div></fieldset>
     <fieldset><legend>${icon('shield')} Cumplimiento mínimo (documentos)</legend>
@@ -3339,6 +3394,7 @@ async function staffProfile(box, u) {
   $$('[data-ok]', box).forEach((b) => (b.onclick = () => docAct(b.dataset.ok, { status: 'aprobado', expires: $(`[data-exp="${b.dataset.ok}"]`, box).value || undefined }, 'Documento aprobado')));
   $$('[data-no]', box).forEach((b) => (b.onclick = () => { const note = prompt('Motivo del rechazo (lo verá el colaborador):', 'Ilegible, vuelve a subirlo'); if (note !== null) docAct(b.dataset.no, { status: 'rechazado', note }, 'Documento rechazado'); }));
   $$('[data-up]', box).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; try { docAct(i.dataset.up, { file: await fileToDataUrl(f), expires: $(`[data-exp="${i.dataset.up}"]`, box).value || undefined }, 'Documento guardado'); } catch (e) { toast(e.message, 'bad'); } }));
+  contractBox($('#ctBox', box), u);
   $('#pfSave', box).onclick = async (e) => {
     const btn = e.currentTarget;
     const b = Object.fromEntries(new FormData(f));
@@ -4865,7 +4921,7 @@ async function viewHR(v) {
     const q = normH(hrState.q);
     const rows = r.rows.filter((x) => !q || normH(x.name + ' ' + (x.office || '')).includes(q));
     $('#hrBody', v).innerHTML = rows.map((x) => `<tr class="click" data-hr="${x.id}"><td><b>${esc(x.name)}</b>${x.active ? '' : ' <span class="chip off">Inactivo</span>'}<br><small class="muted">${x.hire_type === 'interno' ? 'Interno' : 'Externo'}${x.office ? ' · ' + esc(x.office) : ''} · ${PER_TXT[x.pay_period] || x.pay_period}${x.rate_delivery ? ' · ' + money(x.rate_delivery) + '/entrega' : ' · <b style="color:var(--bad)">sin tarifa</b>'}</small></td>
-      <td><small>${perLbl(x)}</small></td><td class="r num">${fmtN(x.delivered)}</td><td class="r num">${fmtN(x.failed)}</td><td class="r num">${money(x.earned)}</td>
+      <td><small>${perLbl(x)}</small></td><td class="r num">${fmtN(x.delivered)}</td><td class="r num">${fmtN(x.failed)}</td><td class="r num">${money(x.earned)}${x.team?.pay ? `<br><small class="muted" title="Por su personal a cargo">${icon('users')} equipo ${money(x.team.pay)} · ${fmtN(x.team.delivered)} entregas</small>` : ''}</td>
       <td class="r num"><small>${x.bono ? '+' + money(x.bono) : ''}${x.bono && x.descuento ? '<br>' : ''}${x.descuento ? '−' + money(x.descuento) : ''}${x.bono || x.descuento ? '' : '—'}</small></td>
       <td class="r num">${money(x.paid)}</td><td class="r num"><b style="color:${x.balance > 0 ? 'var(--warn,#b26d00)' : x.balance < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(x.balance)}</b></td>
       <td class="r num">${money(x.total_balance)}</td><td class="r"><button class="btn sm primary" data-pay="${x.id}">Registrar pago</button></td></tr>`).join('') || '<tr><td colspan="10" class="empty">Sin colaboradores con entregas o tarifa.</td></tr>';
@@ -5073,7 +5129,7 @@ const TPL_VARS = ['{cliente}', '{guia}', '{empresa}', '{fecha}', '{eta}', '{repa
 async function viewSettings(v) {
   const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'general';
   const [s, it] = await Promise.all([GET('/api/settings'), GET('/api/integrations')]);
-  const tabs = [['general', 'General', 'cog'], ['entrega', 'Entrega y evidencia', 'sign'], ['notif', 'Notificaciones', 'chat'], ['sheets', 'Google Sheets', 'sheet'], ['maps', 'Google Maps', 'route']];
+  const tabs = [['general', 'General', 'cog'], ['entrega', 'Entrega y evidencia', 'sign'], ['notif', 'Notificaciones', 'chat'], ['sheets', 'Google Sheets', 'sheet'], ['maps', 'Google Maps', 'route'], ['firma', 'Firma electrónica', 'sign']];
   v.innerHTML = topbar('Configuración') + `<div class="tabs">${tabs.map(([k, l, i]) => `<a href="#/settings?tab=${k}" class="${k === tab ? 'on' : ''}">${icon(i)} ${l}</a>`).join('')}</div><div id="stab"></div>`;
   const box = $('#stab');
   const saveInt = async (body, msg = 'Guardado') => { try { const r = await PUT('/api/integrations', body); Object.assign(it, r); toast(msg, 'ok'); return r; } catch (e) { toast(e.message, 'bad'); throw e; } };
@@ -5251,6 +5307,30 @@ async function viewSettings(v) {
     };
   }
 
+  if (tab === 'firma') {
+    box.innerHTML = `<div class="card stack" style="max-width:760px"><h2 style="margin:0">${icon('sign')} Contratos con firma electrónica</h2>
+      <p class="muted" style="margin:0">Cada contrato se firma desde el celular con código de verificación (OTP) por SMS o correo, selfie, INE, Constancia de Situación Fiscal y póliza de seguro, y queda registrada la IP, ubicación GPS, fecha, hora y dispositivo en el certificado del PDF.</p>
+      <form id="psF" class="stack">
+        <label class="f">Firma de la contratante en el contrato<input name="contract_company_signer" value="${esc(s.contract_company_signer || '')}" placeholder="C. César Andrés Miranda Valadez" /></label>
+        <fieldset><legend>Constancia NOM-151-SCFI-2016</legend>
+          <p class="muted" style="margin-top:0">La emite un Prestador de Servicios de Certificación (PSC) acreditado por la Secretaría de Economía. Al firmarse un contrato, la app le envía la huella SHA-256 del PDF y guarda la constancia (folio y archivo) en el expediente. Necesitas un contrato con el PSC y su dirección de API y clave.</p>
+          <div class="grid g2"><label class="f">Nombre del PSC<input name="psc_name" value="${esc(it.psc_name || '')}" /></label>
+          <label class="f">Dirección de la API (URL)<input name="psc_url" value="${esc(it.psc_url || '')}" placeholder="https://…" /></label></div>
+          <label class="f">Clave de la API<input name="psc_api_key" type="password" value="" placeholder="${it.psc_api_key ? esc(it.psc_api_key) + ' (guardada)' : 'Pega aquí la clave del PSC'}" autocomplete="off" /></label>
+          <small class="muted">La app envía <span class="mono">{ hash, algorithm: "SHA-256", name, reference }</span> con la clave como <span class="mono">Authorization: Bearer</span> y guarda la respuesta (<span class="mono">folio</span> y <span class="mono">constancia</span>). Si tu PSC usa otro formato, compárteme su documentación y lo adapto.</small></fieldset>
+        <div class="row"><button class="btn primary">Guardar</button></div></form></div>`;
+    $('#psF', box).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await PUT('/api/settings', { contract_company_signer: f.contract_company_signer.value.trim() });
+        const body = { psc_name: f.psc_name.value.trim(), psc_url: f.psc_url.value.trim() };
+        if (f.psc_api_key.value.trim()) body.psc_api_key = f.psc_api_key.value.trim();
+        await saveInt(body);
+      } catch (er) { toast(er.message, 'bad'); }
+    };
+    return;
+  }
   if (tab === 'maps') {
     const draw = async () => {
       const g = await GET('/api/google/status');

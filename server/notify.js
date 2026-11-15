@@ -11,7 +11,7 @@ const EVENTS = {
   fallido: 'No entregado',
 };
 const CHANNELS = ['sms', 'whatsapp', 'email'];
-const SECRET_KEYS = ['google_maps_key', 'twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass', 'sms2_pass', 'sms3_pass'];
+const SECRET_KEYS = ['google_maps_key', 'twilio_token', 'wa_token', 'smtp_pass', 'sheets_secret', 'sms_android_pass', 'sms2_pass', 'sms3_pass', 'psc_api_key'];
 const INTEGRATION_KEYS = [
   'public_url', 'phone_country', 'notif_enabled', 'notif_matrix', 'notif_test_to', 'notif_test_email',
   ...Object.keys(EVENTS).map((e) => 'tpl_' + e),
@@ -22,6 +22,7 @@ const INTEGRATION_KEYS = [
   'google_maps_key', 'google_daily_geocode', 'google_daily_elements', 'google_daily_routes', 'google_daily_tiles', 'google_tiles',
   'email_provider', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_pass', 'smtp_from',
   'sheets_enabled', 'sheets_url', 'sheets_secret',
+  'psc_name', 'psc_url', 'psc_api_key',
 ];
 const MAX_ATTEMPTS = 4;
 
@@ -579,4 +580,4 @@ async function pushResumen(rows) {
   for (const row of rows) { await postSheet(s, { sheet: 'Resumen', headers: RESUMEN_HEADERS, row }); n++; }
   return { sent: n };
 }
-module.exports = { smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
+module.exports = { sendSMS, sendEmail, smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };

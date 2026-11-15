@@ -498,6 +498,27 @@ addCols('users', [['cities', 'TEXT']]);
 addCols('users', [['reports_to', 'INTEGER REFERENCES users(id)']]);
 // última vez que se intentó mejorar la ubicación del cliente (para no repetir la búsqueda cada pocos minutos)
 addCols('customers', [['geo_tried', 'TEXT']]);
+// Expediente: datos para el contrato y pago del supervisor por lo que hace su equipo
+addCols('staff_profiles', [['persona_tipo', 'TEXT'], ['regimen_fiscal', 'TEXT'], ['id_tipo', 'TEXT'], ['id_numero', 'TEXT'], ['rep_legal_nombre', 'TEXT'], ['escritura_dato', 'TEXT'],
+  ['vehiculo_tipo', 'TEXT'], ['vehiculo_marca_modelo', 'TEXT'], ['vehiculo_placas', 'TEXT'], ['licencia_numero', 'TEXT'], ['licencia_vigencia', 'TEXT'],
+  ['seguro_aseguradora', 'TEXT'], ['seguro_poliza', 'TEXT'], ['team_pay_per_delivery', 'REAL NOT NULL DEFAULT 0'], ['team_pay_pct', 'REAL NOT NULL DEFAULT 0']]);
+// Contratos con firma electrónica: OTP, prueba de vida y documentos, metadatos y constancia NOM-151
+db.exec(`CREATE TABLE IF NOT EXISTS contracts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  folio TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'enviado' CHECK (status IN ('enviado','firmado','sellado','anulado')),
+  token TEXT NOT NULL UNIQUE,
+  vars_json TEXT, html TEXT, text_sha256 TEXT,
+  issued_by INTEGER REFERENCES users(id), issued_at TEXT NOT NULL DEFAULT (datetime('now')), company_sha256 TEXT,
+  otp_hash TEXT, otp_channel TEXT, otp_sent_at TEXT, otp_tries INTEGER NOT NULL DEFAULT 0, otp_sends INTEGER NOT NULL DEFAULT 0, otp_verified_at TEXT,
+  kyc_json TEXT, meta_json TEXT, signed_at TEXT,
+  pdf_file TEXT, pdf_sha256 TEXT,
+  nom151_status TEXT, nom151_folio TEXT, nom151_file TEXT, nom151_at TEXT, nom151_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_contracts_user ON contracts(user_id, id);`);
+ins.run('psc_name', ''); ins.run('psc_url', ''); ins.run('psc_api_key', ''); ins.run('contract_company_signer', 'C. César Andrés Miranda Valadez');
 // Capital Humano: pagos, anticipos, bonos y descuentos de cada colaborador
 db.exec(`CREATE TABLE IF NOT EXISTS staff_payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

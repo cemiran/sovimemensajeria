@@ -1116,7 +1116,9 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
 
 // ---------- Expediente del personal ----------
 const PROFILE_TXT = ['hire_type', 'hire_date', 'end_date', 'birth_date', 'address', 'emergency_name', 'emergency_phone', 'rfc', 'curp', 'nss',
-  'bank_name', 'clabe', 'account_number', 'account_holder', 'pay_period', 'notes'];
+  'bank_name', 'clabe', 'account_number', 'account_holder', 'pay_period', 'notes',
+  'persona_tipo', 'regimen_fiscal', 'id_tipo', 'id_numero', 'rep_legal_nombre', 'escritura_dato', 'vehiculo_tipo', 'vehiculo_marca_modelo', 'vehiculo_placas',
+  'licencia_numero', 'licencia_vigencia', 'seguro_aseguradora', 'seguro_poliza'];
 // Cumplimiento mínimo para dar de alta a personal (sobre todo externo)
 const STAFF_DOCS = [['ine', 'INE / identificación oficial'], ['domicilio', 'Comprobante de domicilio'], ['csf', 'Constancia de situación fiscal (RFC)'],
   ['curp', 'CURP'], ['licencia', 'Licencia de manejo vigente'], ['antecedentes', 'Carta de no antecedentes penales'], ['contrato', 'Contrato / convenio firmado'],
@@ -1157,8 +1159,9 @@ app.put('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
   if (v.rfc && !RFC_RE.test(v.rfc)) throw new HttpError(400, 'El RFC no tiene un formato válido (12 o 13 caracteres)');
   if (v.curp && !CURP_RE.test(v.curp)) throw new HttpError(400, 'La CURP no tiene un formato válido (18 caracteres)');
   if (v.clabe) { v.clabe = v.clabe.replace(/\D/g, ''); if (!clabeOk(v.clabe)) throw new HttpError(400, 'La CLABE debe tener 18 dígitos y su dígito verificador no coincide'); }
-  for (const k of ['pay_per_delivery', 'pay_per_failed']) {
+  for (const k of ['pay_per_delivery', 'pay_per_failed', 'team_pay_per_delivery', 'team_pay_pct']) {
     const n = b[k] === undefined || b[k] === '' ? Number(cur[k] || 0) : Number(b[k]);
+    if (k === 'team_pay_pct' && n > 100) throw new HttpError(400, 'El porcentaje del equipo no puede pasar de 100');
     if (!Number.isFinite(n) || n < 0) throw new HttpError(400, 'El monto de pago debe ser un número positivo');
     v[k] = Math.round(n * 100) / 100;
   }
@@ -1178,7 +1181,7 @@ app.put('/api/users/:id/profile', auth('admin'), wrap((req, res) => {
   let photo = cur.photo_path || null;
   if (b.photo === null) photo = null;
   else if (typeof b.photo === 'string' && b.photo.startsWith('data:')) photo = saveDataUrl(b.photo, 'personal');
-  const cols = [...PROFILE_TXT, 'pay_per_delivery', 'pay_per_failed'];
+  const cols = [...PROFILE_TXT, 'pay_per_delivery', 'pay_per_failed', 'team_pay_per_delivery', 'team_pay_pct'];
   db.prepare(`INSERT INTO staff_profiles (user_id, ${cols.join(',')}, docs_json, photo_path, updated_at) VALUES (?, ${cols.map(() => '?').join(',')}, ?, ?, datetime('now'))
     ON CONFLICT(user_id) DO UPDATE SET ${cols.map((c) => `${c}=excluded.${c}`).join(', ')}, docs_json=excluded.docs_json, photo_path=excluded.photo_path, updated_at=datetime('now')`)
     .run(u.id, ...cols.map((c) => v[c]), docs, photo);
@@ -1222,8 +1225,23 @@ function hrSummary(uid, p, from, to) {
   const mv = db.prepare('SELECT kind, SUM(amount) n FROM staff_payments WHERE user_id=? AND date BETWEEN ? AND ? GROUP BY kind').all(uid, from, to);
   const k = Object.fromEntries(PAY_KINDS.map((x) => [x, money2(mv.find((m) => m.kind === x)?.n)]));
   const delivered = ev.d || 0, failed = ev.f || 0;
-  const earned = money2(delivered * (p.pay_per_delivery || 0) + failed * (p.pay_per_failed || 0));
-  return { from, to, delivered, failed, earned, ...k, paid: money2(k.pago + k.anticipo), balance: money2(earned + k.bono - k.descuento - k.pago - k.anticipo) };
+  const own = money2(delivered * (p.pay_per_delivery || 0) + failed * (p.pay_per_failed || 0));
+  // personal a cargo: un monto por cada entrega de su equipo y/o un porcentaje de lo que gana su equipo
+  let team = { members: 0, delivered: 0, earned: 0, pay: 0 };
+  if ((p.team_pay_per_delivery || 0) > 0 || (p.team_pay_pct || 0) > 0) {
+    const mem = db.prepare('SELECT id FROM users WHERE reports_to=? AND deleted_at IS NULL').all(uid).map((r) => r.id);
+    for (const m of mem) {
+      const pm = db.prepare('SELECT pay_per_delivery, pay_per_failed FROM staff_profiles WHERE user_id=?').get(m) || {};
+      const e = db.prepare(`SELECT SUM(result='entregado') d, SUM(result='fallido') f FROM evidences WHERE driver_id=? AND date(created_at,'localtime') BETWEEN ? AND ?`).get(m, from, to);
+      team.delivered += e.d || 0;
+      team.earned += (e.d || 0) * (pm.pay_per_delivery || 0) + (e.f || 0) * (pm.pay_per_failed || 0);
+    }
+    team.members = mem.length;
+    team.pay = money2(team.delivered * (p.team_pay_per_delivery || 0) + (team.earned * (p.team_pay_pct || 0)) / 100);
+    team.earned = money2(team.earned);
+  }
+  const earned = money2(own + team.pay);
+  return { from, to, delivered, failed, own, team, earned, ...k, paid: money2(k.pago + k.anticipo), balance: money2(earned + k.bono - k.descuento - k.pago - k.anticipo) };
 }
 // saldo acumulado: todo lo ganado (con su tarifa actual) + bonos − descuentos − pagos y anticipos
 function hrTotal(uid, p) {
@@ -1237,12 +1255,12 @@ app.get('/api/hr', auth('admin'), wrap((req, res) => {
   const custom = okD(req.query.from) && okD(req.query.to) ? { from: req.query.from, to: req.query.to } : null;
   const off = Math.max(-24, Math.min(0, Number(req.query.offset) || 0));
   const users = db.prepare(`SELECT u.id, u.name, u.role, u.active, u.vehicle, u.can_deliver, (SELECT name FROM warehouses w WHERE w.id = u.office_id) office FROM users u
-    WHERE u.deleted_at IS NULL AND (u.role = 'repartidor' OR u.can_deliver = 1 OR EXISTS (SELECT 1 FROM staff_profiles sp WHERE sp.user_id = u.id AND (sp.pay_per_delivery > 0 OR sp.pay_per_failed > 0))
+    WHERE u.deleted_at IS NULL AND (u.role = 'repartidor' OR u.can_deliver = 1 OR EXISTS (SELECT 1 FROM staff_profiles sp WHERE sp.user_id = u.id AND (sp.pay_per_delivery > 0 OR sp.pay_per_failed > 0 OR sp.team_pay_per_delivery > 0 OR sp.team_pay_pct > 0))
       OR EXISTS (SELECT 1 FROM staff_payments x WHERE x.user_id = u.id)) ORDER BY u.active DESC, u.name`).all();
   const rows = users.map((u) => {
     const p = profileOf(u.id);
     const per = custom || payPeriod(p.pay_period || 'semanal', today(), off);
-    return { ...u, hire_type: p.hire_type, pay_period: p.pay_period || 'semanal', rate_delivery: p.pay_per_delivery || 0, rate_failed: p.pay_per_failed || 0,
+    return { ...u, hire_type: p.hire_type, pay_period: p.pay_period || 'semanal', rate_delivery: p.pay_per_delivery || 0, rate_failed: p.pay_per_failed || 0, team_rate: p.team_pay_per_delivery || 0, team_pct: p.team_pay_pct || 0,
       bank: p.bank_name || '', clabe: p.clabe || '', ...hrSummary(u.id, p, per.from, per.to), total_balance: hrTotal(u.id, p) };
   });
   res.json({ offset: off, custom: !!custom, rows });
@@ -1277,6 +1295,189 @@ app.delete('/api/hr/movements/:id', auth('admin'), wrap((req, res) => {
   db.prepare('DELETE FROM staff_payments WHERE id=?').run(m.id);
   audit(req, 'capital.eliminar', `${m.name}: ${m.kind} $${Number(m.amount).toFixed(2)} del ${m.date} eliminado`);
   res.json({ ok: true });
+}));
+
+// ---------- Contrato con firma electrónica ----------
+const contract = require('./contract');
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const fmtLocal = (d = new Date()) => d.toLocaleString('es-MX', { timeZone: process.env.TZ || 'America/Tijuana', dateStyle: 'long', timeStyle: 'medium' }) + ` (${process.env.TZ || 'America/Tijuana'})`;
+// variables del contrato con los datos del expediente y del usuario
+function contractVars(uid) {
+  const u = db.prepare('SELECT id, name, email, phone, vehicle FROM users WHERE id=?').get(uid);
+  const p = db.prepare('SELECT * FROM staff_profiles WHERE user_id=?').get(uid) || {};
+  const moral = /moral/i.test(p.persona_tipo || '');
+  return {
+    prestador_tipo_persona: moral ? 'Moral' : 'Física',
+    prestador_nombre_o_razon_social: u.name,
+    bloque_representante_moral: moral && p.rep_legal_nombre ? `, representada en este acto por su Representante Legal el C. ${p.rep_legal_nombre},` : '',
+    bloque_escritura_moral: moral && p.escritura_dato ? `, constituida mediante Escritura Pública ${p.escritura_dato}` : '',
+    prestador_regimen_fiscal: p.regimen_fiscal, prestador_rfc: p.rfc, prestador_curp: p.curp,
+    prestador_tipo_identificacion: p.id_tipo || 'Credencial para Votar (INE)', prestador_numero_identificacion: p.id_numero,
+    prestador_domicilio_completo: p.address, prestador_telefono: u.phone, prestador_email: u.email,
+    prestador_clabe: p.clabe, prestador_banco: p.bank_name, prestador_titular_cuenta: p.account_holder,
+    vehiculo_tipo: p.vehiculo_tipo, vehiculo_marca_modelo: p.vehiculo_marca_modelo, vehiculo_placas: p.vehiculo_placas || '',
+    vehiculo_licencia_numero: p.licencia_numero, vehiculo_licencia_vigencia: p.licencia_vigencia,
+    seguro_aseguradora: p.seguro_aseguradora, seguro_poliza_numero: p.seguro_poliza,
+  };
+}
+const contractRow = (c) => c && ({ id: c.id, folio: c.folio, status: c.status, issued_at: c.issued_at, signed_at: c.signed_at, otp_channel: c.otp_channel,
+  pdf: !!c.pdf_file, pdf_sha256: c.pdf_sha256, nom151_status: c.nom151_status, nom151_folio: c.nom151_folio, nom151_error: c.nom151_error, nom151_at: c.nom151_at,
+  link: c.status === 'enviado' ? `${notify.baseUrl(getSettings())}/firma/${c.token}` : null, meta: (() => { try { return JSON.parse(c.meta_json || 'null'); } catch { return null; } })() });
+app.get('/api/users/:id/contract', auth('admin'), wrap((req, res) => {
+  const u = db.prepare('SELECT id FROM users WHERE id=?').get(Number(req.params.id));
+  if (!u) throw new HttpError(404, 'No encontrado');
+  const vars = contractVars(u.id);
+  res.json({ vars, missing: contract.missingVars(vars), psc: !!getSettings().psc_url, contracts: db.prepare('SELECT * FROM contracts WHERE user_id=? ORDER BY id DESC').all(u.id).map(contractRow) });
+}));
+// genera el contrato con sus datos y le envía el enlace para firmarlo (SMS y correo)
+app.post('/api/users/:id/contract', auth('admin'), wrap(async (req, res) => {
+  const u = db.prepare('SELECT id, name, email, phone FROM users WHERE id=?').get(Number(req.params.id));
+  if (!u) throw new HttpError(404, 'No encontrado');
+  const vars = contractVars(u.id);
+  const miss = contract.missingVars(vars);
+  if (miss.length) throw new HttpError(400, `Completa en el expediente: ${miss.join(', ')}`);
+  const s = getSettings();
+  const html = contract.fill(s.contract_template || null, vars);
+  const folio = `CT-${today().replace(/-/g, '')}-${String(u.id).padStart(4, '0')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+  const token = crypto.randomBytes(24).toString('base64url');
+  const text = sha256(html);
+  const company = sha256(`${folio}|${text}|${req.user.id}|${new Date().toISOString()}`);
+  tx(() => {
+    db.prepare("UPDATE contracts SET status='anulado' WHERE user_id=? AND status='enviado'").run(u.id);
+    db.prepare('INSERT INTO contracts (user_id, folio, token, vars_json, html, text_sha256, issued_by, company_sha256) VALUES (?,?,?,?,?,?,?,?)').run(u.id, folio, token, JSON.stringify(vars), html, text, req.user.id, company);
+  });
+  const link = `${notify.baseUrl(s)}/firma/${token}`;
+  const sent = [];
+  const msg = `${s.company_name || 'Sovime'}: tu contrato de prestación de servicios está listo para firmarse electrónicamente. Ábrelo aquí: ${link}`;
+  if (s.practice_mode !== '1') {
+    if (u.phone) { try { const r = await notify.sendSMS(s, notify.phoneE164(u.phone), msg); if (!r?.simulated) sent.push('SMS'); } catch (e) { console.error('contrato sms', e.message); } }
+    if (u.email) { try { const r = await notify.sendEmail(s, u.email, 'Tu contrato para firma electrónica', msg); if (!r?.simulated) sent.push('correo'); } catch (e) { console.error('contrato correo', e.message); } }
+  }
+  audit(req, 'contrato.enviar', `${u.name}: ${folio}${sent.length ? ' por ' + sent.join(' y ') : ' (comparte el enlace)'}`);
+  res.status(201).json({ folio, link, sent });
+}));
+app.post('/api/contracts/:id/cancel', auth('admin'), wrap((req, res) => {
+  const c = db.prepare('SELECT c.*, u.name FROM contracts c JOIN users u ON u.id=c.user_id WHERE c.id=?').get(Number(req.params.id));
+  if (!c) throw new HttpError(404, 'No encontrado');
+  if (c.status !== 'enviado') throw new HttpError(409, 'Solo se anula un contrato que aún no se firma');
+  db.prepare("UPDATE contracts SET status='anulado' WHERE id=?").run(c.id);
+  audit(req, 'contrato.anular', `${c.name}: ${c.folio}`);
+  res.json({ ok: true });
+}));
+app.get('/api/contracts/:id/pdf', auth('admin'), wrap((req, res) => {
+  const c = db.prepare('SELECT * FROM contracts WHERE id=?').get(Number(req.params.id));
+  if (!c?.pdf_file) throw new HttpError(404, 'El contrato aún no está firmado');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${c.folio}.pdf"`);
+  res.sendFile(path.join(DOCS_DIR, c.pdf_file));
+}));
+app.get('/api/contracts/:id/nom151', auth('admin'), wrap((req, res) => {
+  const c = db.prepare('SELECT * FROM contracts WHERE id=?').get(Number(req.params.id));
+  if (!c?.nom151_file) throw new HttpError(404, 'Sin constancia NOM-151');
+  res.download(path.join(DOCS_DIR, c.nom151_file), `${c.folio}-NOM151${path.extname(c.nom151_file)}`);
+}));
+// Constancia NOM-151 con el Prestador de Servicios de Certificación configurado (envía la huella SHA-256 del PDF)
+async function requestNom151(cid) {
+  const c = db.prepare('SELECT * FROM contracts WHERE id=?').get(cid);
+  const s = getSettings();
+  if (!c?.pdf_sha256) return;
+  if (!s.psc_url) { db.prepare("UPDATE contracts SET nom151_status='pendiente', nom151_error='Falta configurar el Prestador de Servicios de Certificación (PSC) en Configuración' WHERE id=?").run(cid); return; }
+  try {
+    const r = await fetch(s.psc_url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(s.psc_api_key ? { Authorization: `Bearer ${s.psc_api_key}` } : {}) },
+      body: JSON.stringify({ hash: c.pdf_sha256, algorithm: 'SHA-256', name: `${c.folio}.pdf`, reference: c.folio }), signal: AbortSignal.timeout(30000) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.message || j.error || `HTTP ${r.status}`);
+    const blob = j.constancia || j.certificate || j.timestamp || j.tsr || j.data;
+    let file = null;
+    if (blob) { file = `contrato_${c.id}_nom151_${Date.now()}.${/^[A-Za-z0-9+/=\s]+$/.test(blob) ? 'tsr' : 'json'}`; fs.writeFileSync(path.join(DOCS_DIR, file), /^[A-Za-z0-9+/=\s]+$/.test(blob) ? Buffer.from(blob, 'base64') : JSON.stringify(j)); }
+    else { file = `contrato_${c.id}_nom151_${Date.now()}.json`; fs.writeFileSync(path.join(DOCS_DIR, file), JSON.stringify(j)); }
+    db.prepare("UPDATE contracts SET status='sellado', nom151_status='emitida', nom151_folio=?, nom151_file=?, nom151_at=datetime('now'), nom151_error=NULL WHERE id=?").run(String(j.folio || j.id || j.serial || '').slice(0, 120) || null, file, cid);
+  } catch (e) {
+    db.prepare("UPDATE contracts SET nom151_status='error', nom151_error=? WHERE id=?").run(String(e.message).slice(0, 300), cid);
+  }
+}
+app.post('/api/contracts/:id/nom151', auth('admin'), wrap(async (req, res) => {
+  const c = db.prepare('SELECT * FROM contracts WHERE id=?').get(Number(req.params.id));
+  if (!c?.pdf_sha256) throw new HttpError(409, 'El contrato aún no está firmado');
+  await requestNom151(c.id);
+  res.json(contractRow(db.prepare('SELECT * FROM contracts WHERE id=?').get(c.id)));
+}));
+// ---- Sesión de firma (pública, con el enlace del contrato) ----
+const contractByToken = (t) => db.prepare("SELECT c.*, u.name, u.email, u.phone FROM contracts c JOIN users u ON u.id=c.user_id WHERE c.token=?").get(String(t || ''));
+app.get('/api/firma/:token', wrap((req, res) => {
+  const c = contractByToken(req.params.token);
+  if (!c || c.status === 'anulado') throw new HttpError(404, 'Este enlace no es válido o el contrato fue reemplazado');
+  const mask = (x, n) => (x ? String(x).slice(0, 2) + '•••' + String(x).slice(-n) : null);
+  res.json({ folio: c.folio, status: c.status, name: c.name, html: c.html, signed_at: c.signed_at, company: getSettings().company_name || 'Sovime',
+    phone: mask(String(c.phone || '').replace(/\D/g, ''), 4), email: c.email ? c.email.replace(/^(.{2}).*(@.*)$/, '$1•••$2') : null, practice: getSettings().practice_mode === '1' });
+}));
+// código de un solo uso (OTP) por SMS y correo; vence en 10 minutos
+app.post('/api/firma/:token/otp', wrap(async (req, res) => {
+  const c = contractByToken(req.params.token);
+  if (!c || c.status !== 'enviado') throw new HttpError(409, 'Este contrato ya no está pendiente de firma');
+  if (c.otp_sent_at && Date.now() - new Date(c.otp_sent_at + 'Z').getTime() < 60000) throw new HttpError(429, 'Espera un minuto para pedir otro código');
+  if (c.otp_sends >= 6) throw new HttpError(429, 'Se alcanzó el máximo de códigos; pide a tu oficina un enlace nuevo');
+  const s = getSettings();
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const msg = `${s.company_name || 'Sovime'}: tu código para firmar el contrato ${c.folio} es ${code}. Vence en 10 minutos. No lo compartas con nadie.`;
+  const via = [];
+  if (s.practice_mode !== '1') {
+    if (c.phone) { try { const r = await notify.sendSMS(s, notify.phoneE164(c.phone), msg); if (!r?.simulated) via.push('SMS'); } catch (e) { console.error('otp sms', e.message); } }
+    if (c.email) { try { const r = await notify.sendEmail(s, c.email, `Código de firma ${c.folio}`, msg); if (!r?.simulated) via.push('correo'); } catch (e) { console.error('otp correo', e.message); } }
+    if (!via.length) throw new HttpError(503, 'No se pudo enviar el código por SMS ni por correo. Pide a tu oficina que revise los avisos.');
+  }
+  db.prepare("UPDATE contracts SET otp_hash=?, otp_sent_at=datetime('now'), otp_tries=0, otp_sends=otp_sends+1, otp_channel=? WHERE id=?").run(sha256(c.token + code), via.join(' y ') || 'práctica', c.id);
+  res.json({ ok: true, via, ...(s.practice_mode === '1' ? { practice_code: code } : {}) });
+}));
+// firmar: valida el OTP, guarda selfie y documentos, metadatos, genera el PDF con su certificado y pide la constancia NOM-151
+app.post('/api/firma/:token/sign', wrap(async (req, res) => {
+  const c = contractByToken(req.params.token);
+  if (!c || c.status !== 'enviado') throw new HttpError(409, 'Este contrato ya no está pendiente de firma');
+  const b = req.body || {};
+  if (!b.accepted) throw new HttpError(400, 'Marca que leíste y aceptas el contrato');
+  if (!c.otp_hash || Date.now() - new Date(c.otp_sent_at + 'Z').getTime() > 10 * 60000) throw new HttpError(400, 'Pide tu código de verificación (el anterior venció)');
+  if (c.otp_tries >= 5) throw new HttpError(429, 'Demasiados intentos; pide un código nuevo');
+  if (sha256(c.token + String(b.otp || '').trim()) !== c.otp_hash) { db.prepare('UPDATE contracts SET otp_tries=otp_tries+1 WHERE id=?').run(c.id); throw new HttpError(400, 'El código no coincide'); }
+  const lat = Number(b.gps?.lat), lng = Number(b.gps?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new HttpError(400, 'Activa la ubicación del teléfono: es parte del registro de la firma');
+  const need = [['selfie', 'Selfie (prueba de vida)'], ['ine_front', 'INE (frente)'], ['ine_back', 'INE (reverso)'], ['csf', 'Constancia de Situación Fiscal'], ['poliza', 'Póliza de seguro'], ['signature', 'Firma']];
+  const miss = need.filter(([k]) => !b[k]).map(([, l]) => l);
+  if (miss.length) throw new HttpError(400, `Falta: ${miss.join(', ')}`);
+  const files = {}, evidence = [], images = {};
+  for (const [k, l] of need) {
+    const name = saveDocFile(b[k], c.user_id, `firma_${k}`);
+    const buf = fs.readFileSync(path.join(DOCS_DIR, name));
+    files[k] = name; evidence.push({ label: l, sha256: sha256(buf) });
+    if (/\.(png|jpe?g)$/i.test(name)) images[k] = buf;
+  }
+  const now = new Date();
+  const ua = String(req.headers['user-agent'] || '').slice(0, 300);
+  const meta = { ip: req.ip, gps: { lat, lng, acc: Number(b.gps.acc) || null }, device: String(b.device || '').slice(0, 160), ua, signed_utc: now.toISOString(), signed_local: fmtLocal(now), tz: String(b.tz || '').slice(0, 60) };
+  const vars = { ...JSON.parse(c.vars_json || '{}'), contrato_fecha_firma: meta.signed_local };
+  const html = contract.fill(getSettings().contract_template || null, vars);
+  const admin = db.prepare('SELECT name FROM users WHERE id=?').get(c.issued_by)?.name || 'Administración';
+  const pdf = await contract.buildPdf({ html, folio: c.folio,
+    company: { signer: getSettings().contract_company_signer || 'Socio Administrador', issued_at: fmtLocal(new Date(c.issued_at + 'Z')), issued_by: admin },
+    signer: { name: c.name, rfc: vars.prestador_rfc, curp: vars.prestador_curp, id: `${vars.prestador_tipo_identificacion} ${vars.prestador_numero_identificacion}`, email: c.email, phone: c.phone },
+    cert: { text_sha256: c.text_sha256, company_sha256: c.company_sha256, otp: `Código de 6 dígitos enviado por ${c.otp_channel} (${c.phone || ''}${c.email ? ' / ' + c.email : ''})`, otp_verified_at: meta.signed_local,
+      signed_local: meta.signed_local, signed_utc: meta.signed_utc.replace('T', ' ').slice(0, 19), ip: meta.ip, gps: `${lat.toFixed(6)}, ${lng.toFixed(6)}${meta.gps.acc ? ` (±${Math.round(meta.gps.acc)} m)` : ''}`, device: meta.device || '—', ua, evidence, nom151: null },
+    images: { signature: images.signature, selfie: images.selfie, ine_front: images.ine_front, ine_back: images.ine_back } });
+  const pdfName = `contrato_${c.id}_${c.folio}.pdf`;
+  fs.writeFileSync(path.join(DOCS_DIR, pdfName), pdf);
+  const pdfHash = sha256(pdf);
+  tx(() => {
+    db.prepare("UPDATE contracts SET status='firmado', otp_verified_at=datetime('now'), kyc_json=?, meta_json=?, signed_at=datetime('now'), pdf_file=?, pdf_sha256=?, html=? WHERE id=?")
+      .run(JSON.stringify(files), JSON.stringify(meta), pdfName, pdfHash, html, c.id);
+    // el expediente queda con el contrato firmado y los documentos de la sesión por revisar
+    const docs = docsOf(c.user_id);
+    const put = (k, file, ok) => { docs[k] = { ...(docs[k] || {}), file, ok, status: ok ? 'aprobado' : 'pendiente', uploaded_at: now.toISOString() }; };
+    put('contrato', pdfName, true); put('ine', files.ine_front, false); put('csf', files.csf, false); put('seguro', files.poliza, false);
+    saveDocs(c.user_id, docs);
+    db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (?, ?, ?)').run(c.user_id, 'contrato.firmar', `${c.folio} firmado · IP ${meta.ip} · GPS ${lat.toFixed(5)},${lng.toFixed(5)} · OTP por ${c.otp_channel}`);
+  });
+  await requestNom151(c.id);
+  const done = db.prepare('SELECT status, nom151_status, nom151_error FROM contracts WHERE id=?').get(c.id);
+  res.json({ ok: true, folio: c.folio, status: done.status, pdf_sha256: pdfHash, nom151: done.nom151_status, nom151_error: done.nom151_error });
 }));
 
 // ---------- Documentos del expediente (los sube el colaborador o el administrador) ----------
@@ -5332,6 +5533,7 @@ app.get(
   })
 );
 app.get('/t/:token', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'track.html')));
+app.get('/firma/:token', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'firma.html')));
 
 // ---------- Archivos estáticos ----------
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex" />
+<title>Firma de contrato · Sovime</title>
+<link rel="stylesheet" href="/css/app.css" />
+<style>
+  body { background: var(--bg, #f4f6f9); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); display: grid; gap: 14px; }
+  .doc { max-height: 52vh; overflow: auto; background: #fff; color: #111; border: 1px solid var(--border, #d8dee6); border-radius: 10px; padding: 18px 20px; font: 13.5px/1.55 Arial, Helvetica, sans-serif; text-align: justify; }
+  .doc h1 { font-size: 15px; text-align: center; } .doc h2 { font-size: 13px; text-align: center; border-bottom: 1px solid #333; padding-bottom: 3px; }
+  .step { display: grid; gap: 10px; } .step > h2 { margin: 0; font-size: 16px; display: flex; gap: 8px; align-items: center; }
+  .n { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--brand, #1d5a96); color: #fff; font-size: 13px; }
+  .kyc { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .kyc label { border: 1.5px dashed var(--border, #c9d2dd); border-radius: 10px; padding: 10px; display: grid; gap: 6px; text-align: center; cursor: pointer; min-height: 120px; align-content: center; background: var(--card, #fff); }
+  .kyc label.ok { border-style: solid; border-color: var(--ok, #1f8a4c); }
+  .kyc img { max-width: 100%; max-height: 90px; object-fit: contain; margin: 0 auto; border-radius: 6px; }
+  #sig { width: 100%; height: 170px; background: #fff; border: 1.5px solid var(--border, #c9d2dd); border-radius: 10px; touch-action: none; }
+  .otp { font: 600 24px/1 ui-monospace, Menlo, monospace; letter-spacing: 6px; text-align: center; max-width: 220px; }
+  .state { padding: 6px 10px; border-radius: 8px; background: var(--soft, #eef2f6); }
+  .done { text-align: center; } .mono { word-break: break-all; }
+</style>
+</head>
+<body>
+<main class="wrap" id="app"><div class="card"><p class="muted">Cargando tu contrato…</p></div></main>
+<script>
+(() => {
+  const token = location.pathname.split('/').pop();
+  const $ = (s, r = document) => r.querySelector(s);
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const api = async (m, u, b) => { const r = await fetch(u, { method: m, headers: { 'Content-Type': 'application/json' }, body: b ? JSON.stringify(b) : undefined }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'No se pudo completar'); return j; };
+  const app = $('#app');
+  const state = { gps: null, files: {}, device: '', otpSent: false };
+  // imágenes más ligeras (máx. 1600 px) para que la firma se envíe rápido desde datos móviles
+  const shrink = (file) => new Promise((ok, no) => {
+    if (file.type === 'application/pdf') { if (file.size > 7.5 * 1024 * 1024) return no(new Error('El PDF pesa más de 7.5 MB')); const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(file); return; }
+    const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => { const k = Math.min(1, 1600 / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); ok(c.toDataURL('image/jpeg', 0.82)); };
+    img.onerror = () => no(new Error('No se pudo leer la imagen')); img.src = url;
+  });
+  const deviceInfo = async () => {
+    let d = '';
+    try { if (navigator.userAgentData?.getHighEntropyValues) { const h = await navigator.userAgentData.getHighEntropyValues(['model', 'platform', 'platformVersion']); d = [h.model, h.platform, h.platformVersion].filter(Boolean).join(' '); } } catch {}
+    if (!d) { const ua = navigator.userAgent; const m = ua.match(/\(([^)]+)\)/); d = m ? m[1] : ua.slice(0, 80); }
+    return `${d} · pantalla ${screen.width}×${screen.height}`;
+  };
+  const askGps = () => new Promise((ok) => {
+    if (!navigator.geolocation) return ok(null);
+    navigator.geolocation.getCurrentPosition((p) => ok({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }), () => ok(null), { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  });
+  const KYC = [['selfie', '🤳 Selfie', 'image/*', 'user'], ['ine_front', '🪪 INE (frente)', 'image/*', 'environment'], ['ine_back', '🪪 INE (reverso)', 'image/*', 'environment'],
+    ['csf', '🧾 Constancia de Situación Fiscal', 'image/*,application/pdf', ''], ['poliza', '🛡️ Póliza de seguro', 'image/*,application/pdf', '']];
+
+  async function load() {
+    let c;
+    try { c = await api('GET', `/api/firma/${token}`); } catch (e) { app.innerHTML = `<div class="card"><h1 style="margin-top:0">Enlace no disponible</h1><p>${esc(e.message)}</p><p class="muted">Pide a tu oficina un enlace nuevo.</p></div>`; return; }
+    if (c.status !== 'enviado') { app.innerHTML = `<div class="card done"><h1 style="margin-top:0">✅ Contrato firmado</h1><p>El contrato <b class="mono">${esc(c.folio)}</b> ya fue firmado electrónicamente${c.signed_at ? ' el ' + esc(new Date(c.signed_at + 'Z').toLocaleString('es-MX')) : ''}.</p><p class="muted">Tu oficina tiene una copia en tu expediente.</p></div>`; return; }
+    app.innerHTML = `
+      <div class="card"><div class="row between" style="flex-wrap:wrap;gap:6px"><b>${esc(c.company)}</b><small class="muted mono">Folio ${esc(c.folio)}</small></div>
+        <h1 style="margin:8px 0 0;font-size:20px">Firma electrónica de tu contrato</h1>
+        <p class="muted" style="margin:6px 0 0">${esc(c.name)}: lee el contrato, toma las fotos que se piden, firma con el dedo y confirma con el código que te enviaremos. Se registra tu IP, ubicación, fecha, hora y el modelo de tu teléfono.</p></div>
+      <section class="card step"><h2><span class="n">1</span> Lee el contrato</h2><div class="doc" id="doc">${c.html}</div>
+        <label class="row" style="gap:8px"><input type="checkbox" id="acc" /> <span>Leí el contrato completo y acepto sus términos y condiciones.</span></label></section>
+      <section class="card step"><h2><span class="n">2</span> Tu ubicación</h2><div class="state" id="gpsS">Pidiendo tu ubicación…</div><button type="button" class="btn" id="gpsB" hidden>📍 Volver a intentar</button></section>
+      <section class="card step"><h2><span class="n">3</span> Prueba de vida y documentos</h2><p class="muted" style="margin:0">Toma la selfie en este momento, de frente y con buena luz. Sube tu INE vigente por ambos lados, tu Constancia de Situación Fiscal y tu póliza de seguro (foto o PDF).</p>
+        <div class="kyc">${KYC.map(([k, l, a, cap]) => `<label id="k_${k}"><input type="file" accept="${a}" ${cap ? `capture="${cap}"` : ''} data-k="${k}" hidden /><span>${l}</span><small class="muted">Toca para ${cap ? 'tomar la foto' : 'subir'}</small></label>`).join('')}</div></section>
+      <section class="card step"><h2><span class="n">4</span> Tu firma</h2><canvas id="sig"></canvas><div class="row"><button type="button" class="btn sm ghost" id="sigC">Borrar firma</button><small class="muted">Firma con el dedo dentro del recuadro.</small></div></section>
+      <section class="card step"><h2><span class="n">5</span> Código de verificación</h2>
+        <p class="muted" style="margin:0">Te enviaremos un código de 6 dígitos ${[c.phone ? `por SMS al ${esc(c.phone)}` : '', c.email ? `por correo a ${esc(c.email)}` : ''].filter(Boolean).join(' y ')}.</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button type="button" class="btn" id="otpB">📩 Enviarme el código</button><input id="otp" class="otp" inputmode="numeric" maxlength="6" placeholder="••••••" autocomplete="one-time-code" /></div>
+        <small id="otpS" class="muted"></small>
+        <button type="button" class="btn primary lg block" id="go">✍️ Firmar contrato</button><small id="goS" class="muted"></small></section>`;
+    // ubicación
+    const gps = async () => { $('#gpsS').textContent = 'Pidiendo tu ubicación…'; state.gps = await askGps(); $('#gpsS').innerHTML = state.gps ? `✅ Ubicación registrada (±${Math.round(state.gps.acc)} m)` : '⚠️ Activa la ubicación del teléfono y permite que esta página la use: es obligatoria para firmar.'; $('#gpsB').hidden = !!state.gps; };
+    $('#gpsB').onclick = gps; gps();
+    deviceInfo().then((d) => (state.device = d));
+    // fotos y documentos
+    document.querySelectorAll('[data-k]').forEach((inp) => (inp.onchange = async () => {
+      const f = inp.files[0]; if (!f) return;
+      const lab = $('#k_' + inp.dataset.k);
+      try {
+        state.files[inp.dataset.k] = await shrink(f);
+        lab.classList.add('ok');
+        lab.querySelector('small').textContent = '✅ Listo · toca para cambiar';
+        lab.querySelector('img')?.remove();
+        if (f.type.startsWith('image/')) lab.insertAdjacentHTML('afterbegin', `<img src="${state.files[inp.dataset.k]}" alt="" />`);
+      } catch (e) { alert(e.message); }
+    }));
+    // firma
+    const cv = $('#sig'); const ctx = cv.getContext('2d'); let drawing = false, signed = false;
+    const fit = () => { const r = cv.getBoundingClientRect(); cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio; ctx.scale(devicePixelRatio, devicePixelRatio); ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.strokeStyle = '#0b2545'; };
+    fit();
+    const pt = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    cv.onpointerdown = (e) => { drawing = true; cv.setPointerCapture(e.pointerId); ctx.beginPath(); ctx.moveTo(...pt(e)); };
+    cv.onpointermove = (e) => { if (!drawing) return; ctx.lineTo(...pt(e)); ctx.stroke(); signed = true; };
+    cv.onpointerup = cv.onpointercancel = () => (drawing = false);
+    $('#sigC').onclick = () => { ctx.clearRect(0, 0, cv.width, cv.height); signed = false; };
+    // código
+    $('#otpB').onclick = async (e) => {
+      const b = e.currentTarget; b.disabled = true;
+      try { const r = await api('POST', `/api/firma/${token}/otp`, {}); $('#otpS').textContent = r.practice_code ? `Copia de práctica: tu código es ${r.practice_code}` : `Código enviado por ${r.via.join(' y ')}. Vence en 10 minutos.`; setTimeout(() => (b.disabled = false), 60000); $('#otp').focus(); }
+      catch (er) { $('#otpS').textContent = er.message; b.disabled = false; }
+    };
+    // firmar
+    $('#go').onclick = async (e) => {
+      const b = e.currentTarget;
+      const miss = [];
+      if (!$('#acc').checked) miss.push('aceptar el contrato');
+      if (!state.gps) miss.push('tu ubicación');
+      for (const [k, l] of KYC) if (!state.files[k]) miss.push(l.replace(/^\S+\s/, ''));
+      if (!signed) miss.push('tu firma');
+      if (!/^\d{6}$/.test($('#otp').value.trim())) miss.push('el código de 6 dígitos');
+      if (miss.length) { $('#goS').textContent = 'Falta: ' + miss.join(', '); return; }
+      b.disabled = true; $('#goS').textContent = 'Firmando y sellando tu contrato…';
+      try {
+        const r = await api('POST', `/api/firma/${token}/sign`, { accepted: true, otp: $('#otp').value.trim(), gps: state.gps, device: state.device, tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          ...state.files, signature: cv.toDataURL('image/png') });
+        app.innerHTML = `<div class="card done"><h1 style="margin-top:0">✅ Contrato firmado</h1><p>Tu contrato <b class="mono">${esc(r.folio)}</b> quedó firmado electrónicamente.</p>
+          <p class="muted">Huella del documento (SHA-256):<br><span class="mono">${esc(r.pdf_sha256)}</span></p>
+          <p class="muted">${r.nom151 === 'emitida' ? 'Constancia NOM-151 emitida.' : 'La constancia NOM-151 se agrega a tu expediente.'} Tu oficina tiene una copia del contrato.</p></div>`;
+      } catch (er) { $('#goS').textContent = er.message; b.disabled = false; }
+    };
+  }
+  load();
+})();
+</script>
+</body>
+</html>
