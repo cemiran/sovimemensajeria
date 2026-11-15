@@ -2859,7 +2859,75 @@ async function colonyAnchor(col, city, cityName, st, bias, inBox, excludeId = 0)
   const own = colonyCenter(col, city, excludeId);
   return own && own.n >= 2 && !broad(own) ? { lat: own.lat, lng: own.lng, src: 'clientes' } : null;
 }
-async function geocodeAddress({ address, colonia, city, zip, id = 0, bulk = false }) {
+// ---------- Ubicar por vecinos (sin costo): calle + número + colonia contra clientes ya ubicados ----------
+const NB_REF = ['exacta', 'manual', 'gps_entrega', 'repartidor'];
+const colOfC = (c) => c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+function parseStreetNum(c) {
+  const seg = String(c.address || '').split(',')[0].replace(/#/g, ' ').replace(/\s+/g, ' ').trim();
+  const m = seg.match(/^(.*?[A-Za-zÁÉÍÓÚÑáéíóúñ.\-]\s*)\s(?:no\.?\s*|num\.?\s*)?(\d{1,6})(?:\s*-?\s*[A-Za-z])?(?:\s+(?:int|interior|depto|dpto)\b.*)?$/i);
+  if (!m) return null;
+  const street = normCity(m[1]).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^(calle|c|av|avenida|blvd|boulevard|bulevar|calz|calzada)\s+/, '');
+  const col = colKey(colOfC(c));
+  if (street.length < 3 || !col) return null;
+  return { key: `${normCity(c.city)}|${col}|${street}`, num: Number(m[2]) };
+}
+let nbIndex = { at: 0, map: new Map() };
+function nbRefs() {
+  if (Date.now() - nbIndex.at < 10 * 60000) return nbIndex.map;
+  const map = new Map();
+  for (const c of db.prepare(`SELECT id, address, colonia, city, lat, lng FROM customers WHERE lat IS NOT NULL AND geo_quality IN (${NB_REF.map(() => '?').join(',')})`).all(...NB_REF)) {
+    const p = parseStreetNum(c); if (!p) continue;
+    if (!map.has(p.key)) map.set(p.key, []);
+    map.get(p.key).push({ id: c.id, num: p.num, lat: c.lat, lng: c.lng });
+  }
+  nbIndex = { at: Date.now(), map };
+  return map;
+}
+// devuelve { lat, lng, how } si hay vecinos en su calle: entre dos números conocidos (interpola) o uno de su misma cuadra (±30)
+function neighborPin(c) {
+  const p = parseStreetNum(c); if (!p) return null;
+  const pts = (nbRefs().get(p.key) || []).filter((x) => x.id !== c.id);
+  if (!pts.length) return null;
+  let pos = null;
+  const lo = pts.filter((x) => x.num <= p.num).sort((a, b) => b.num - a.num)[0];
+  const hi = pts.filter((x) => x.num >= p.num).sort((a, b) => a.num - b.num)[0];
+  if (lo && hi && lo.num !== hi.num && haversine(lo, hi) < 1.5) { const t = (p.num - lo.num) / (hi.num - lo.num); pos = { lat: lo.lat + t * (hi.lat - lo.lat), lng: lo.lng + t * (hi.lng - lo.lng), how: 'interpolado' }; }
+  else { const near = [...pts].sort((a, b) => Math.abs(a.num - p.num) - Math.abs(b.num - p.num))[0]; if (Math.abs(near.num - p.num) <= 30) pos = { lat: near.lat, lng: near.lng, how: 'misma cuadra' }; }
+  if (!pos) return null;
+  // debe caer en su código postal (si lo conocemos)
+  const z = String(c.zip || '').replace(/\D/g, '').slice(0, 5);
+  const a = z.length === 5 ? db.prepare('SELECT * FROM gm_zip WHERE zip=? AND lat IS NOT NULL').get(z) : null;
+  if (a && !gmaps.inZip(pos, a, 0.6)) return null;
+  return pos;
+}
+// aplica la ubicación por vecinos a los domicilios aproximados (cada 6 h: cada entrega con GPS suma nuevas referencias)
+const nbJob = { running: false, last: null };
+function neighborRefine() {
+  if (nbJob.running) return nbJob.last;
+  nbJob.running = true;
+  const out = { revisados: 0, mejorados: 0 };
+  try {
+    nbIndex.at = 0;
+    const up = db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='calle' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')");
+    for (const c of db.prepare("SELECT id, address, colonia, city, zip, lat, lng, geo_quality FROM customers WHERE geo_quality IN ('calle','colonia','cp','ciudad')").all()) {
+      out.revisados++;
+      const nb = neighborPin(c);
+      if (!nb || (c.lat != null && haversine(c, nb) < 0.03)) continue;
+      up.run(nb.lat, nb.lng, c.id); out.mejorados++;
+    }
+    if (out.mejorados) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `Ubicación por vecinos (calle, número y colonia de clientes ya ubicados): ${out.mejorados} de ${out.revisados} domicilios aproximados`);
+  } catch (e) { console.error('neighborRefine', e.message); }
+  finally { nbJob.running = false; nbJob.last = { at: new Date().toISOString(), ...out }; }
+  return out;
+}
+async function geocodeAddress(args) {
+  const r = await geocodeAddressRaw(args);
+  if (r && r.quality === 'exacta') return r;
+  // Google o el mapa solo dieron calle, colonia o CP: si hay vecinos ya ubicados en su calle, el número da un punto mejor
+  const nb = neighborPin({ id: args.id || 0, address: args.address, colonia: args.colonia, city: args.city, zip: args.zip });
+  return nb ? { lat: nb.lat, lng: nb.lng, quality: 'calle', how: nb.how } : r;
+}
+async function geocodeAddressRaw({ address, colonia, city, zip, id = 0, bulk = false }) {
   const cityName = osmCity(city);
   const st = stateOf(city);
   const ctr = await cityCenter(city).catch(() => null);
@@ -3592,7 +3660,8 @@ function registerEvidence(req, result) {
   if (result === 'entregado' && !counter && lat != null) {
     const cq = db.prepare('SELECT geo_quality, lat FROM customers WHERE id=?').get(o.customer_id);
     const far = cq.geo_quality === 'ciudad' || cq.lat == null ? 25000 : 3000; // del centro de la ciudad cualquier punto de la ciudad; de la colonia, hasta 3 km
-    if ((cq.lat == null || APPROX_GEO.includes(cq.geo_quality)) && (dist == null || dist <= far))
+    const acc = Number(b.acc) || 0; // precisión del GPS del teléfono (m): una lectura imprecisa no mueve el pin
+    if ((cq.lat == null || APPROX_GEO.includes(cq.geo_quality)) && (dist == null || dist <= far) && (!acc || acc <= 100))
       db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='gps_entrega' WHERE id=?").run(lat, lng, o.customer_id);
   }
   notify.queueSheet(evId, o.id);
@@ -5224,6 +5293,8 @@ if (require.main === module) {
   setTimeout(geocodePending, 5000);
   setTimeout(() => routedRefine(), 90000);
   setInterval(() => routedRefine(), 10 * 60000).unref();
+  setTimeout(neighborRefine, 120000);
+  setInterval(neighborRefine, 6 * 3600000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
   app.listen(PORT, () => console.log(`Sovime Mensajería escuchando en http://localhost:${PORT}`));
 }
@@ -5239,5 +5310,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin };
 module.exports = app;

@@ -6211,7 +6211,7 @@ async function viewDeliver(v, id, mode) {
   } }));
   $('#submit').onclick = async () => {
     const btn = $('#submit');
-    const body = { photo, lat: pos?.lat ?? null, lng: pos?.lng ?? null, notes: $('#notes').value, barcode_verified: verified, captured_at: new Date().toISOString() };
+    const body = { photo, lat: pos?.lat ?? null, lng: pos?.lng ?? null, acc: Math.round(pos?.acc ?? pos?.accuracy ?? 0) || null, notes: $('#notes').value, barcode_verified: verified, captured_at: new Date().toISOString() };
     if (isFail) {
       body.reason = $('#reason').value;
       if (!body.reason) return toast('Selecciona el motivo', 'bad');
