@@ -883,7 +883,7 @@ const NAV_GROUPS = [
   ['Catálogos', [['offices', 'Oficinas', 'building'], ['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
-  ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
+  ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['hr', 'Capital Humano', 'person'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
 const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
@@ -3469,6 +3469,34 @@ async function accountDetail(id) {
 }
 
 // ================= Inventario asignado a repartidores =================
+// Balance de inventario por repartidor: lo que tenía + lo asignado − entregado − devuelto = lo que debe traer, contra lo que trae hoy
+async function custodyBalance() {
+  const t = today();
+  const m = modal('Balance de inventario por repartidor', `<div class="stack">
+    <div class="row" style="gap:8px;flex-wrap:wrap"><label class="f">Desde<input type="date" id="cbF" value="${t.slice(0, 8)}01" /></label><label class="f">Hasta<input type="date" id="cbT" value="${t}" /></label>
+      <label class="f grow">Buscar<input id="cbQ" placeholder="Repartidor o producto" /></label><button class="btn" id="cbX">${icon('download')} Excel</button></div>
+    <small class="muted">Debe traer = lo que tenía al inicio + lo asignado − lo entregado a clientes − lo devuelto al almacén. La diferencia contra lo que trae hoy marca faltantes (rojo) o sobrantes.</small>
+    <div id="cbBody"><p class="muted">Calculando…</p></div></div>`, { wide: true });
+  let data = { rows: [] };
+  const draw = () => {
+    const q = normH($('#cbQ', m.el).value);
+    const rows = data.rows.filter((r) => !q || normH(r.driver + ' ' + r.product).includes(q));
+    const n = (x) => fmtN(x || 0);
+    const diff = (r) => r.diferencia == null ? '<small class="muted">—</small>' : r.diferencia === 0 ? '<b style="color:var(--ok)">✓ 0</b>' : `<b style="color:${r.diferencia < 0 ? 'var(--bad)' : 'var(--warn,#b26d00)'}">${r.diferencia > 0 ? '+' : ''}${n(r.diferencia)}</b>`;
+    $('#cbBody', m.el).innerHTML = rows.length ? `<div class="table-wrap" style="max-height:60vh"><table><thead><tr><th>Repartidor</th><th>Producto</th><th class="r">Tenía</th><th class="r">+ Asignado</th><th class="r">− Entregado</th><th class="r">− Devuelto</th><th class="r">Debe traer</th><th class="r">Trae hoy</th><th class="r">Diferencia</th><th class="r">Por entregar</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td><b>${esc(r.driver)}</b>${r.active ? '' : ' <small class="muted">(inactivo)</small>'}</td><td>${esc(r.product)}${r.serialized ? ' <small class="muted">S/N</small>' : ''}</td><td class="r num">${n(r.inicial)}</td><td class="r num">${n(r.asignado)}</td><td class="r num">${n(r.entregado)}</td><td class="r num">${n(r.devuelto)}</td><td class="r num"><b>${n(r.debe_traer)}</b></td><td class="r num">${n(r.trae)}</td><td class="r num">${diff(r)}</td><td class="r num">${n(r.por_entregar)}${r.faltan_para_ruta ? `<br><small style="color:var(--bad)">le faltan ${n(r.faltan_para_ruta)}</small>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">Sin movimientos de inventario de repartidores en esas fechas.</p>';
+  };
+  const load = async () => { $('#cbBody', m.el).innerHTML = '<p class="muted">Calculando…</p>'; data = await GET(`/api/custody/balance?from=${$('#cbF', m.el).value}&to=${$('#cbT', m.el).value}`); draw(); };
+  $('#cbF', m.el).onchange = load; $('#cbT', m.el).onchange = load; $('#cbQ', m.el).oninput = draw;
+  $('#cbX', m.el).onclick = async () => {
+    const X = await loadXLSX(); const wb = X.utils.book_new();
+    const rows = [['Repartidor', 'Producto', 'SKU', 'Tenía', 'Asignado', 'Entregado', 'Devuelto', 'Debe traer', 'Trae hoy', 'Diferencia', 'Por entregar']].concat(data.rows.map((r) => [r.driver, r.product, r.sku, r.inicial, r.asignado, r.entregado, r.devuelto, r.debe_traer, r.trae, r.diferencia ?? '', r.por_entregar]));
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), 'Balance');
+    X.writeFile(wb, `balance-repartidores-${data.from}-a-${data.to}.xlsx`);
+  };
+  load().catch((e) => toast(e.message, 'bad'));
+}
 function assignToDriver(drivers, products, preDriver) {
   const act = drivers.filter((d) => d.active);
   if (!act.length) return toast('Primero da de alta repartidores en Usuarios', 'bad');
@@ -3519,7 +3547,7 @@ function assignToDriver(drivers, products, preDriver) {
         <div class="row"><small class="muted">${on}/${p.list.length}</small><input type="number" min="1" max="${p.list.length}" placeholder="Cant." style="width:80px" data-firstn="${p.id}" title="Seleccionar los primeros N" /><button class="btn sm" data-firstgo="${p.id}">Elegir</button></div></div>
         <div style="max-height:220px;overflow:auto;margin-top:6px">${p.list.map((s) => `<label class="row" style="padding:5px 0;border-top:1px solid var(--border)"><input type="checkbox" data-sn="${esc(s.serial)}" ${selSN.has(s.serial) ? 'checked' : ''} /> <span class="mono grow">${esc(s.serial)}</span>
           <small class="muted">${s.status === 'asignado' ? `Pedido ${esc(s.tracking_code || '')}${s.customer ? ' · ' + esc(s.customer) : ''}` : 'Libre'}</small></label>`).join('')}</div></div>`;
-    }).join('') + (pl.length ? `<div class="card" style="padding:10px 12px"><b>Productos por cantidad</b><div class="table-wrap"><table><tbody>${pl.map((p) => `<tr><td><label class="row"><input type="checkbox" data-pp="${p.id}" ${selQty.has(p.id) ? 'checked' : ''} /> <span><b>${esc(p.name)}</b><br><small class="muted">${esc(p.sku)} · disponibles: ${p.available} ${esc(p.unit || 'pza')}</small></span></label></td>
+    }).join('') + (pl.length ? `<div class="card" style="padding:10px 12px"><b>Productos por cantidad</b> <small class="muted">· los equipos con S/N también se pueden dar solo por cantidad: el repartidor registra el S/N al entregar</small><div class="table-wrap"><table><tbody>${pl.map((p) => `<tr><td><label class="row"><input type="checkbox" data-pp="${p.id}" ${selQty.has(p.id) ? 'checked' : ''} /> <span><b>${esc(p.name)}</b>${p.by_qty ? ' <span class="chip">sin detalle de S/N</span>' : ''}<br><small class="muted">${esc(p.sku)} · disponibles: ${p.available} ${esc(p.unit || 'pza')}</small></span></label></td>
         <td class="r"><input type="number" min="1" max="${p.available}" value="${selQty.get(p.id) || 1}" style="width:90px" data-pq="${p.id}" /></td></tr>`).join('')}</tbody></table></div></div>` : '')) ||
       `<p class="muted">${q ? 'Nada coincide con la búsqueda.' : 'No hay inventario disponible en el almacén para asignar.'}</p>`;
     $$('[data-sn]', box).forEach((c) => (c.onchange = () => { c.checked ? selSN.add(c.dataset.sn) : selSN.delete(c.dataset.sn); draw(); }));
@@ -3630,7 +3658,7 @@ async function viewMyStock(v) {
     <div class="grid g2"><div class="card kpi"><div class="label">Unidades que traes</div><div class="value">${r.total || 0}</div></div>
       <div class="card kpi"><div class="label">Productos</div><div class="value">${r.items?.length || 0}</div></div></div>
     ${(r.items || []).map((it) => `<div class="card" style="margin-top:12px"><div class="row between"><div><b>${esc(it.name)}</b><br><small class="muted">${esc(it.sku)}</small></div><b style="font-size:22px">${it.qty}</b></div>
-      ${it.serialized ? `<div class="sn-list" style="margin-top:8px">${it.serials.map((s) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono">${esc(s.serial)}</span><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Libre'}</small></div>`).join('')}</div>` : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">No traes inventario asignado. El almacén te lo asigna antes de salir.</div>'}
+      ${it.serialized && it.qty > it.serials.length ? `<div class="offline-bar" style="margin:8px 0 0">📦 ${it.qty - it.serials.length} de tu dotación sin S/N: al entregar elige o escanea el S/N del equipo que dejas.</div>` : ''}${it.serialized ? `<div class="sn-list" style="margin-top:8px">${it.serials.map((s) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span class="mono">${esc(s.serial)}</span><small class="muted">${s.order ? 'Pedido ' + esc(s.order) : 'Libre'}</small></div>`).join('')}</div>` : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">No traes inventario asignado. El almacén te lo asigna antes de salir.</div>'}
     ${(r.open_items || []).length ? `<div class="card" style="margin-top:12px"><h2>🔓 Abierto · cualquier repartidor</h2><p class="muted" style="margin-top:0">Inventario que puede entregar cualquiera. Al usarlo en una entrega pasa a ser tuyo.</p>
       ${r.open_items.map((it) => `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><span><b>${esc(it.name)}</b>${it.serialized ? `<br><small class="muted mono">${it.serials.map((x) => esc(x.serial)).join(' · ')}</small>` : ''}</span><b>${it.qty}</b></div>`).join('')}</div>` : ''}
     <div class="card" style="margin-top:12px"><h2>Movimientos</h2><div class="timeline">${custodyLogHtml(r.log || [])}</div></div>`);
@@ -4337,7 +4365,7 @@ async function viewInventory(v) {
   const totalUnits = bd.products.reduce((a, x) => a + x.in_warehouses, 0);
   const outUnits = bd.products.reduce((a, x) => a + x.drivers + x.open, 0);
   const withDrv = cust.drivers.filter((d) => d.total);
-  v.innerHTML = topbar('Inventario', `<a class="btn primary" href="#/inventory?view=list">${icon('inv')} Ver en listado</a><button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="whXfer">${icon('building')} Traspaso entre almacenes</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
+  v.innerHTML = topbar('Inventario', `<a class="btn primary" href="#/inventory?view=list">${icon('inv')} Ver en listado</a><button class="btn" id="toDrv">${icon('truck')} Asignar a repartidor</button><button class="btn" id="custBal">${icon('chart')} Balance de repartidores</button><button class="btn" id="whXfer">${icon('building')} Traspaso entre almacenes</button><button class="btn" id="scanIn">${icon('scan')} Entrada por escaneo</button><button class="btn" id="scanOut">${icon('scan')} Salida / ajuste</button><a class="btn" href="#/serials">${icon('tag')} Números de serie</a><button class="btn" id="impInv">${icon('upload')} Importar Excel / Sheets</button><button class="btn primary" id="newP">${icon('plus')} Producto</button>`) + `
   <div class="grid g3"><div class="card kpi"><div class="label">Productos</div><div class="value">${r.total}</div></div>
     <button class="card kpi kpi-btn" id="kpiWh" title="Ver dónde está cada unidad"><div class="label">Unidades en almacén</div><div class="value">${fmtN(totalUnits)}</div><div class="sub">${fmtN(outUnits)} fuera · ver detalle ›</div></button>
     <div class="card kpi"><div class="label">Bajo mínimo</div><div class="value" style="color:var(--bad)">${r.rows.filter((x) => x.stock <= x.min_stock).length}</div></div></div>
@@ -4375,6 +4403,7 @@ async function viewInventory(v) {
   $('#whXfer').onclick = $('#whXfer2').onclick = () => transferDialog(whs);
   $$('[data-wh]', v).forEach((b) => (b.onclick = () => warehouseDetail(Number(b.dataset.wh), whs)));
   $('#toDrv').onclick = () => assignToDriver(cust.drivers, r.rows);
+  $('#custBal').onclick = () => custodyBalance();
   $$('[data-cust]', v).forEach((tr) => (tr.onclick = () => custodyDetail(cust.drivers.find((d) => String(d.id) === tr.dataset.cust))));
   $$('tr[data-p]', v).forEach((tr) => (tr.onclick = () => productForm(JSON.parse(tr.dataset.p))));
   const snProducts = r.rows.filter((x) => x.serialized);
@@ -4766,6 +4795,102 @@ function importUsers() {
       });
     } catch (e) { toast(e.message, 'bad'); }
   };
+}
+
+// ================= ADMINISTRACIÓN: Capital Humano =================
+const PAY_KIND = { pago: ['Pago', 'ok'], anticipo: ['Anticipo', 'warn'], bono: ['Bono', 'ok'], descuento: ['Descuento', 'bad'] };
+const PER_TXT = { semanal: 'Semanal', quincenal: 'Quincenal', mensual: 'Mensual' };
+const fmtDay = (d) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' }) : '');
+const perLbl = (r) => `${fmtDay(r.from)} – ${fmtDay(r.to)}`;
+const hrState = { offset: 0, from: '', to: '', q: '' };
+async function viewHR(v) {
+  const qs = hrState.from && hrState.to ? `from=${hrState.from}&to=${hrState.to}` : `offset=${hrState.offset}`;
+  const r = await GET('/api/hr?' + qs);
+  const sum = (k) => r.rows.reduce((a, x) => a + (x[k] || 0), 0);
+  v.innerHTML = topbar('Capital Humano', '<button class="btn" id="hrX">' + icon('download') + ' Excel</button>', 'Ganancias por entregas según el periodo de pago de cada colaborador, pagos, anticipos, bonos, descuentos y saldo por pagar.') + `
+  <div class="toolbar card" style="margin-bottom:12px">
+    <div class="pill-tabs" id="hrPer">${[[0, 'Periodo actual'], [-1, 'Periodo anterior'], [-2, 'Hace 2 periodos'], ['c', 'Fechas…']].map(([k, l]) => `<button data-o="${k}" class="${(k === 'c' ? !!hrState.from : !hrState.from && hrState.offset === k) ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <span id="hrDates" class="row" style="gap:6px" ${hrState.from ? '' : 'hidden'}><input type="date" id="hrF" value="${hrState.from}" /><input type="date" id="hrT" value="${hrState.to}" /><button class="btn sm" id="hrGo">Ver</button></span>
+    <label class="search">${icon('search')}<input id="hrQ" type="search" placeholder="Buscar colaborador…" value="${esc(hrState.q)}" /></label>
+  </div>
+  <div class="grid g4">
+    <div class="card kpi"><div class="label">Ganado en el periodo</div><div class="value">${money(sum('earned'))}</div><div class="sub">${fmtN(sum('delivered'))} entregas · ${fmtN(sum('failed'))} intentos</div></div>
+    <div class="card kpi"><div class="label">Pagado en el periodo</div><div class="value">${money(sum('paid'))}</div><div class="sub">incluye anticipos</div></div>
+    <div class="card kpi"><div class="label">Saldo del periodo</div><div class="value" style="color:${sum('balance') > 0 ? 'var(--warn,#b26d00)' : 'var(--ok)'}">${money(sum('balance'))}</div><div class="sub">ganado + bonos − descuentos − pagado</div></div>
+    <div class="card kpi"><div class="label">Saldo acumulado por pagar</div><div class="value" style="color:${sum('total_balance') > 0 ? 'var(--bad)' : 'var(--ok)'}">${money(sum('total_balance'))}</div><div class="sub">desde su alta</div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>Colaborador</th><th>Periodo</th><th class="r">Entregas</th><th class="r">Fallidos</th><th class="r">Ganado</th><th class="r">Bonos / desc.</th><th class="r">Pagado</th><th class="r">Saldo periodo</th><th class="r">Acumulado</th><th></th></tr></thead><tbody id="hrBody"></tbody></table></div>
+  <small class="muted">La ganancia usa la tarifa por entrega y por intento fallido del expediente de cada persona (Usuarios → la persona → Expediente y pago).</small></div>`;
+  const draw = () => {
+    const q = normH(hrState.q);
+    const rows = r.rows.filter((x) => !q || normH(x.name + ' ' + (x.office || '')).includes(q));
+    $('#hrBody', v).innerHTML = rows.map((x) => `<tr class="click" data-hr="${x.id}"><td><b>${esc(x.name)}</b>${x.active ? '' : ' <span class="chip off">Inactivo</span>'}<br><small class="muted">${x.hire_type === 'interno' ? 'Interno' : 'Externo'}${x.office ? ' · ' + esc(x.office) : ''} · ${PER_TXT[x.pay_period] || x.pay_period}${x.rate_delivery ? ' · ' + money(x.rate_delivery) + '/entrega' : ' · <b style="color:var(--bad)">sin tarifa</b>'}</small></td>
+      <td><small>${perLbl(x)}</small></td><td class="r num">${fmtN(x.delivered)}</td><td class="r num">${fmtN(x.failed)}</td><td class="r num">${money(x.earned)}</td>
+      <td class="r num"><small>${x.bono ? '+' + money(x.bono) : ''}${x.bono && x.descuento ? '<br>' : ''}${x.descuento ? '−' + money(x.descuento) : ''}${x.bono || x.descuento ? '' : '—'}</small></td>
+      <td class="r num">${money(x.paid)}</td><td class="r num"><b style="color:${x.balance > 0 ? 'var(--warn,#b26d00)' : x.balance < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(x.balance)}</b></td>
+      <td class="r num">${money(x.total_balance)}</td><td class="r"><button class="btn sm primary" data-pay="${x.id}">Registrar pago</button></td></tr>`).join('') || '<tr><td colspan="10" class="empty">Sin colaboradores con entregas o tarifa.</td></tr>';
+    $$('[data-pay]', v).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const x = r.rows.find((y) => y.id === Number(b.dataset.pay)); hrMove(x, 'pago', () => render()); }));
+    $$('[data-hr]', v).forEach((tr) => (tr.onclick = () => hrDetail(Number(tr.dataset.hr))));
+  };
+  draw();
+  $$('#hrPer button', v).forEach((b) => (b.onclick = () => {
+    if (b.dataset.o === 'c') { $('#hrDates', v).hidden = false; $$('#hrPer button', v).forEach((x) => x.classList.toggle('on', x === b)); return; }
+    hrState.from = hrState.to = ''; hrState.offset = Number(b.dataset.o); render();
+  }));
+  $('#hrGo', v).onclick = () => { const f = $('#hrF', v).value, t = $('#hrT', v).value; if (!f || !t || f > t) return toast('Elige las fechas', 'bad'); hrState.from = f; hrState.to = t; render(); };
+  $('#hrQ', v).oninput = (e) => { hrState.q = e.target.value; draw(); };
+  $('#hrX', v).onclick = async () => {
+    const X = await loadXLSX(); const wb = X.utils.book_new();
+    const rows = [['Colaborador', 'Tipo', 'Oficina', 'Periodo de pago', 'Desde', 'Hasta', 'Entregas', 'Fallidos', 'Tarifa entrega', 'Tarifa fallido', 'Ganado', 'Bonos', 'Descuentos', 'Anticipos', 'Pagos', 'Saldo periodo', 'Saldo acumulado', 'Banco', 'CLABE']]
+      .concat(r.rows.map((x) => [x.name, x.hire_type, x.office || '', x.pay_period, x.from, x.to, x.delivered, x.failed, x.rate_delivery, x.rate_failed, x.earned, x.bono, x.descuento, x.anticipo, x.pago, x.balance, x.total_balance, x.bank, x.clabe]));
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(rows), 'Capital Humano');
+    X.writeFile(wb, `capital-humano-${today()}.xlsx`);
+  };
+}
+// registrar pago, anticipo, bono o descuento
+function hrMove(x, kind, after) {
+  const d = modal(`Movimiento · ${esc(x.name)}`, `<form id="hmF" class="stack">
+    <div class="pill-tabs" id="hmK">${Object.entries(PAY_KIND).map(([k, [l]]) => `<button type="button" data-k="${k}" class="${k === kind ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="grid g2"><label class="f">Monto ($)<input type="number" name="amount" min="0.01" step="0.01" required value="${kind === 'pago' && x.balance > 0 ? x.balance.toFixed(2) : ''}" /></label>
+      <label class="f">Fecha<input type="date" name="date" value="${today()}" /></label></div>
+    <div class="grid g2"><label class="f">Periodo desde<input type="date" name="period_from" value="${x.from || ''}" /></label><label class="f">Periodo hasta<input type="date" name="period_to" value="${x.to || ''}" /></label></div>
+    <div class="grid g2"><label class="f">Forma de pago<select name="method"><option>Transferencia</option><option>Efectivo</option><option>Depósito</option><option>Otro</option></select></label>
+      <label class="f">Referencia<input name="reference" placeholder="Folio de la transferencia…" /></label></div>
+    <label class="f">Notas<input name="notes" placeholder="Opcional" /></label>
+    ${x.balance != null ? `<small class="muted">Saldo del periodo: <b>${money(x.balance)}</b> · ganado ${money(x.earned)} por ${fmtN(x.delivered)} entregas${x.bank ? ` · ${esc(x.bank)} ${esc(x.clabe || '')}` : ''}</small>` : ''}</form>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="hmOk">Guardar</button>' });
+  let k = kind;
+  $$('#hmK button', d.el).forEach((b) => (b.onclick = () => { k = b.dataset.k; $$('#hmK button', d.el).forEach((y) => y.classList.toggle('on', y === b)); }));
+  $('#hmOk', d.el).onclick = async () => {
+    const f = $('#hmF', d.el);
+    if (!f.reportValidity()) return;
+    try { await POST('/api/hr/movements', { user_id: x.id, kind: k, ...Object.fromEntries(new FormData(f)) }); toast(`${PAY_KIND[k][0]} registrado`, 'ok'); d.close(); after?.(); }
+    catch (e) { toast(e.message, 'bad'); }
+  };
+}
+async function hrDetail(id) {
+  const r = await GET('/api/hr/' + id);
+  const m = modal(`Capital Humano · ${esc(r.name)}`, `<div class="stack">
+    <div class="mini-stats"><div><small>Periodo de pago</small><b>${PER_TXT[r.pay_period] || r.pay_period}</b></div><div><small>Tarifa</small><b>${money(r.rate_delivery)} / entrega${r.rate_failed ? ' · ' + money(r.rate_failed) + ' / fallido' : ''}</b></div>
+      <div><small>Saldo acumulado</small><b style="color:${r.total_balance > 0 ? 'var(--bad)' : 'var(--ok)'}">${money(r.total_balance)}</b></div><div><small>Cuenta</small><b>${esc(r.bank || '—')} ${esc(r.clabe || '')}</b></div></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap">${Object.entries(PAY_KIND).map(([k, [l]]) => `<button class="btn sm" data-mk="${k}">+ ${l}</button>`).join('')}<button class="btn sm ghost" id="hdExp">${icon('edit')} Tarifas y cuenta</button></div>
+    <h3 style="margin:4px 0 0">Periodos</h3>
+    <div class="table-wrap" style="max-height:260px"><table><thead><tr><th>Periodo</th><th class="r">Entregas</th><th class="r">Ganado</th><th class="r">Bonos / desc.</th><th class="r">Pagado</th><th class="r">Saldo</th><th></th></tr></thead><tbody>
+      ${r.periods.map((x, i) => `<tr><td>${perLbl(x)}${i === 0 ? ' <span class="chip">actual</span>' : ''}</td><td class="r num">${fmtN(x.delivered)}${x.failed ? ` <small class="muted">+${x.failed} fall.</small>` : ''}</td><td class="r num">${money(x.earned)}</td>
+        <td class="r num"><small>${x.bono ? '+' + money(x.bono) : ''} ${x.descuento ? '−' + money(x.descuento) : ''}</small></td><td class="r num">${money(x.paid)}</td>
+        <td class="r num"><b style="color:${x.balance > 0 ? 'var(--warn,#b26d00)' : x.balance < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(x.balance)}</b></td><td class="r">${x.balance > 0 ? `<button class="btn sm" data-pp="${i}">Pagar</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+    <h3 style="margin:4px 0 0">Movimientos</h3>
+    <div class="table-wrap" style="max-height:240px"><table><tbody>${r.moves.map((x) => `<tr><td><span class="chip ${PAY_KIND[x.kind][1]}">${PAY_KIND[x.kind][0]}</span></td><td class="num">${esc(x.date)}</td><td class="r num"><b>${x.kind === 'bono' ? '+' : '−'}${money(x.amount)}</b></td>
+      <td><small>${x.period_from ? 'Periodo ' + perLbl({ from: x.period_from, to: x.period_to }) + ' · ' : ''}${esc(x.method || '')}${x.reference ? ' · ' + esc(x.reference) : ''}${x.notes ? '<br>' + esc(x.notes) : ''}<br><span class="muted">por ${esc(x.by_name || '—')}</span></small></td>
+      <td class="r"><button class="btn ghost sm" data-del="${x.id}" title="Eliminar" style="color:var(--bad)">${icon('x')}</button></td></tr>`).join('') || '<tr><td class="muted">Sin movimientos registrados.</td></tr>'}</tbody></table></div></div>`, { wide: true });
+  const again = () => { m.close(); hrDetail(id); if (location.hash.startsWith('#/hr')) render(); };
+  $$('[data-mk]', m.el).forEach((b) => (b.onclick = () => hrMove({ ...r, ...r.periods[0] }, b.dataset.mk, again)));
+  $$('[data-pp]', m.el).forEach((b) => (b.onclick = () => hrMove({ ...r, ...r.periods[Number(b.dataset.pp)] }, 'pago', again)));
+  $$('[data-del]', m.el).forEach((b) => (b.onclick = async () => {
+    if (!(await confirmDlg('¿Eliminar este movimiento? El saldo se recalcula.'))) return;
+    try { await api('DELETE', '/api/hr/movements/' + b.dataset.del); toast('Movimiento eliminado', 'ok'); again(); } catch (e) { toast(e.message, 'bad'); }
+  }));
+  $('#hdExp', m.el).onclick = () => { m.close(); userPanel(id); };
 }
 
 // ================= ADMINISTRACIÓN: Actividad =================
@@ -6284,7 +6409,7 @@ async function render() {
   const driver = driverMode();
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
-    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, settings: viewSettings };
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());

@@ -498,6 +498,19 @@ addCols('users', [['cities', 'TEXT']]);
 addCols('users', [['reports_to', 'INTEGER REFERENCES users(id)']]);
 // última vez que se intentó mejorar la ubicación del cliente (para no repetir la búsqueda cada pocos minutos)
 addCols('customers', [['geo_tried', 'TEXT']]);
+// Capital Humano: pagos, anticipos, bonos y descuentos de cada colaborador
+db.exec(`CREATE TABLE IF NOT EXISTS staff_payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('pago','anticipo','bono','descuento')),
+  amount REAL NOT NULL,
+  date TEXT NOT NULL,
+  period_from TEXT, period_to TEXT,
+  method TEXT, reference TEXT, notes TEXT,
+  by_user INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_staff_pay_user ON staff_payments(user_id, date);`);
 // Pedidos por surtir: piezas de cada artículo ya descontadas del inventario (lo demás espera existencia)
 if (!db.prepare('PRAGMA table_info(order_items)').all().some((c) => c.name === 'filled')) {
   db.exec('ALTER TABLE order_items ADD COLUMN filled INTEGER NOT NULL DEFAULT 0');

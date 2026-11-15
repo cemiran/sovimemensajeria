@@ -1196,6 +1196,88 @@ app.get('/api/users/:id/pay', auth('admin'), wrap((req, res) => {
     amount: Math.round((d * p.pay_per_delivery + f * p.pay_per_failed) * 100) / 100 });
 }));
 
+// ---------- Capital Humano: ganancias, pagos y saldos por periodo de pago ----------
+const isoD = (d) => d.toLocaleDateString('en-CA');
+// periodo que contiene la fecha (offset -1 = el anterior): semanal lun–dom, quincenal 1–15 / 16–fin, mensual
+function payPeriod(type, dateStr, offset = 0) {
+  const d = new Date(dateStr + 'T12:00:00');
+  if (type === 'semanal') {
+    const st = new Date(d); st.setDate(d.getDate() - ((d.getDay() + 6) % 7) + offset * 7);
+    const en = new Date(st); en.setDate(st.getDate() + 6);
+    return { from: isoD(st), to: isoD(en) };
+  }
+  if (type === 'quincenal') {
+    let half = d.getFullYear() * 24 + d.getMonth() * 2 + (d.getDate() > 15 ? 1 : 0) + offset;
+    const y = Math.floor(half / 24), m = Math.floor((half % 24) / 2), h = half % 2;
+    return { from: isoD(new Date(y, m, h ? 16 : 1, 12)), to: isoD(h ? new Date(y, m + 1, 0, 12) : new Date(y, m, 15, 12)) };
+  }
+  const st = new Date(d.getFullYear(), d.getMonth() + offset, 1, 12);
+  return { from: isoD(st), to: isoD(new Date(st.getFullYear(), st.getMonth() + 1, 0, 12)) };
+}
+const PAY_KINDS = ['pago', 'anticipo', 'bono', 'descuento'];
+const money2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+function hrSummary(uid, p, from, to) {
+  const ev = db.prepare(`SELECT SUM(result='entregado') d, SUM(result='fallido') f FROM evidences WHERE driver_id=? AND date(created_at,'localtime') BETWEEN ? AND ?`).get(uid, from, to);
+  const mv = db.prepare('SELECT kind, SUM(amount) n FROM staff_payments WHERE user_id=? AND date BETWEEN ? AND ? GROUP BY kind').all(uid, from, to);
+  const k = Object.fromEntries(PAY_KINDS.map((x) => [x, money2(mv.find((m) => m.kind === x)?.n)]));
+  const delivered = ev.d || 0, failed = ev.f || 0;
+  const earned = money2(delivered * (p.pay_per_delivery || 0) + failed * (p.pay_per_failed || 0));
+  return { from, to, delivered, failed, earned, ...k, paid: money2(k.pago + k.anticipo), balance: money2(earned + k.bono - k.descuento - k.pago - k.anticipo) };
+}
+// saldo acumulado: todo lo ganado (con su tarifa actual) + bonos − descuentos − pagos y anticipos
+function hrTotal(uid, p) {
+  const first = db.prepare("SELECT MIN(date(created_at,'localtime')) d FROM evidences WHERE driver_id=?").get(uid).d;
+  const firstPay = db.prepare('SELECT MIN(date) d FROM staff_payments WHERE user_id=?').get(uid).d;
+  const from = [p.hire_date, first, firstPay].filter(Boolean).sort()[0] || today();
+  return hrSummary(uid, p, from, '9999-12-31').balance;
+}
+app.get('/api/hr', auth('admin'), wrap((req, res) => {
+  const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const custom = okD(req.query.from) && okD(req.query.to) ? { from: req.query.from, to: req.query.to } : null;
+  const off = Math.max(-24, Math.min(0, Number(req.query.offset) || 0));
+  const users = db.prepare(`SELECT u.id, u.name, u.role, u.active, u.vehicle, u.can_deliver, (SELECT name FROM warehouses w WHERE w.id = u.office_id) office FROM users u
+    WHERE u.deleted_at IS NULL AND (u.role = 'repartidor' OR u.can_deliver = 1 OR EXISTS (SELECT 1 FROM staff_profiles sp WHERE sp.user_id = u.id AND (sp.pay_per_delivery > 0 OR sp.pay_per_failed > 0))
+      OR EXISTS (SELECT 1 FROM staff_payments x WHERE x.user_id = u.id)) ORDER BY u.active DESC, u.name`).all();
+  const rows = users.map((u) => {
+    const p = profileOf(u.id);
+    const per = custom || payPeriod(p.pay_period || 'semanal', today(), off);
+    return { ...u, hire_type: p.hire_type, pay_period: p.pay_period || 'semanal', rate_delivery: p.pay_per_delivery || 0, rate_failed: p.pay_per_failed || 0,
+      bank: p.bank_name || '', clabe: p.clabe || '', ...hrSummary(u.id, p, per.from, per.to), total_balance: hrTotal(u.id, p) };
+  });
+  res.json({ offset: off, custom: !!custom, rows });
+}));
+app.get('/api/hr/:id', auth('admin'), wrap((req, res) => {
+  const u = db.prepare('SELECT id, name, role, active FROM users WHERE id=?').get(Number(req.params.id));
+  if (!u) throw new HttpError(404, 'Colaborador no encontrado');
+  const p = profileOf(u.id);
+  const type = p.pay_period || 'semanal';
+  const periods = Array.from({ length: 12 }, (_, i) => { const per = payPeriod(type, today(), -i); return hrSummary(u.id, p, per.from, per.to); });
+  const moves = db.prepare('SELECT m.*, b.name by_name FROM staff_payments m LEFT JOIN users b ON b.id = m.by_user WHERE m.user_id=? ORDER BY m.date DESC, m.id DESC LIMIT 200').all(u.id);
+  res.json({ ...u, pay_period: type, hire_type: p.hire_type, rate_delivery: p.pay_per_delivery || 0, rate_failed: p.pay_per_failed || 0, bank: p.bank_name || '', clabe: p.clabe || '', account_holder: p.account_holder || '', periods, moves, total_balance: hrTotal(u.id, p) });
+}));
+app.post('/api/hr/movements', auth('admin'), wrap((req, res) => {
+  const b = req.body || {};
+  const u = db.prepare('SELECT id, name FROM users WHERE id=?').get(Number(b.user_id));
+  if (!u) throw new HttpError(400, 'Elige al colaborador');
+  if (!PAY_KINDS.includes(b.kind)) throw new HttpError(400, 'Elige el tipo de movimiento');
+  const amount = money2(b.amount);
+  if (!(amount > 0)) throw new HttpError(400, 'Escribe un monto mayor a cero');
+  const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const date = okD(b.date) ? b.date : today();
+  const txt = (x, n) => String(x || '').trim().slice(0, n) || null;
+  const r = db.prepare('INSERT INTO staff_payments (user_id, kind, amount, date, period_from, period_to, method, reference, notes, by_user) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(u.id, b.kind, amount, date, okD(b.period_from) ? b.period_from : null, okD(b.period_to) ? b.period_to : null, txt(b.method, 40), txt(b.reference, 80), txt(b.notes, 300), req.user.id);
+  audit(req, 'capital.movimiento', `${u.name}: ${b.kind} $${amount.toFixed(2)} (${date})${b.period_from ? ` · periodo ${b.period_from} a ${b.period_to}` : ''}`);
+  res.status(201).json({ id: Number(r.lastInsertRowid) });
+}));
+app.delete('/api/hr/movements/:id', auth('admin'), wrap((req, res) => {
+  const m = db.prepare('SELECT m.*, u.name FROM staff_payments m JOIN users u ON u.id = m.user_id WHERE m.id=?').get(Number(req.params.id));
+  if (!m) throw new HttpError(404, 'Movimiento no encontrado');
+  db.prepare('DELETE FROM staff_payments WHERE id=?').run(m.id);
+  audit(req, 'capital.eliminar', `${m.name}: ${m.kind} $${Number(m.amount).toFixed(2)} del ${m.date} eliminado`);
+  res.json({ ok: true });
+}));
+
 // ---------- Documentos del expediente (los sube el colaborador o el administrador) ----------
 // Se guardan fuera de la carpeta pública: solo los ve el administrador o el propio colaborador.
 const DOCS_DIR = path.join(DATA_DIR, 'expedientes');
@@ -1456,6 +1538,11 @@ function warehouseQty(productId) {
     + (db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(productId)?.qty || 0);
   return Math.max(0, (p?.stock || 0) + open - held);
 }
+function serialQtyAvail(productId) {
+  const free = db.prepare("SELECT COUNT(*) n FROM serials WHERE product_id=? AND status='disponible' AND holder_id IS NULL AND open_pool=0").get(productId).n;
+  const held = db.prepare('SELECT COALESCE(SUM(qty),0) n FROM driver_stock WHERE product_id=?').get(productId).n + (db.prepare('SELECT qty FROM open_stock WHERE product_id=?').get(productId)?.qty || 0);
+  return Math.max(0, free - held);
+}
 app.get('/api/custody', auth(...STAFF), wrap((req, res) => {
   let drivers = custodyOf(null);
   if (req.user.office) { const ids = new Set(db.prepare(`SELECT u.id FROM users u WHERE 1 ${inOffice(req, 'u')}`).all().map((r) => r.id)); drivers = drivers.filter((d) => ids.has(d.id)); }
@@ -1468,7 +1555,7 @@ app.get('/api/custody/available', auth(...STAFF), wrap((req, res) => {
     WHERE s.holder_id IS NULL AND s.open_pool = 0 AND s.status IN ('disponible','asignado') ORDER BY s.status DESC, s.serial`).all();
   res.json({
     serialized: prods.filter((p) => p.serialized).map((p) => ({ ...p, serials: sn.filter((s) => s.product_id === p.id) })).filter((p) => p.serials.length),
-    plain: prods.filter((p) => !p.serialized).map((p) => ({ ...p, available: warehouseQty(p.id) })).filter((p) => p.available > 0),
+    plain: prods.map((p) => ({ ...p, by_qty: !!p.serialized, available: p.serialized ? serialQtyAvail(p.id) : warehouseQty(p.id) })).filter((p) => p.available > 0),
   });
 }));
 app.get('/api/my/custody', auth('repartidor'), wrap((req, res) => {
@@ -1638,10 +1725,12 @@ app.get('/api/my/serials', auth('repartidor'), wrap((req, res) => {
     || (words.length && words.every((w) => normCity(`${s.product} ${s.sku}`).includes(w)));
   const ok = rows.filter((s) => hit(s) && (s.holder_id === me.id || s.open_pool || (!s.holder_id && (!s.warehouse_id || !offs.size || offs.has(Number(s.warehouse_id))))
     || (s.holder_id && offs.has(Number(userOffice(s.holder_id))))));
-  const rank = (s) => (need.has(s.product_id) ? 0 : 4) + (s.holder_id === me.id ? 0 : s.open_pool ? 1 : !s.holder_id ? 2 : 3);
+  const dot = new Set(db.prepare('SELECT product_id FROM driver_stock WHERE user_id=? AND qty > 0').all(me.id).map((r) => r.product_id));
+  const mineQ = (s) => !s.holder_id && !s.open_pool && dot.has(s.product_id);
+  const rank = (s) => (need.has(s.product_id) ? 0 : 4) + (s.holder_id === me.id || mineQ(s) ? 0 : s.open_pool ? 1 : !s.holder_id ? 2 : 3);
   ok.sort((a, b) => rank(a) - rank(b));
   res.json(ok.slice(0, 60).map((s) => ({ serial: s.serial, product: s.product, sku: s.sku, product_id: s.product_id, need: !need.size || need.has(s.product_id),
-    where: s.holder_id === me.id ? 'tuyo' : s.holder_id ? `lo trae ${s.holder}` : s.open_pool ? 'abierto' : s.wname || 'almacén' })));
+    where: s.holder_id === me.id ? 'tuyo' : mineQ(s) ? 'tu dotación' : s.holder_id ? `lo trae ${s.holder}` : s.open_pool ? 'abierto' : s.wname || 'almacén' })));
 }));
 // Pedidos del cliente que el repartidor puede reactivar / tomar para entregar ahora (de su oficina)
 app.get('/api/my/customer-orders/:cid', auth('repartidor'), wrap((req, res) => {
@@ -1780,6 +1869,32 @@ app.get('/api/custody/:driverId/log', auth(...STAFF), wrap((req, res) => {
     WHERE l.driver_id = ? ORDER BY l.id DESC LIMIT 60`).all(req.params.driverId));
 }));
 // Asignar: { driver_id, serials:[...] } para equipos con S/N, o { driver_id, product_id, qty } para productos sin S/N
+app.get('/api/custody/balance', auth(...STAFF), wrap((req, res) => {
+  const okD = (x) => /^\d{4}-\d{2}-\d{2}$/.test(x || '');
+  const to = okD(req.query.to) ? req.query.to : today();
+  const from = okD(req.query.from) ? req.query.from : to.slice(0, 8) + '01';
+  const drivers = db.prepare(`SELECT u.id, u.name, u.active FROM users u WHERE (u.role='repartidor' OR u.can_deliver=1) AND u.deleted_at IS NULL ${inOffice(req, 'u')} ORDER BY u.active DESC, u.name`).all();
+  const prods = new Map(db.prepare('SELECT id, name, sku, serialized FROM products').all().map((p) => [p.id, p]));
+  const sgn = "CASE l.action WHEN 'asignado' THEN l.qty ELSE -l.qty END";
+  const rows = [];
+  for (const d of drivers) {
+    const per = new Map();
+    const row = (pid) => { if (!per.has(pid)) { const p = prods.get(pid) || {}; per.set(pid, { driver_id: d.id, driver: d.name, active: d.active, product_id: pid, product: p.name, sku: p.sku, serialized: !!p.serialized, inicial: 0, asignado: 0, entregado: 0, devuelto: 0, trae: 0, por_entregar: 0 }); } return per.get(pid); };
+    for (const r of db.prepare(`SELECT l.product_id, SUM(${sgn}) n FROM custody_log l WHERE l.driver_id=? AND date(l.created_at,'localtime') < ? GROUP BY l.product_id`).all(d.id, from)) row(r.product_id).inicial = r.n;
+    for (const r of db.prepare("SELECT l.product_id, l.action, SUM(l.qty) n FROM custody_log l WHERE l.driver_id=? AND date(l.created_at,'localtime') BETWEEN ? AND ? GROUP BY l.product_id, l.action").all(d.id, from, to)) row(r.product_id)[r.action] = r.n;
+    for (const r of db.prepare('SELECT product_id, qty FROM driver_stock WHERE user_id=? AND qty <> 0').all(d.id)) row(r.product_id).trae += r.qty;
+    for (const r of db.prepare("SELECT product_id, COUNT(*) n FROM serials WHERE holder_id=? AND status IN ('disponible','asignado') GROUP BY product_id").all(d.id)) row(r.product_id).trae += r.n;
+    for (const r of db.prepare("SELECT i.product_id, SUM(i.qty) n FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.driver_id=? AND o.status IN ('asignado','cargado') GROUP BY i.product_id").all(d.id)) if (per.has(r.product_id) || r.n) row(r.product_id).por_entregar = r.n;
+    for (const r of per.values()) {
+      r.debe_traer = r.inicial + r.asignado - r.entregado - r.devuelto;
+      // la diferencia solo se puede medir al día de hoy (lo que trae es de hoy)
+      r.diferencia = to >= today() ? r.trae - r.debe_traer : null;
+      r.faltan_para_ruta = Math.max(0, r.por_entregar - r.trae);
+      if (r.inicial || r.asignado || r.entregado || r.devuelto || r.trae || r.por_entregar) rows.push(r);
+    }
+  }
+  res.json({ from, to, rows });
+}));
 app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
   const b = req.body || {};
   const open = isOpen(b.driver_id);
@@ -1817,12 +1932,12 @@ app.post('/api/custody/assign', auth(...STAFF), wrap((req, res) => {
     for (const it of items) {
       const p = db.prepare('SELECT * FROM products WHERE id=?').get(Number(it.product_id));
       if (!p) throw new HttpError(400, 'Elige el producto');
-      if (p.serialized) throw new HttpError(400, `${p.name} se controla por número de serie: elige o escanea sus S/N`);
+      // con S/N también se puede dar por cantidad (sin detalle de series): el repartidor registra el S/N al entregar
       const qty = Math.trunc(Number(it.qty));
       if (!(qty > 0)) throw new HttpError(400, `Escribe la cantidad de ${p.name}`);
-      const avail = warehouseQty(p.id);
+      const avail = p.serialized ? serialQtyAvail(p.id) : warehouseQty(p.id);
       if (qty > avail) throw new HttpError(409, `Solo hay ${avail} ${p.unit || 'pza'} de ${p.name} en el almacén`);
-      results.push({ product: p.name, qty, ok: true });
+      results.push({ product: p.name + (p.serialized ? ' (sin detalle de S/N)' : ''), qty, ok: true });
       if (!dry && open) {
         db.prepare(`INSERT INTO open_stock (product_id, qty) VALUES (?,?)
           ON CONFLICT(product_id) DO UPDATE SET qty = qty + excluded.qty, updated_at = datetime('now')`).run(p.id, qty);
@@ -1906,6 +2021,13 @@ function custodyOnDelivery(orderId, driverId, userId) {
   const code = db.prepare('SELECT tracking_code FROM orders WHERE id=?').get(orderId)?.tracking_code || orderId;
   for (const it of db.prepare('SELECT product_id, qty - filled need FROM order_items WHERE order_id=? AND filled < qty').all(orderId))
     takeStock(orderId, it.product_id, it.need, code, userId, ' (entregado)', { force: true });
+  if (driverId) for (const g of db.prepare("SELECT product_id, GROUP_CONCAT(serial, ', ') sns, COUNT(*) n FROM serials WHERE order_id=? AND holder_id IS NULL AND open_pool=0 GROUP BY product_id").all(orderId)) {
+    const q = db.prepare('SELECT qty FROM driver_stock WHERE user_id=? AND product_id=?').get(driverId, g.product_id);
+    const take = Math.min(q?.qty || 0, g.n);
+    if (!take) continue;
+    db.prepare("UPDATE driver_stock SET qty = qty - ?, updated_at=datetime('now') WHERE user_id=? AND product_id=?").run(take, driverId, g.product_id);
+    custodyLog(driverId, g.product_id, take, 'entregado', userId, { serial: g.sns, orderId, reference: 'De su dotación por cantidad' });
+  }
   db.prepare('UPDATE serials SET open_pool=0 WHERE order_id=?').run(orderId);
   for (const s of db.prepare('SELECT * FROM serials WHERE order_id=? AND holder_id IS NOT NULL').all(orderId)) {
     db.prepare('UPDATE serials SET holder_id=NULL, held_at=NULL WHERE id=?').run(s.id);
@@ -2174,6 +2296,10 @@ app.get('/api/stock/by-office', auth(...STAFF), wrap((req, res) => {
   const out = offs.map((w) => {
     const nd = new Map(need.all(w.id).map((r) => [r.product_id, r]));
     const sv = new Map(sn.all(w.id).map((r) => [r.product_id, r]));
+    for (const q of db.prepare(`SELECT d.product_id, SUM(d.qty) n FROM driver_stock d JOIN users u ON u.id = d.user_id WHERE d.qty > 0 AND ${OFFICE_OF('u')} = ? GROUP BY d.product_id`).all(w.id)) {
+      const v = sv.get(q.product_id) || { almacen: 0, repartidores: 0, abierto: 0 };
+      const mv = Math.min(v.almacen || 0, q.n); v.almacen = (v.almacen || 0) - mv; v.repartidores = (v.repartidores || 0) + mv; sv.set(q.product_id, v);
+    }
     const rows = prods.map((p) => {
       const n = nd.get(p.id) || {}, v = sv.get(p.id) || {};
       const have = p.serialized ? (v.almacen || 0) + (v.repartidores || 0) + (v.abierto || 0) : null;
