@@ -2262,8 +2262,29 @@ const normCity = (x) => String(x || '').normalize('NFD').replace(/[\u0300-\u036f
   .replace(/\br c$/, 'rio colorado');
 const officeCities = (w) => String(w.city || '').split(/[,;/]/).map(normCity).filter(Boolean);
 // Nombre oficial de la ciudad: "Rosarito" se guarda como "Playas de Rosarito"
-const CITY_CANON = { rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito' };
-function canonCity(city) { const t = String(city || '').trim(); return CITY_CANON[normCity(t)] || t; }
+// Nombre de ciudad uniforme: el de las oficinas (Tijuana, Mexicali, San Luis Río Colorado…), sus abreviaturas comunes y,
+// para cualquier otra, mayúscula inicial en cada palabra ("de", "del", "la"… en minúscula)
+const CITY_CANON = {
+  rosarito: 'Playas de Rosarito', 'playas de rosarito': 'Playas de Rosarito', 'playas rosarito': 'Playas de Rosarito', 'p rosarito': 'Playas de Rosarito',
+  tj: 'Tijuana', tij: 'Tijuana', mxl: 'Mexicali', mexicalli: 'Mexicali', ens: 'Ensenada',
+  'san luis': 'San Luis Río Colorado', slrc: 'San Luis Río Colorado', 'san luis rc': 'San Luis Río Colorado', 'san luis r c': 'San Luis Río Colorado', 'san luis rio colorado': 'San Luis Río Colorado', 'san luis colorado': 'San Luis Río Colorado',
+  's l r c': 'San Luis Río Colorado', 'san quintin': 'San Quintín', tecate: 'Tecate', tijuana: 'Tijuana', mexicali: 'Mexicali', ensenada: 'Ensenada',
+};
+const CITY_SMALL = new Set(['de', 'del', 'la', 'las', 'los', 'el', 'y']);
+const titleCity = (t) => t.toLocaleLowerCase('es-MX').split(' ').map((w, i) => (i && CITY_SMALL.has(w) ? w : w.charAt(0).toLocaleUpperCase('es-MX') + w.slice(1))).join(' ');
+let officeCityNames = { at: 0, map: new Map() };
+function canonCity(city) {
+  const t = String(city || '').replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '');
+  if (!t) return t;
+  const k = normCity(t);
+  if (CITY_CANON[k]) return CITY_CANON[k];
+  if (Date.now() - officeCityNames.at > 60000) {
+    const map = new Map();
+    for (const w of db.prepare('SELECT city FROM warehouses WHERE city IS NOT NULL').all()) for (const c of String(w.city).split(/[,;/]/).map((x) => x.trim()).filter(Boolean)) map.set(normCity(c), c);
+    officeCityNames = { at: Date.now(), map };
+  }
+  return officeCityNames.map.get(k) || titleCity(t);
+}
 function officeForCity(city) {
   const c = normCity(city);
   if (!c) return null;
@@ -5218,5 +5239,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity };
 module.exports = app;
