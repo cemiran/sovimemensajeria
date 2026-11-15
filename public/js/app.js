@@ -218,9 +218,9 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
   }
   if (pts.length > 1) {
     const dashed = L.polyline(pts, { color, weight: 4, opacity: 0.75, dashArray: '6 6' }).addTo(tgt);
-    // con Google: el camino real por calles reemplaza la línea punteada
-    if (SETTINGS.google_maps === '1' && pts.length <= 200) POST('/api/directions/path', { points: pts }).then((r) => {
-      if (r.source !== 'google' || !r.coords?.length || !map.hasLayer(dashed)) return;
+    // con Google o el motor de rutas propio: el camino real por calles reemplaza la línea punteada
+    if ((SETTINGS.google_maps === '1' || SETTINGS.road_engine === '1') && pts.length <= 200) POST('/api/directions/path', { points: pts }).then((r) => {
+      if (!['google', 'osrm'].includes(r.source) || !r.coords?.length || !map.hasLayer(dashed)) return;
       const road = L.polyline(r.coords, { color, weight: 5, opacity: 0.8 });
       tgt.removeLayer(dashed); road.addTo(tgt);
     }).catch(() => {});
@@ -5997,10 +5997,10 @@ async function viewNavigate(v, id) {
   const osrm = (/router\.project-osrm\.org/.test(SETTINGS.osrm_url || '') || !SETTINGS.osrm_url ? 'https://routing.openstreetmap.de/routed-car' : SETTINGS.osrm_url).replace(/\/+$/, '');
   async function fetchRoute(p) {
     routeFrom = p; routeAt = Date.now();
-    if (SETTINGS.google_maps === '1') {
+    if (SETTINGS.google_maps === '1' || SETTINGS.road_engine === '1') {
       try {
         const g = await GET(`/api/directions/nav?from=${p.lat},${p.lng}&to=${dest.lat},${dest.lng}`);
-        if (g.source === 'google') { route = g; return; }
+        if (['google', 'osrm'].includes(g.source)) { route = g; return; }
       } catch {}
     }
     if (!osrm) { route = null; return; }
@@ -6030,7 +6030,7 @@ async function viewNavigate(v, id) {
       $('#nEta').textContent = `${mins} min · llegada ${new Date(Date.now() + mins * 60000).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}`;
       // siguiente indicación: la primera maniobra que está delante del repartidor sobre el camino
       let nx = steps[1] || steps[0];
-      if (route?.source === 'google' && steps.length > 1) {
+      if (['google', 'osrm'].includes(route?.source) && steps.length > 1) {
         const cs = route.geometry.coordinates;
         const near = (pt) => { let bi = 0, bd = Infinity; for (let i = 0; i < cs.length; i++) { const d = (cs[i][0] - pt[0]) ** 2 + (cs[i][1] - pt[1]) ** 2; if (d < bd) { bd = d; bi = i; } } return bi; };
         const meI = near([me.lng, me.lat]);
@@ -6054,8 +6054,8 @@ async function viewNavigate(v, id) {
       else map.panTo([p.lat, p.lng], { animate: true });
     }
     // Google: se recalcula solo si se sale del camino (> 80 m) o cada 10 min; sin Google, como antes
-    const offRoute = route?.source === 'google' ? Math.min(...route.geometry.coordinates.map(([x, y]) => haversineM(p, { lat: y, lng: x }))) > 80 : false;
-    if (route?.source === 'google' ? offRoute || Date.now() - routeAt > 600000 : !routeFrom || haversineM(routeFrom, p) > 120 || Date.now() - routeAt > 60000) await fetchRoute(p);
+    const offRoute = ['google', 'osrm'].includes(route?.source) ? Math.min(...route.geometry.coordinates.map(([x, y]) => haversineM(p, { lat: y, lng: x }))) > 80 : false;
+    if (['google', 'osrm'].includes(route?.source) ? offRoute || Date.now() - routeAt > 600000 : !routeFrom || haversineM(routeFrom, p) > 120 || Date.now() - routeAt > 60000) await fetchRoute(p);
     paint();
   };
   onPos.__nav = true;

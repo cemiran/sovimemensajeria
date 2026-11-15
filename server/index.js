@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { db, tx, getSettings, DATA_DIR, UPLOAD_DIR } = require('./db');
 const { haversine, optimizeRoute, balancedZones } = require('./routing');
+const osrm = require('./osrm');
 const gmaps = require('./gmaps');
 const notify = require('./notify');
 
@@ -3896,7 +3897,7 @@ const matrixPoints = (depot, stops) => [depot, ...stops.filter((x) => Number.isF
 const googleMatrix = (depot, stops) => (gmaps.enabled() ? gmaps.cachedMatrix(matrixPoints(depot, stops)) : null);
 const gmPending = new Set();
 function googleRefine(rid) {
-  if (!gmaps.enabled() || gmPending.has(rid)) return;
+  if ((!gmaps.enabled() && !osrm.enabled()) || gmPending.has(rid)) return;
   gmPending.add(rid);
   setTimeout(async () => {
     try {
@@ -3906,16 +3907,20 @@ function googleRefine(rid) {
       const done = db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(rid).c;
       if (!ids.length || done) return;
       const depot = { lat: r.depot_lat, lng: r.depot_lng };
-      if (!(await gmaps.fillMatrix(matrixPoints(depot, stopsFor(ids))))) return;
-      persistRoute({ routeId: rid, driverId: r.driver_id, date: r.date, depot, orderIds: ids, settings: getSettings(), noRefine: true });
+      const pts = matrixPoints(depot, stopsFor(ids));
+      // primero Google si ya tiene los tramos o le alcanza el cupo; si no, el motor de rutas propio (calles reales, sin costo)
+      const okG = gmaps.enabled() && (await gmaps.fillMatrix(pts).catch(() => false));
+      const mx = okG ? null : await osrm.table(pts);
+      if (!okG && !mx) return;
+      persistRoute({ routeId: rid, driverId: r.driver_id, date: r.date, depot, orderIds: ids, settings: getSettings(), noRefine: true, matrix: mx || undefined });
     } catch (e) { console.error('googleRefine', e.message); } finally { gmPending.delete(rid); }
   }, 1500);
 }
-function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings, startTime, noRefine }) {
+function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings, startTime, noRefine, matrix: given }) {
   const stops = stopsFor(orderIds);
-  const matrix = googleMatrix(depot, stops);
+  const matrix = given || googleMatrix(depot, stops);
   const opt = optimizeRoute(depot, stops, settings, { startTime, matrix });
-  if (!matrix && !noRefine && orderIds.length && gmaps.enabled()) setImmediate(() => { const id = routeId || db.prepare('SELECT route_id FROM orders WHERE id=?').get(orderIds[0])?.route_id; if (id) googleRefine(id); });
+  if (!matrix && !noRefine && orderIds.length && (gmaps.enabled() || osrm.enabled())) setImmediate(() => { const id = routeId || db.prepare('SELECT route_id FROM orders WHERE id=?').get(orderIds[0])?.route_id; if (id) googleRefine(id); });
   return tx(() => {
     let rid = routeId;
     if (!rid) {
@@ -4410,7 +4415,7 @@ app.post(
     const startTime = done ? `${now.getHours()}:${now.getMinutes()}` : undefined;
     const stops = stopsFor(pending);
     if (gmaps.enabled()) await gmaps.fillMatrix(matrixPoints(from, stops)).catch(() => false);
-    const opt = optimizeRoute(from, stops, s, { startTime, matrix: googleMatrix(from, stops) });
+    const opt = optimizeRoute(from, stops, s, { startTime, matrix: googleMatrix(from, stops) || (await osrm.table(matrixPoints(from, stops))) });
     tx(() => {
       const upd = db.prepare('UPDATE orders SET stop_seq=?, eta=?, leg_km=? WHERE id=?');
       for (const st of opt.sequence) upd.run(done + st.seq, st.eta, st.leg_km, st.id);
@@ -4656,17 +4661,20 @@ app.get('/api/settings', auth(), (req, res) => {
   for (const k of notify.INTEGRATION_KEYS) if (!PUBLIC_INTEGRATION.has(k)) delete s[k];
   s.google_maps = gmaps.enabled() ? '1' : '0';
   s.google_tiles = gmaps.tilesOn() ? '1' : '0';
+  s.road_engine = osrm.enabled() ? '1' : '0';
   res.json(s);
 });
 // Trazo por calles de una ruta (Google; si no hay, la app deja la línea punteada)
 app.post('/api/directions/path', auth(), wrap(async (req, res) => {
   const pts = (req.body?.points || []).map((p) => ({ lat: Number(p[0]), lng: Number(p[1]) })).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)).slice(0, 200);
-  if (pts.length < 2 || !gmaps.enabled()) return res.json({ source: 'none' });
+  if (pts.length < 2) return res.json({ source: 'none' });
+  const viaOsrm = async () => { const o = await osrm.route(pts); return o ? res.json({ source: 'osrm', coords: o.coords, distance: o.distance, duration: o.duration }) : res.json({ source: 'none' }); };
+  if (!gmaps.enabled()) return viaOsrm();
   const coords = [];
   let distance = 0, duration = 0;
   for (let i = 0; i < pts.length - 1; i += 26) {
     const seg = await gmaps.directions(pts.slice(i, i + 27));
-    if (!seg) return res.json({ source: 'none' });
+    if (!seg) return viaOsrm();
     coords.push(...seg.coords); distance += seg.distance; duration += seg.duration;
   }
   res.json({ source: 'google', coords, distance, duration });
@@ -4675,12 +4683,17 @@ app.post('/api/directions/path', auth(), wrap(async (req, res) => {
 app.get('/api/directions/nav', auth(), wrap(async (req, res) => {
   const [fl, fg] = String(req.query.from || '').split(',').map(Number);
   const [tl, tg] = String(req.query.to || '').split(',').map(Number);
-  if (![fl, fg, tl, tg].every(Number.isFinite) || !gmaps.enabled()) return res.json({ source: 'none' });
-  const d = await gmaps.directions([{ lat: fl, lng: fg }, { lat: tl, lng: tg }], { steps: true, ttl: 3 * 60e3 });
-  if (!d) return res.json({ source: 'none' });
+  if (![fl, fg, tl, tg].every(Number.isFinite)) return res.json({ source: 'none' });
+  const d = gmaps.enabled() ? await gmaps.directions([{ lat: fl, lng: fg }, { lat: tl, lng: tg }], { steps: true, ttl: 3 * 60e3 }) : null;
+  if (!d) {
+    const o = await osrm.route([{ lat: fl, lng: fg }, { lat: tl, lng: tg }], { steps: true });
+    if (!o) return res.json({ source: 'none' });
+    return res.json({ source: 'osrm', distance: o.distance, duration: o.duration, geometry: { coordinates: o.coords.map(([a, b]) => [b, a]) }, legs: o.legs });
+  }
   const steps = [...d.steps, { maneuver: { type: 'arrive', modifier: '', location: [tg, tl] }, text: 'Llegas a tu destino', distance: 0, name: '' }];
   res.json({ source: 'google', distance: d.distance, duration: d.duration, geometry: { coordinates: d.coords.map(([a, b]) => [b, a]) }, legs: [{ steps }] });
 }));
+app.get('/api/osrm/status', auth('admin'), wrap(async (req, res) => res.json(await osrm.status())));
 app.put(
   '/api/settings',
   auth('admin'),

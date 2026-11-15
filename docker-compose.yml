@@ -10,6 +10,7 @@ services:
     environment:
       - DATA_DIR=/app/data
       - TRUST_PROXY=1
+      - OSRM_URL=http://osrm:5000
     volumes:
       - ./data:/app/data
     labels:
@@ -18,6 +19,21 @@ services:
       - traefik.http.routers.sovime.entrypoints=websecure
       - traefik.http.routers.sovime.tls.certresolver=letsencrypt
       - traefik.http.services.sovime.loadbalancer.server.port=3000
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Motor de rutas propio (OSRM) con el mapa de calles de Baja California: tiempos reales entre paradas, sin costo por uso.
+  # El mapa se construye una vez en el servidor con /docker/osrm/build.sh (y se puede actualizar cada mes).
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    container_name: sovime-osrm
+    restart: unless-stopped
+    command: osrm-routed --algorithm mld --max-table-size 500 /data/bc.osrm
+    volumes:
+      - /docker/osrm/data:/data:ro
     logging:
       driver: json-file
       options:
