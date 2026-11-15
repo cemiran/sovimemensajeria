@@ -1651,7 +1651,7 @@ async function settleValidate(id) {
     if (c.tipo && c.tipo !== 'I') issues.push(`Debe ser un CFDI de ingreso (tipo I), éste es tipo ${c.tipo}`);
     if (c.rfc_receptor !== rfcCo) issues.push(`El RFC receptor debe ser ${rfcCo} (viene ${c.rfc_receptor})`);
     if (st.rfc && c.rfc_emisor !== String(st.rfc).toUpperCase()) issues.push(`El RFC emisor (${c.rfc_emisor}) no es el del prestador (${st.rfc})`);
-    if (Math.abs(c.subtotal - st.amount) > 1) issues.push(`El subtotal del CFDI (${c.subtotal.toFixed(2)}) no coincide con la liquidación (${Number(st.amount).toFixed(2)})`);
+    if (Math.abs(c.subtotal - st.amount) > 1) issues.push(`El subtotal del CFDI ($${c.subtotal.toFixed(2)}) no coincide con la liquidación ($${Number(st.amount).toFixed(2)})`);
     if (c.uuid && db.prepare('SELECT 1 FROM settlements WHERE cfdi_uuid=? AND id<>?').get(c.uuid, id)) issues.push('Ese CFDI ya se usó en otra liquidación');
     try { sat = await cfdi.satStatus(c); if (sat.estado !== 'Vigente') issues.push(`Estado en el SAT: ${sat.estado || 'sin respuesta'}`); }
     catch (e) { issues.push('No se pudo consultar el SAT; se reintenta más tarde'); }
@@ -1718,7 +1718,7 @@ app.post('/api/settlements/spei', auth('admin'), wrap((req, res) => {
   if (bad.length) throw new HttpError(400, `Sin CLABE válida: ${bad.map((r) => r.name).join(', ')}`);
   const q = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
   const csv = ['CLABE,Beneficiario,RFC,Monto,Referencia,Concepto', ...rows.map((r) => [r.clabe, q(r.account_holder || r.name), r.rfc || '', Number(r.to_pay).toFixed(2), String(r.id).padStart(7, '0'), q(`Liquidacion ${r.week_from} al ${r.week_to}`)].join(','))].join('\r\n');
-  audit(req, 'liquidacion.spei', `Archivo SPEI: ${rows.length} liquidaciones, ${rows.reduce((a, r) => a + r.to_pay, 0).toFixed(2)}`);
+  audit(req, 'liquidacion.spei', `Archivo SPEI: ${rows.length} liquidaciones, $${rows.reduce((a, r) => a + r.to_pay, 0).toFixed(2)}`);
   res.json({ csv, count: rows.length, total: money2(rows.reduce((a, r) => a + r.to_pay, 0)) });
 }));
 // marcar pagadas (después de la transferencia): registra el pago en Capital Humano

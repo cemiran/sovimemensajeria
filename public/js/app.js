@@ -6112,11 +6112,11 @@ async function viewMyRoute(v) {
   }));
   // "Estoy aquí": el repartidor fija la ubicación del cliente con su GPS
   // rechazar un servicio: regresa a la oficina para reasignarlo, sin penalización
-  $('[data-decline]', v).forEach((b) => (b.onclick = async () => {
+  $$('[data-decline]', v).forEach((b) => (b.onclick = async () => {
     if (!(await confirmDlg('¿No tomar este servicio? Regresa a la oficina para que lo asignen a alguien más. No tiene ninguna penalización.'))) return;
     try { await POST(`/api/my/orders/${b.dataset.decline}/decline`, {}); toast('Listo: el servicio regresó a la oficina', 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }
   }));
-  $('[data-here]', v).forEach((b) => (b.onclick = async () => {
+  $$('[data-here]', v).forEach((b) => (b.onclick = async () => {
     const st = r.stops.find((x) => String(x.id) === b.dataset.here);
     b.disabled = true;
     const p = await getPosition(12000) || GPS.last;
