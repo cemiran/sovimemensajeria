@@ -883,9 +883,9 @@ const NAV_GROUPS = [
   ['Catálogos', [['offices', 'Oficinas', 'building'], ['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
-  ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['hr', 'Capital Humano', 'person'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
+  ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['hr', 'Capital Humano', 'person'], ['settle', 'Liquidación semanal', 'sheet'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
-const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
+const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['liq', 'Liquidación', 'chart'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
@@ -4926,6 +4926,81 @@ const PER_TXT = { semanal: 'Semanal', quincenal: 'Quincenal', mensual: 'Mensual'
 const fmtDay = (d) => (d ? new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' }) : '');
 const perLbl = (r) => `${fmtDay(r.from)} – ${fmtDay(r.to)}`;
 const hrState = { offset: 0, from: '', to: '', q: '' };
+// ---- Liquidación semanal (lunes a domingo → CFDI → pago) ----
+const ST_LIQ = { cerrada: ['Por facturar', 'warn'], facturada: ['CFDI en revisión', ''], validada: ['CFDI validado · por pagar', 'ok'], rechazada: ['CFDI rechazado', 'bad'], pagada: ['Pagada', 'ok'] };
+const fileText = (f) => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsText(f); });
+// prestador: estado de cuenta semanal y carga de su CFDI
+async function viewMySettlement(v) {
+  const r = await GET('/api/my/settlements');
+  const c = r.current;
+  v.innerHTML = topbar('Mi liquidación', '', 'Corte semanal de lunes a domingo. El lunes ves el estado de cuenta, subes tu CFDI y se paga el sábado por transferencia.') + `
+    <div class="card"><div class="row between"><b>Semana en curso</b><small class="muted">${perLbl(c)}</small></div>
+      <div class="mini-stats" style="margin-top:8px"><div><small>Servicios entregados</small><b>${fmtN(c.delivered)}</b></div><div><small>Importe hasta hoy</small><b>${money(c.amount)}</b></div>${c.anticipos ? `<div><small>Anticipos</small><b>−${money(c.anticipos)}</b></div>` : ''}</div>
+      <small class="muted">Se cierra el domingo a las 23:59 con los servicios confirmados con evidencia.</small></div>
+    ${r.rows.map((x) => `<div class="card" style="margin-top:12px"><div class="row between" style="flex-wrap:wrap;gap:6px"><b>Semana ${perLbl({ from: x.week_from, to: x.week_to })}</b><span class="chip ${ST_LIQ[x.status][1]}">${ST_LIQ[x.status][0]}</span></div>
+      <div class="table-wrap" style="margin-top:6px"><table><tbody>
+        <tr><td>${fmtN(x.delivered)} servicios entregados${x.failed ? ` · ${fmtN(x.failed)} visitas sin entrega` : ''}</td><td class="r num">${money(x.services)}</td></tr>
+        ${x.team ? `<tr><td>Coordinación</td><td class="r num">${money(x.team)}</td></tr>` : ''}${x.bonos ? `<tr><td>Bonos</td><td class="r num">${money(x.bonos)}</td></tr>` : ''}${x.incidencias ? `<tr><td>Incidencias operativas</td><td class="r num">−${money(x.incidencias)}</td></tr>` : ''}
+        <tr><td><b>Subtotal a facturar</b></td><td class="r num"><b>${money(x.amount)}</b></td></tr>
+        ${x.anticipos ? `<tr><td>Anticipos ya recibidos</td><td class="r num">−${money(x.anticipos)}</td></tr>` : ''}<tr><td>Se te transfiere</td><td class="r num"><b>${money(x.to_pay)}</b></td></tr></tbody></table></div>
+      ${['cerrada', 'rechazada'].includes(x.status) ? `<p class="muted" style="margin:6px 0">Emite tu CFDI de ingreso a nombre de <b>${esc(r.company)}</b>, RFC <b class="mono">${esc(r.company_rfc)}</b>, por un subtotal de <b>${money(x.amount)}</b> (más los impuestos y retenciones de tu régimen).</p>` : ''}
+      ${x.issues?.length ? `<div class="offline-bar">${x.issues.map((i) => '• ' + esc(i)).join('<br>')}</div>` : ''}
+      ${x.cfdi_uuid ? `<small class="muted mono">UUID ${esc(x.cfdi_uuid)}${x.sat_estado ? ' · SAT: ' + esc(x.sat_estado) : ''}</small>` : ''}
+      ${['cerrada', 'rechazada', 'facturada'].includes(x.status) ? `<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"><label class="btn sm">XML<input type="file" accept=".xml,text/xml,application/xml" data-x="${x.id}" hidden /></label><label class="btn sm">PDF<input type="file" accept="application/pdf" data-p="${x.id}" hidden /></label><button class="btn sm primary" data-send="${x.id}">${icon('upload')} Enviar CFDI</button><small class="muted" id="cf${x.id}"></small></div>` : ''}
+    </div>`).join('') || '<div class="card empty" style="margin-top:12px">Aún no tienes liquidaciones cerradas.</div>'}`;
+  const pick = {};
+  $$('[data-x]', v).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; (pick[i.dataset.x] ||= {}).xml = await fileText(f); $('#cf' + i.dataset.x, v).textContent = 'XML listo'; }));
+  $$('[data-p]', v).forEach((i) => (i.onchange = async () => { const f = i.files[0]; if (!f) return; (pick[i.dataset.p] ||= {}).pdf = await fileToDataUrl(f); $('#cf' + i.dataset.p, v).textContent = (pick[i.dataset.p].xml ? 'XML y ' : '') + 'PDF listo'; }));
+  $$('[data-send]', v).forEach((b) => (b.onclick = async () => {
+    const x = pick[b.dataset.send] || {};
+    if (!x.xml) return toast('Elige el XML de tu CFDI', 'bad');
+    b.disabled = true;
+    try { const r2 = await POST(`/api/my/settlements/${b.dataset.send}/cfdi`, x); toast(r2.status === 'validada' ? 'CFDI validado: se paga el sábado' : 'El CFDI tiene observaciones: revísalas', r2.status === 'validada' ? 'ok' : 'bad'); render(); }
+    catch (e) { toast(e.message, 'bad'); b.disabled = false; }
+  }));
+}
+// administrador: liquidaciones de la semana, CFDI, archivo SPEI y pagadas
+const settleState = { week: '' };
+async function viewSettlements(v) {
+  const r = await GET('/api/settlements' + (settleState.week ? '?week=' + settleState.week : ''));
+  settleState.week = r.from;
+  const shift = (d) => { const x = new Date(r.from + 'T12:00:00'); x.setDate(x.getDate() + d * 7); return x.toLocaleDateString('en-CA'); };
+  const sum = (k, f = () => true) => r.rows.filter(f).reduce((a, x) => a + (x[k] || 0), 0);
+  v.innerHTML = topbar('Liquidación semanal', `<button class="btn" id="slClose">${r.closed ? 'Recalcular corte' : 'Cerrar corte'}</button>`, 'Corte de lunes a domingo con servicios confirmados con evidencia, CFDI de cada prestador validado contra el SAT y archivo para la transferencia SPEI.') + `
+    <div class="row" style="gap:8px;margin-bottom:12px"><button class="btn sm" id="slPrev">‹ Semana anterior</button><b>${perLbl(r)}</b><button class="btn sm" id="slNext">Semana siguiente ›</button></div>
+    <div class="grid g4"><div class="card kpi"><div class="label">Prestadores</div><div class="value">${r.rows.length}</div></div>
+      <div class="card kpi"><div class="label">Importe de la semana</div><div class="value">${money(sum('amount'))}</div></div>
+      <div class="card kpi"><div class="label">CFDI validados</div><div class="value">${r.rows.filter((x) => ['validada', 'pagada'].includes(x.status)).length}/${r.rows.length}</div></div>
+      <div class="card kpi"><div class="label">Por transferir</div><div class="value">${money(sum('to_pay', (x) => x.status === 'validada'))}</div></div></div>
+    <div class="card" style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="slAll" /></th><th>Prestador</th><th class="r">Servicios</th><th class="r">Subtotal</th><th class="r">Anticipos</th><th class="r">A transferir</th><th>CFDI</th><th></th></tr></thead><tbody>
+      ${r.rows.map((x) => `<tr><td>${x.status === 'validada' ? `<input type="checkbox" data-sl="${x.id}" />` : ''}</td><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.rfc || 'sin RFC')} · ${x.clabe ? 'CLABE …' + esc(String(x.clabe).slice(-4)) : '<b style="color:var(--bad)">sin CLABE</b>'}</small></td>
+        <td class="r num">${fmtN(x.delivered)}</td><td class="r num">${money(x.amount)}</td><td class="r num">${x.anticipos ? '−' + money(x.anticipos) : '—'}</td><td class="r num"><b>${money(x.to_pay)}</b></td>
+        <td>${!x.amount && x.status === 'cerrada' ? '<span class="chip off" title="Tiene servicios pero no tiene tarifa: ponla en su expediente y recalcula el corte">Sin importe · falta tarifa</span>' : `<span class="chip ${ST_LIQ[x.status][1]}">${ST_LIQ[x.status][0]}</span>`}${x.cfdi_uuid ? `<br><small class="muted mono">${esc(x.cfdi_uuid.slice(0, 8))}… · SAT ${esc(x.sat_estado || '—')}</small>` : ''}${x.issues?.length ? `<br><small style="color:var(--bad)">${x.issues.map(esc).join('<br>')}</small>` : ''}</td>
+        <td class="r"><div class="row" style="gap:4px;justify-content:flex-end">${x.cfdi_xml ? `<button class="btn sm" data-fx="${x.id}">XML</button>` : ''}${x.cfdi_pdf ? `<button class="btn sm" data-fp="${x.id}">PDF</button>` : ''}${x.cfdi_xml && x.status !== 'pagada' ? `<button class="btn sm ghost" data-re="${x.id}">Revalidar</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin liquidaciones en esta semana. El corte se cierra solo el lunes; también puedes cerrarlo con el botón.</td></tr>'}
+    </tbody></table></div>
+    <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn primary" id="slSpei">${icon('download')} Archivo SPEI de lo marcado</button><button class="btn" id="slPaid">Marcar pagadas</button><small class="muted">Solo se pueden transferir liquidaciones con CFDI validado.</small></div></div>`;
+  const sel = () => $$('[data-sl]:checked', v).map((x) => Number(x.dataset.sl));
+  $('#slAll', v).onchange = (e) => $$('[data-sl]', v).forEach((x) => (x.checked = e.target.checked));
+  $('#slPrev', v).onclick = () => { settleState.week = shift(-1); render(); };
+  $('#slNext', v).onclick = () => { settleState.week = shift(1); render(); };
+  $('#slClose', v).onclick = async () => { try { const x = await POST('/api/settlements/close', { week: r.from }); toast(`Corte ${perLbl(x)}: ${x.closed} liquidaciones`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); } };
+  $$('[data-fx]', v).forEach((b) => (b.onclick = () => openAuthFile(`/api/settlements/${b.dataset.fx}/file/xml`)));
+  $$('[data-fp]', v).forEach((b) => (b.onclick = () => openAuthFile(`/api/settlements/${b.dataset.fp}/file/pdf`)));
+  $$('[data-re]', v).forEach((b) => (b.onclick = async () => { b.disabled = true; try { const x = await POST(`/api/settlements/${b.dataset.re}/recheck`, {}); toast(x.status === 'validada' ? 'CFDI validado' : 'Con observaciones', x.status === 'validada' ? 'ok' : 'bad'); render(); } catch (e) { toast(e.message, 'bad'); b.disabled = false; } }));
+  $('#slSpei', v).onclick = async () => {
+    const ids = sel(); if (!ids.length) return toast('Marca las liquidaciones a transferir', 'bad');
+    try {
+      const x = await POST('/api/settlements/spei', { ids });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + x.csv], { type: 'text/csv;charset=utf-8' })); a.download = `spei-${r.from}.csv`; a.click();
+      toast(`Archivo SPEI: ${x.count} transferencias por ${money(x.total)}. Súbelo al portal de tu banco y, ya hechas, márcalas pagadas.`, 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  $('#slPaid', v).onclick = async () => {
+    const ids = sel(); if (!ids.length) return toast('Marca las liquidaciones transferidas', 'bad');
+    const ref = prompt('Referencia de la transferencia (folio del banco):', '') ?? null; if (ref === null) return;
+    try { const x = await POST('/api/settlements/paid', { ids, reference: ref }); toast(`${x.paid} liquidaciones pagadas y registradas en Capital Humano`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }
+  };
+}
 async function viewHR(v) {
   const qs = hrState.from && hrState.to ? `from=${hrState.from}&to=${hrState.to}` : `offset=${hrState.offset}`;
   const r = await GET('/api/hr?' + qs);
@@ -6561,8 +6636,8 @@ async function render() {
   if (store.user.can_deliver === undefined) { try { store.user = { ...store.user, ...(await GET('/api/me')) }; } catch {} }
   const driver = driverMode();
   const routes = driver
-    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, 'new-customer': viewNewCustomer }
-    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settings: viewSettings };
+    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, liq: viewMySettlement, 'new-customer': viewNewCustomer }
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settle: viewSettlements, settings: viewSettings };
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
   const v = shell(navKey, skeleton());

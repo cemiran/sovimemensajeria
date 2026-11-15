@@ -522,6 +522,22 @@ addCols('contracts', [['is_test', 'INTEGER NOT NULL DEFAULT 0'], ['identity_ok_b
 // prestador con empleados propios (pide REPSE) y suspensión por documentos vencidos
 addCols('staff_profiles', [['tiene_empleados', 'TEXT']]);
 addCols('users', [['suspended_reason', 'TEXT']]);
+// Liquidación semanal (lunes a domingo) del prestador con su CFDI
+db.exec(`CREATE TABLE IF NOT EXISTS settlements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  week_from TEXT NOT NULL, week_to TEXT NOT NULL,
+  delivered INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+  services REAL NOT NULL DEFAULT 0, team REAL NOT NULL DEFAULT 0, bonos REAL NOT NULL DEFAULT 0, incidencias REAL NOT NULL DEFAULT 0, anticipos REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0, to_pay REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'cerrada' CHECK (status IN ('cerrada','facturada','validada','rechazada','pagada')),
+  closed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  cfdi_xml TEXT, cfdi_pdf TEXT, cfdi_uuid TEXT, cfdi_subtotal REAL, cfdi_total REAL, cfdi_json TEXT, cfdi_issues TEXT, sat_estado TEXT, sat_at TEXT, uploaded_at TEXT,
+  paid_at TEXT, pay_ref TEXT,
+  UNIQUE (user_id, week_from)
+);
+CREATE INDEX IF NOT EXISTS idx_settle_week ON settlements(week_from, status);`);
+ins.run('cfdi_receptor_rfc', 'ASI050304FIA');
 ins.run('psc_name', ''); ins.run('psc_url', ''); ins.run('psc_api_key', ''); ins.run('contract_company_signer', 'C. César Andrés Miranda Valadez');
 // Capital Humano: pagos, anticipos, bonos y descuentos de cada colaborador
 db.exec(`CREATE TABLE IF NOT EXISTS staff_payments (

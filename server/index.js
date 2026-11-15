@@ -1533,6 +1533,150 @@ app.post('/api/firma/:token/sign', wrap(async (req, res) => {
   res.json({ ok: true, folio: c.folio, status: done.status, pdf_sha256: pdfHash, nom151: done.nom151_status, nom151_error: done.nom151_error });
 }));
 
+// ---------- Liquidación semanal (lunes a domingo) ----------
+const cfdi = require('./cfdi');
+const weekOf = (date, off = 0) => payPeriod('semanal', date, off); // lunes a domingo
+// prestadores que se liquidan: los que reparten o tienen tarifa
+const settleUsers = () => db.prepare(`SELECT u.id, u.name FROM users u WHERE u.deleted_at IS NULL AND (u.role = 'repartidor' OR u.can_deliver = 1
+  OR EXISTS (SELECT 1 FROM staff_profiles sp WHERE sp.user_id = u.id AND (sp.pay_per_delivery > 0 OR sp.pay_per_failed > 0 OR sp.team_pay_per_delivery > 0 OR sp.team_pay_pct > 0)))`).all();
+// importe de la semana: servicios con evidencia + coordinación + bonos − incidencias; se paga lo que queda después de anticipos
+function settleCalc(uid, from, to) {
+  const x = hrSummary(uid, profileOf(uid), from, to);
+  const amount = money2(x.own + (x.team?.pay || 0) + x.bono - x.descuento);
+  return { delivered: x.delivered, failed: x.failed, services: x.own, team: x.team?.pay || 0, bonos: x.bono, incidencias: x.descuento, anticipos: x.anticipo, amount, to_pay: money2(amount - x.anticipo) };
+}
+// cierra el corte de una semana (no toca los ya facturados o pagados)
+function settleClose(weekFrom, { force = false } = {}) {
+  const w = weekOf(weekFrom);
+  let n = 0;
+  tx(() => {
+    for (const u of settleUsers()) {
+      const c = settleCalc(u.id, w.from, w.to);
+      const cur = db.prepare('SELECT * FROM settlements WHERE user_id=? AND week_from=?').get(u.id, w.from);
+      if (!c.delivered && !c.failed && !c.amount && !cur) continue;
+      if (cur && !force && cur.status !== 'cerrada' && cur.status !== 'rechazada') continue;
+      if (cur && ['validada', 'pagada', 'facturada'].includes(cur.status)) continue;
+      db.prepare(`INSERT INTO settlements (user_id, week_from, week_to, delivered, failed, services, team, bonos, incidencias, anticipos, amount, to_pay, status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'cerrada') ON CONFLICT(user_id, week_from) DO UPDATE SET delivered=excluded.delivered, failed=excluded.failed, services=excluded.services,
+        team=excluded.team, bonos=excluded.bonos, incidencias=excluded.incidencias, anticipos=excluded.anticipos, amount=excluded.amount, to_pay=excluded.to_pay, closed_at=datetime('now')`)
+        .run(u.id, w.from, w.to, c.delivered, c.failed, c.services, c.team, c.bonos, c.incidencias, c.anticipos, c.amount, c.to_pay);
+      n++;
+    }
+  });
+  return { ...w, closed: n };
+}
+// cada hora: el lunes se cierra el corte de la semana anterior (domingo 23:59)
+function settleJob() {
+  const prev = weekOf(today(), -1);
+  const done = db.prepare("SELECT value FROM settings WHERE key='settle_last'").get()?.value;
+  if (done === prev.from) return;
+  const r = settleClose(prev.from);
+  db.prepare("INSERT INTO settings (key, value) VALUES ('settle_last', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(prev.from);
+  db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('liquidacion.corte', `Corte semanal ${r.from} a ${r.to}: ${r.closed} liquidaciones`);
+}
+const settleRow = (r) => ({ ...r, cfdi: (() => { try { return JSON.parse(r.cfdi_json || 'null'); } catch { return null; } })(), issues: (() => { try { return JSON.parse(r.cfdi_issues || '[]'); } catch { return []; } })(), cfdi_json: undefined, cfdi_issues: undefined });
+// valida el CFDI contra el corte y consulta su estado en el SAT
+async function settleValidate(id) {
+  const st = db.prepare('SELECT s.*, sp.rfc FROM settlements s LEFT JOIN staff_profiles sp ON sp.user_id = s.user_id WHERE s.id=?').get(id);
+  const xml = fs.readFileSync(path.join(DOCS_DIR, st.cfdi_xml), 'utf8');
+  const issues = [];
+  let c = null;
+  try { c = cfdi.parseCfdi(xml); } catch (e) { issues.push(e.message); }
+  let sat = null;
+  if (c) {
+    const rfcCo = (getSettings().cfdi_receptor_rfc || 'ASI050304FIA').toUpperCase();
+    if (c.tipo && c.tipo !== 'I') issues.push(`Debe ser un CFDI de ingreso (tipo I), éste es tipo ${c.tipo}`);
+    if (c.rfc_receptor !== rfcCo) issues.push(`El RFC receptor debe ser ${rfcCo} (viene ${c.rfc_receptor})`);
+    if (st.rfc && c.rfc_emisor !== String(st.rfc).toUpperCase()) issues.push(`El RFC emisor (${c.rfc_emisor}) no es el del prestador (${st.rfc})`);
+    if (Math.abs(c.subtotal - st.amount) > 1) issues.push(`El subtotal del CFDI (${c.subtotal.toFixed(2)}) no coincide con la liquidación (${Number(st.amount).toFixed(2)})`);
+    if (c.uuid && db.prepare('SELECT 1 FROM settlements WHERE cfdi_uuid=? AND id<>?').get(c.uuid, id)) issues.push('Ese CFDI ya se usó en otra liquidación');
+    try { sat = await cfdi.satStatus(c); if (sat.estado !== 'Vigente') issues.push(`Estado en el SAT: ${sat.estado || 'sin respuesta'}`); }
+    catch (e) { issues.push('No se pudo consultar el SAT; se reintenta más tarde'); }
+  }
+  const status = issues.length ? 'rechazada' : 'validada';
+  db.prepare("UPDATE settlements SET cfdi_uuid=?, cfdi_subtotal=?, cfdi_total=?, cfdi_json=?, cfdi_issues=?, sat_estado=?, sat_at=datetime('now'), status=? WHERE id=?")
+    .run(c?.uuid || null, c?.subtotal ?? null, c?.total ?? null, JSON.stringify(c), JSON.stringify(issues), sat?.estado || null, status, id);
+  return { status, issues, sat: sat?.estado || null };
+}
+// prestador: su estado de cuenta (semana en curso y liquidaciones cerradas)
+app.get('/api/my/settlements', auth(), wrap((req, res) => {
+  const w = weekOf(today());
+  const live = settleCalc(req.user.id, w.from, w.to);
+  res.json({ current: { ...w, ...live }, company_rfc: getSettings().cfdi_receptor_rfc || 'ASI050304FIA', company: 'ANDERNS SERVICIOS INTEGRALES, S.C.',
+    rows: db.prepare('SELECT * FROM settlements WHERE user_id=? ORDER BY week_from DESC LIMIT 26').all(req.user.id).map(settleRow) });
+}));
+// prestador sube su CFDI (XML + PDF)
+app.post('/api/my/settlements/:id/cfdi', auth(), wrap(async (req, res) => {
+  const st = db.prepare('SELECT * FROM settlements WHERE id=? AND user_id=?').get(Number(req.params.id), req.user.id);
+  if (!st) throw new HttpError(404, 'Liquidación no encontrada');
+  if (['validada', 'pagada'].includes(st.status)) throw new HttpError(409, 'Esta liquidación ya tiene su CFDI validado');
+  const xml = String(req.body?.xml || '');
+  if (!/<(?:\w+:)?Comprobante\b/.test(xml)) throw new HttpError(400, 'Adjunta el XML del CFDI');
+  if (xml.length > 2 * 1024 * 1024) throw new HttpError(413, 'El XML es demasiado grande');
+  const xmlName = `cfdi_${st.id}_${Date.now()}.xml`;
+  fs.writeFileSync(path.join(DOCS_DIR, xmlName), xml);
+  const pdfName = req.body?.pdf ? saveDocFile(req.body.pdf, req.user.id, `cfdi_${st.id}`) : st.cfdi_pdf;
+  db.prepare("UPDATE settlements SET cfdi_xml=?, cfdi_pdf=?, uploaded_at=datetime('now'), status='facturada' WHERE id=?").run(xmlName, pdfName, st.id);
+  const v = await settleValidate(st.id);
+  audit(req, 'liquidacion.cfdi', `${req.user.name}: CFDI semana ${st.week_from} ${v.status}${v.issues.length ? ' · ' + v.issues.join('; ') : ''}`.slice(0, 500));
+  res.json(v);
+}));
+app.get('/api/settlements/:id/file/:kind', auth(), wrap((req, res) => {
+  const st = db.prepare('SELECT * FROM settlements WHERE id=?').get(Number(req.params.id));
+  if (!st || (req.user.role !== 'admin' && st.user_id !== req.user.id)) throw new HttpError(404, 'No encontrado');
+  const f = req.params.kind === 'xml' ? st.cfdi_xml : st.cfdi_pdf;
+  if (!f) throw new HttpError(404, 'Sin archivo');
+  res.sendFile(path.join(DOCS_DIR, f));
+}));
+// administrador: las liquidaciones de una semana
+app.get('/api/settlements', auth('admin'), wrap((req, res) => {
+  const w = weekOf(/^\d{4}-\d{2}-\d{2}$/.test(req.query.week || '') ? req.query.week : weekOf(today(), -1).from);
+  const rows = db.prepare(`SELECT s.*, u.name, sp.rfc, sp.clabe, sp.bank_name, sp.account_holder FROM settlements s JOIN users u ON u.id = s.user_id LEFT JOIN staff_profiles sp ON sp.user_id = s.user_id
+    WHERE s.week_from = ? ORDER BY u.name`).all(w.from).map(settleRow);
+  res.json({ ...w, closed: !!rows.length, rows });
+}));
+app.post('/api/settlements/close', auth('admin'), wrap((req, res) => {
+  const r = settleClose(req.body?.week || weekOf(today(), -1).from, { force: true });
+  audit(req, 'liquidacion.corte', `Corte semanal ${r.from} a ${r.to} (manual): ${r.closed} liquidaciones`);
+  res.json(r);
+}));
+app.post('/api/settlements/:id/recheck', auth('admin'), wrap(async (req, res) => {
+  const st = db.prepare('SELECT * FROM settlements WHERE id=?').get(Number(req.params.id));
+  if (!st?.cfdi_xml) throw new HttpError(409, 'Aún no tiene CFDI');
+  res.json(await settleValidate(st.id));
+}));
+// archivo para dispersión SPEI en el portal del banco (CSV): solo liquidaciones con CFDI validado
+app.post('/api/settlements/spei', auth('admin'), wrap((req, res) => {
+  const ids = (req.body?.ids || []).map(Number).filter(Boolean);
+  const rows = db.prepare(`SELECT s.*, u.name, sp.rfc, sp.clabe, sp.account_holder, sp.bank_name FROM settlements s JOIN users u ON u.id=s.user_id LEFT JOIN staff_profiles sp ON sp.user_id=s.user_id
+    WHERE s.id IN (${ids.map(() => '?').join(',') || 0}) AND s.status='validada'`).all(...ids);
+  if (!rows.length) throw new HttpError(400, 'Elige liquidaciones con CFDI validado');
+  const bad = rows.filter((r) => !/^\d{18}$/.test(r.clabe || ''));
+  if (bad.length) throw new HttpError(400, `Sin CLABE válida: ${bad.map((r) => r.name).join(', ')}`);
+  const q = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
+  const csv = ['CLABE,Beneficiario,RFC,Monto,Referencia,Concepto', ...rows.map((r) => [r.clabe, q(r.account_holder || r.name), r.rfc || '', Number(r.to_pay).toFixed(2), String(r.id).padStart(7, '0'), q(`Liquidacion ${r.week_from} al ${r.week_to}`)].join(','))].join('\r\n');
+  audit(req, 'liquidacion.spei', `Archivo SPEI: ${rows.length} liquidaciones, ${rows.reduce((a, r) => a + r.to_pay, 0).toFixed(2)}`);
+  res.json({ csv, count: rows.length, total: money2(rows.reduce((a, r) => a + r.to_pay, 0)) });
+}));
+// marcar pagadas (después de la transferencia): registra el pago en Capital Humano
+app.post('/api/settlements/paid', auth('admin'), wrap((req, res) => {
+  const ids = (req.body?.ids || []).map(Number).filter(Boolean);
+  const ref = String(req.body?.reference || '').trim().slice(0, 80) || null;
+  let n = 0;
+  tx(() => {
+    for (const id of ids) {
+      const st = db.prepare("SELECT * FROM settlements WHERE id=? AND status='validada'").get(id);
+      if (!st) continue;
+      db.prepare("UPDATE settlements SET status='pagada', paid_at=datetime('now'), pay_ref=? WHERE id=?").run(ref, id);
+      if (st.to_pay > 0) db.prepare("INSERT INTO staff_payments (user_id, kind, amount, date, period_from, period_to, method, reference, notes, by_user) VALUES (?, 'pago', ?, ?, ?, ?, 'SPEI', ?, ?, ?)")
+        .run(st.user_id, st.to_pay, today(), st.week_from, st.week_to, ref, `Liquidación semanal · CFDI ${st.cfdi_uuid}`, req.user.id);
+      n++;
+    }
+  });
+  audit(req, 'liquidacion.pagada', `${n} liquidaciones pagadas${ref ? ' · ' + ref : ''}`);
+  res.json({ paid: n });
+}));
+
 // ---------- Documentos del expediente (los sube el colaborador o el administrador) ----------
 // Se guardan fuera de la carpeta pública: solo los ve el administrador o el propio colaborador.
 const DOCS_DIR = path.join(DATA_DIR, 'expedientes');
@@ -5737,6 +5881,8 @@ if (require.main === module) {
   setTimeout(() => pinCheck(), 300000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
   setTimeout(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 240000);
+  setTimeout(() => { try { settleJob(); } catch (e) { console.error('corte', e.message); } }, 180000);
+  setInterval(() => { try { settleJob(); } catch (e) { console.error('corte', e.message); } }, 3600000).unref();
   setInterval(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 6 * 3600000).unref();
   setInterval(() => { try { db.exec('PRAGMA optimize'); } catch {} }, 24 * 3600000).unref();
   require('./wa').boot(getSettings().wa_provider === 'qr');
@@ -5754,5 +5900,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob };
+app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
 module.exports = app;
