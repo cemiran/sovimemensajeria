@@ -5152,6 +5152,16 @@ app.get(
     res.json(route);
   })
 );
+// Fechas con ruta asignada al repartidor (de 7 días atrás en adelante) para elegir el día en Mi ruta
+app.get(
+  '/api/my/route/dates',
+  auth('repartidor'),
+  wrap((req, res) => {
+    const from = new Date(new Date(today() + 'T12:00:00Z').getTime() - 7 * 864e5).toISOString().slice(0, 10);
+    res.json(db.prepare(`SELECT r.date, COUNT(o.id) stops, SUM(o.status IN ('asignado','cargado')) open FROM routes r LEFT JOIN orders o ON o.route_id = r.id
+      WHERE r.driver_id = ? AND r.date >= ? GROUP BY r.date HAVING COUNT(o.id) > 0 ORDER BY r.date LIMIT 40`).all(req.user.id, from));
+  })
+);
 app.post(
   '/api/my/route/start',
   auth('repartidor'),

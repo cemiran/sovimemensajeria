@@ -6021,27 +6021,42 @@ function checkBanner() {
   }).catch(() => {});
 }
 async function viewMyRoute(v) {
-  const [r, rates] = await Promise.all([GET('/api/my/route'), GET('/api/my/rates').catch(() => null)]);
+  const tdy = today();
+  const sel = window.__myDate || tdy;
+  const preview = sel !== tdy;
+  const [r, rates, dates] = await Promise.all([GET('/api/my/route' + (preview ? '?date=' + sel : '')), GET('/api/my/rates').catch(() => null), GET('/api/my/route/dates').catch(() => [])]);
+  // días con ruta asignada: hoy y los siguientes (también puede elegir cualquier fecha)
+  const dayLbl = (d) => (d === tdy ? 'Hoy' : new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short' }));
+  const days = [...new Set([tdy, sel, ...dates.filter((d) => d.date >= tdy).map((d) => d.date)])].sort();
+  const dateBar = `<div class="row" style="gap:6px;overflow-x:auto;flex-wrap:nowrap;margin-bottom:12px;padding-bottom:4px">${days.map((d) => { const x = dates.find((y) => y.date === d); return `<button type="button" class="btn sm${d === sel ? ' primary' : ''}" data-day="${d}" style="white-space:nowrap;flex:none">${dayLbl(d)}${x ? ` · ${x.stops}` : ''}</button>`; }).join('')}<input type="date" id="myDay" value="${sel}" title="Elegir otra fecha" style="width:auto;flex:none" /></div>`;
+  const bindDates = () => {
+    $$('[data-day]', v).forEach((b) => (b.onclick = () => { window.__myDate = b.dataset.day === tdy ? null : b.dataset.day; render(); }));
+    const i = $('#myDay', v);
+    if (i) i.onchange = () => { if (i.value) { window.__myDate = i.value === tdy ? null : i.value; render(); } };
+  };
+  const nextDay = dates.find((d) => d.date > tdy && d.open > 0);
   window.__rates = rates;
   const queued = outbox.list();
   const queuedIds = new Set(queued.map((q) => Number(q.url.split('/')[3])));
   startTracking();
   checkBanner();
-  if (!r) { v.innerHTML = topbar('Mi ruta') + `<span data-gps></span><div id="ckBanner"></div>${queued.length ? `<div class="offline-bar">${queued.length} evidencias pendientes de enviar</div>` : ''}<div class="card empty">${icon('truck')}<p>No tienes ruta asignada para hoy.</p></div>`; paintGps(); return; }
+  if (!r) { v.innerHTML = topbar('Mi ruta') + `<span data-gps></span><div id="ckBanner"></div>${queued.length ? `<div class="offline-bar">${queued.length} evidencias pendientes de enviar</div>` : ''}${dateBar}<div class="card empty">${icon('truck')}<p>No tienes ruta asignada ${preview ? 'para el ' + dayLbl(sel) : 'para hoy'}.</p>${!preview && nextDay ? `<button type="button" class="btn primary" data-day="${nextDay.date}">Ver tu ruta del ${dayLbl(nextDay.date)} · ${nextDay.stops} parada${nextDay.stops === 1 ? '' : 's'}</button>` : ''}</div>`; paintGps(); bindDates(); return; }
   const open = r.stops.filter((s) => ['asignado', 'cargado'].includes(s.status) && !queuedIds.has(s.id));
   const done = r.stops.filter((s) => s.status === 'entregado').length;
   const fail = r.stops.filter((s) => s.status === 'fallido').length;
   const notLoaded = r.stops.filter((s) => s.status === 'asignado').length;
   const next = open[0];
-  v.innerHTML = topbar('Mi ruta', `<button class="btn sm" id="reopt">⚡ Re-optimizar desde aquí</button>`) + `
+  v.innerHTML = topbar('Mi ruta', preview ? '' : `<button class="btn sm" id="reopt">⚡ Re-optimizar desde aquí</button>`) + `
   <span data-gps></span><div id="ckBanner"></div>
+  ${dateBar}
+  ${preview ? `<div class="info-bar" style="margin-bottom:12px">📅 Vista previa de tu ruta del <b>${dayLbl(sel)}</b>. Ese día podrás iniciarla y registrar las entregas.</div>` : ''}
   ${!navigator.onLine ? '<div class="offline-bar">Sin conexión. Puedes seguir registrando entregas.</div>' : ''}
   ${queued.length ? `<div class="offline-bar">${queued.length} evidencias en cola de envío</div>` : ''}
   ${rates?.entrega ? `<div class="info-bar" style="margin-bottom:12px">💲 Tu tarifa: <b>${money(rates.entrega)}</b> por entrega${rates.visita ? ` · <b>${money(rates.visita)}</b> por visita sin entrega` : ''}. Puedes no tomar cualquier servicio sin penalización.</div>` : ''}
-  ${r.status === 'planificada' && open.length ? `<div class="card" style="margin-bottom:12px;border:2px solid var(--brand,#1d5a96)"><div class="row between"><div><b style="font-size:17px">Ruta lista: ${open.length} parada${open.length === 1 ? '' : 's'}</b><br><small class="muted">Al iniciar se avisa a tus clientes que vas en camino y a la primera parada que llegas pronto.</small></div>
+  ${!preview && r.status === 'planificada' && open.length ? `<div class="card" style="margin-bottom:12px;border:2px solid var(--brand,#1d5a96)"><div class="row between"><div><b style="font-size:17px">Ruta lista: ${open.length} parada${open.length === 1 ? '' : 's'}</b><br><small class="muted">Al iniciar se avisa a tus clientes que vas en camino y a la primera parada que llegas pronto.</small></div>
       <button class="btn primary lg" id="startRoute">▶ Iniciar ruta</button></div></div>`
     : r.started_at ? `<div class="info-bar" style="margin-bottom:12px">${icon('route')} Ruta en curso desde las ${new Date(r.started_at.replace(' ', 'T') + 'Z').toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}</div>` : ''}
-  ${next ? `<div class="card next-card">
+  ${preview ? '' : next ? `<div class="card next-card">
     <small class="muted">Siguiente parada · ${next.stop_seq} de ${r.stops.length}${next.eta ? ' · llegada estimada ' + esc(next.eta) : ''}</small>
     <h2 style="margin:4px 0 2px">${esc(next.customer_name)}</h2><div>${esc(next.address)}</div>${next.address_reference ? `<small class="muted">${esc(next.address_reference)}</small>` : ''}
     <div class="tels">${phonesLine(next)}</div>
@@ -6054,14 +6069,14 @@ async function viewMyRoute(v) {
     <div class="row between"><b>${r.stops.length} paradas · ${fmtN(r.distance_km, 1)} km · ~${fmtN(r.est_minutes / 60, 1)} h</b>${badge(r.status)}</div>
     <div class="progress" style="margin:10px 0 6px"><i style="width:${(done / r.stops.length) * 100}%;background:var(--ok)"></i><i style="width:${(fail / r.stops.length) * 100}%;background:var(--bad)"></i></div>
     <small class="muted">${done} entregadas · ${fail} fallidas · ${open.length} por visitar</small>
-    ${notLoaded ? `<a href="#/load" class="btn block" style="margin-top:10px;background:var(--warn-soft);color:var(--warn);border-color:transparent">${icon('truck')} Faltan ${notLoaded} paquetes por escanear al vehículo</a>` : ''}
+    ${notLoaded && !preview ? `<a href="#/load" class="btn block" style="margin-top:10px;background:var(--warn-soft);color:var(--warn);border-color:transparent">${icon('truck')} Faltan ${notLoaded} paquetes por escanear al vehículo</a>` : ''}
     ${open.length > 1 ? `<div class="row" style="margin-top:10px"><a class="btn grow" target="_blank" rel="noopener" href="${gmapsUrl(open)}">${icon('route')} Ruta completa en Google Maps</a></div>` : ''}
   </div>
   <div id="mymap" class="map sm" style="margin-bottom:12px"></div>
   <div class="card" style="padding:0">${r.stops.map((s) => {
     const q = queuedIds.has(s.id);
     const cls = s.status === 'entregado' || q ? 'done' : s.status === 'fallido' ? 'fail' : s === next ? 'next' : '';
-    const actionable = ['asignado', 'cargado'].includes(s.status) && !q;
+    const actionable = ['asignado', 'cargado'].includes(s.status) && !q && !preview;
     return `<div class="stop ${cls}"><div class="n">${s.status === 'entregado' || q ? '✓' : s.status === 'fallido' ? '✕' : s.stop_seq}</div><div>
       <div class="row between"><span class="addr">${esc(s.customer_name)}</span><span class="num muted">${esc(s.eta || '')}</span></div>
       <div>${esc(s.address)}</div>${s.address_reference ? `<small class="muted">${esc(s.address_reference)}</small><br>` : ''}${geoChk(s.geo_quality) && actionable ? `${geoWarn(s.geo_quality)}<br>` : ''}<div class="tels">${phonesLine(s)}</div>
@@ -6074,6 +6089,7 @@ async function viewMyRoute(v) {
     </div></div>`;
   }).join('')}</div>`;
   paintGps();
+  bindDates();
   const map = makeMap($('#mymap'));
   drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null });
   let meMk = null;
@@ -6127,7 +6143,7 @@ async function viewMyRoute(v) {
     try { await POST(`/api/orders/${st.id}/location`, { lat: p.lat, lng: p.lng }); toast('Ubicación del cliente guardada. ¡Gracias!', 'ok'); render(); }
     catch (er) { b.disabled = false; toast(er.message, 'bad'); }
   }));
-  $('#reopt').onclick = async () => {
+  if ($('#reopt')) $('#reopt').onclick = async () => {
     const p = GPS.last || (await getPosition());
     try { const o = await POST(`/api/routes/${r.id}/optimize`, p ? { lat: p.lat, lng: p.lng } : {}); toast(`Ruta re-optimizada: ${o.distance_km} km restantes`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); }
   };
