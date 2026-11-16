@@ -3025,6 +3025,49 @@ function resumenRows() {
   }
   return rows;
 }
+// Renglones diarios por oficina y ciudad (fecha local): entregados, no entregados, visitas y pedidos nuevos
+function diarioRows(day) {
+  const [f, t] = utcRange(day, day);
+  const offName = new Map(db.prepare('SELECT id, name FROM warehouses').all().map((w) => [w.id, w.name]));
+  const acc = new Map();
+  const add = (tipo, name, k, v) => {
+    if (!name) return;
+    const key = `${tipo}|${name}`;
+    if (!acc.has(key)) acc.set(key, { tipo, name, ent: 0, fal: 0, vis: 0, nue: 0 });
+    acc.get(key)[k] += v;
+  };
+  const ev = db.prepare(`SELECT ${OFFICE_OF('c')} office, c.city, SUM(e.result = 'entregado') ent, SUM(e.result = 'fallido') fal, COUNT(*) vis
+    FROM evidences e JOIN orders o ON o.id = e.order_id JOIN customers c ON c.id = o.customer_id
+    WHERE e.created_at >= ? AND e.created_at < ? GROUP BY 1, 2`).all(f, t);
+  const nu = db.prepare(`SELECT ${OFFICE_OF('c')} office, c.city, COUNT(*) nue FROM orders o JOIN customers c ON c.id = o.customer_id
+    WHERE o.created_at >= ? AND o.created_at < ? GROUP BY 1, 2`).all(f, t);
+  for (const r of ev) for (const k of ['ent', 'fal', 'vis']) { add('Oficina', offName.get(r.office), k, r[k] || 0); add('Ciudad', r.city ? canonCity(r.city) : '', k, r[k] || 0); }
+  for (const r of nu) { add('Oficina', offName.get(r.office), 'nue', r.nue || 0); add('Ciudad', r.city ? canonCity(r.city) : '', 'nue', r.nue || 0); }
+  const iso = new Date(`${day}T00:00:00`).toISOString();
+  return [...acc.values()].map((a) => [`${day} · ${a.tipo} · ${a.name}`, iso, a.tipo, a.name, a.ent, a.fal, a.vis, a.nue]);
+}
+// Manda a la hoja los días pendientes (la primera vez, todo el historial; después, ayer y hoy)
+let diarioBusy = false;
+async function diarioTick() {
+  if (diarioBusy) return;
+  diarioBusy = true;
+  try {
+    const s = getSettings();
+    if (s.sheets_enabled !== '1' || !s.sheets_url) return;
+    const first = db.prepare('SELECT MIN(created_at) d FROM evidences').get().d;
+    if (!first) return;
+    const localDay = (u) => new Date(String(u).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA');
+    const end = today();
+    const yest = new Date(new Date(end + 'T12:00:00Z').getTime() - 864e5).toISOString().slice(0, 10);
+    let d = s.sheets_diario_done ? (s.sheets_diario_done < yest ? s.sheets_diario_done : yest) : localDay(first);
+    while (d <= end) {
+      await notify.pushDiario(diarioRows(d));
+      if (d < end) db.prepare("INSERT INTO settings (key, value) VALUES ('sheets_diario_done', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(d);
+      d = new Date(new Date(d + 'T12:00:00Z').getTime() + 864e5).toISOString().slice(0, 10);
+    }
+  } catch (e) { console.error('diario sheet', e.message); }
+  finally { diarioBusy = false; }
+}
 // Supervisor operativo de la oficina (lo nombra el administrador; queda asignado a esa oficina)
 app.put('/api/offices/:id/supervisor', auth('admin'), wrap((req, res) => {
   const w = db.prepare('SELECT * FROM warehouses WHERE id = ?').get(req.params.id);
@@ -5940,6 +5983,8 @@ if (require.main === module) {
   const resumenTick = () => notify.pushResumen(resumenRows()).catch((e) => console.error('resumen sheet', e.message));
   setTimeout(resumenTick, 60000);
   setInterval(resumenTick, 15 * 60000).unref();
+  setTimeout(diarioTick, 75000);
+  setInterval(diarioTick, 15 * 60000).unref();
   setTimeout(geocodePending, 5000);
   setTimeout(() => routedRefine(), 90000);
   setInterval(() => routedRefine(), 10 * 60000).unref();
@@ -5967,5 +6012,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
+app.internal = { diarioRows, persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
 module.exports = app;

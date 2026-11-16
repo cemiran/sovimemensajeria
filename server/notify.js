@@ -577,4 +577,13 @@ async function pushResumen(rows) {
   for (const row of rows) { await postSheet(s, { sheet: 'Resumen', headers: RESUMEN_HEADERS, row }); n++; }
   return { sent: n };
 }
-module.exports = { sendSMS, sendEmail, smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
+// Pestaña "Diario": un renglón por día y por oficina / ciudad (clave en la columna A, se reescribe)
+const DIARIO_HEADERS = ['Clave', 'Fecha', 'Tipo', 'Nombre', 'Entregados', 'No entregados', 'Visitas', 'Pedidos nuevos'];
+async function pushDiario(rows) {
+  const s = getSettings();
+  if (s.sheets_enabled !== '1' || !s.sheets_url) return { skipped: true };
+  let n = 0;
+  for (const row of rows) { await postSheet(s, { sheet: 'Diario', headers: DIARIO_HEADERS, row }); n++; }
+  return { sent: n };
+}
+module.exports = { pushDiario, sendSMS, sendEmail, smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
