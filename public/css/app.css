@@ -751,8 +751,8 @@ label.f:has(> .req) > :not(.req) { grid-column: 1 / -1; }
 .exec { margin-bottom: 18px; }
 .exec-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin: 4px 0 10px; }
 .exec-head small.muted:first-child { letter-spacing: .08em; font-weight: 600; }
-.xk-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
-@media (max-width: 1200px) { .xk-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.xk-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .xk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .xk-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .xk { background: var(--card, #fff); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; border-top: 3px solid var(--brand, #1d5a96); }
 .xk.warn { border-top-color: var(--warn); } .xk.bad { border-top-color: var(--bad); } .xk.good { border-top-color: var(--ok); }

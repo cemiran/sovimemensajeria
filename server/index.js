@@ -2936,6 +2936,10 @@ app.get('/api/dashboard/exec', auth(...STAFF), wrap((req, res) => {
       COUNT(DISTINCT CASE WHEN o.status='entregado' THEN ${DONE} END) days
     ${J} WHERE o.status IN ('entregado','fallido') AND ${IN_D}${W}`).get(...rng(f, t), ...ca);
   const cur = per(from, to), prev = per(pFrom, pTo);
+  // visitas: cada intento en el domicilio (entregado o no), por la fecha en que ocurrió
+  const visits = (f, t) => db.prepare(`SELECT COUNT(*) v, SUM(e.result='fallido') f FROM evidences e JOIN orders o ON o.id = e.order_id ${W.includes('c.') ? 'JOIN customers c ON c.id = o.customer_id' : ''}
+    WHERE e.kind <> 'mostrador' AND e.created_at >= ? AND e.created_at < ?${W}`).get(...rng(f, t), ...ca);
+  { const a = visits(from, to), b = visits(pFrom, pTo); Object.assign(cur, { visits: a.v || 0, visits_failed: a.f || 0 }); Object.assign(prev, { visits: b.v || 0, visits_failed: b.f || 0 }); }
   // tendencia: el periodo (o los últimos 14 días si es un solo día)
   const sFrom = nDays < 7 ? iso(dd(to) - 13 * dayMs) : from;
   const rows = db.prepare(`SELECT ${DONE} d, SUM(o.status='entregado') delivered, SUM(o.status='fallido') failed

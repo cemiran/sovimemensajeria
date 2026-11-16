@@ -490,16 +490,13 @@ async function processQueue() {
         db.prepare("UPDATE sheet_sync SET status='desactivado' WHERE id=?").run(it.id);
         continue;
       }
-      // la hoja "Entregas" solo lleva lo entregado: los intentos no entregados no se mandan
+      // la hoja "Entregas" solo lleva lo entregado; las visitas sin entrega van a la pestaña "No entregados"
       const evr = db.prepare('SELECT result FROM evidences WHERE id=?').get(it.evidence_id);
-      if (evr && evr.result !== 'entregado') {
-        db.prepare("UPDATE sheet_sync SET status='desactivado', error='No entregado: la hoja solo lleva entregas' WHERE id=?").run(it.id);
-        continue;
-      }
+      const tab = evr && evr.result !== 'entregado' ? 'No entregados' : SHEET_NAME;
       try {
         const row = sheetRow(it.evidence_id);
         if (!row) throw new Error('Evidencia no encontrada');
-        await postSheet(s, { row });
+        await postSheet(s, { row, sheet: tab });
         db.prepare("UPDATE sheet_sync SET status='enviado', attempts=attempts+1, error=NULL, sent_at=datetime('now') WHERE id=?").run(it.id);
       } catch (e) {
         const n = it.attempts + 1;

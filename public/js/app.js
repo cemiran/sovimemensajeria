@@ -1085,6 +1085,8 @@ function execBoard(ex, bd, perTxt) {
   const meter = (v, goalV) => `<div class="xk-meter"><i style="width:${Math.max(0, Math.min(100, v || 0))}%"></i>${goalV ? `<b style="left:${goalV}%" title="Meta ${goalV}%"></b>` : ''}</div>`;
   const kpis = [
     tile('Entregas', fmtN(n(c.delivered)), `${delta(n(c.delivered), n(p.delivered))} · ${fmtN(n(c.delivered) / Math.max(1, ex.days), 1)} por día`),
+    tile('No entregados', fmtN(n(c.visits_failed)), `${delta(n(c.visits_failed), n(p.visits_failed), { inverse: true })} · visitas sin entrega`, '', n(c.visits_failed) ? 'warn' : ''),
+    tile('Visitas totales', fmtN(n(c.visits)), `${delta(n(c.visits), n(p.visits))} · entregadas y no entregadas`),
     tile('Tasa de éxito', sr == null ? '—' : fmtN(sr, 1) + '%', `${delta(sr, srP, { pts: true })} · meta ${goal}%`, meter(sr, goal), sr != null && sr < goal ? 'warn' : ''),
     tile('Primer intento', ft == null ? '—' : fmtN(ft, 1) + '%', `${delta(ft, ftP, { pts: true })} · sin reintentos`, meter(ft)),
     tile('Productividad', prod == null ? '—' : fmtN(prod, 1), `entregas por repartidor por día · ${n(c.drivers)} repartidor(es)`),
