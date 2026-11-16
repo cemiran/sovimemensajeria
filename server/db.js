@@ -451,6 +451,10 @@ CREATE TABLE IF NOT EXISTS accounts (
 addCols('orders', [['account_id', 'INTEGER REFERENCES accounts(id)']]);
 addCols('orders', [['appointment_time', 'TEXT']]); // hora de entrega acordada con el cliente (HH:MM)
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, scheduled_date)');
+// Si solo hay un mayorista activo (Telnor), todo pedido nuevo queda ligado a él para cobrarlo
+db.exec(`CREATE TRIGGER IF NOT EXISTS trg_orders_default_account AFTER INSERT ON orders
+  WHEN NEW.account_id IS NULL AND (SELECT COUNT(*) FROM accounts WHERE active = 1) = 1
+  BEGIN UPDATE orders SET account_id = (SELECT id FROM accounts WHERE active = 1) WHERE id = NEW.id; END`);
 
 // ---- Expediente del personal (interno o externo): datos personales, fiscales, bancarios y pago ----
 db.exec(`

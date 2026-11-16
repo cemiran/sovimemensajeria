@@ -1089,24 +1089,32 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
   if (!a) throw new HttpError(404, 'No encontrado');
   const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : today().slice(0, 8) + '01';
   const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today();
-  const rows = db.prepare(`SELECT o.tracking_code, o.scheduled_date, o.status, o.delivered_at, o.attempts, c.name customer, c.address, c.colonia, u.name driver,
+  // se cobra por la fecha real de la entrega (o de la última visita sin entrega), no por la fecha programada
+  const [uf, ut] = utcRange(from, to);
+  const rows = db.prepare(`SELECT * FROM (SELECT o.tracking_code, o.scheduled_date, o.status, o.delivered_at, o.attempts, c.name customer, c.address, c.colonia, u.name driver,
+      COALESCE(o.delivered_at, (SELECT MAX(e.created_at) FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido')) done_at,
       (SELECT receiver_name FROM evidences e WHERE e.order_id = o.id AND e.result = o.status ORDER BY e.id DESC LIMIT 1) receiver,
       (SELECT reason FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido' ORDER BY e.id DESC LIMIT 1) reason,
       (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials
     FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id
-    WHERE o.account_id = ? AND o.scheduled_date BETWEEN ? AND ? AND o.status IN ('entregado','fallido')
-    ORDER BY o.scheduled_date, o.tracking_code`).all(a.id, from, to);
-  for (const r of rows) r.amount = r.status === 'entregado' ? a.rate_delivery : a.rate_failed;
+    WHERE o.account_id = ? AND o.status IN ('entregado','fallido')) WHERE done_at >= ? AND done_at < ?
+    ORDER BY done_at, tracking_code`).all(a.id, uf, ut);
+  const localDate = (u) => (u ? new Date(String(u).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA') : '');
+  for (const r of rows) { r.amount = r.status === 'entregado' ? a.rate_delivery : a.rate_failed; r.date = localDate(r.done_at); }
   const del = rows.filter((r) => r.status === 'entregado').length;
   const fail = rows.length - del;
-  const totals = { delivered: del, failed: fail, amount_delivered: del * a.rate_delivery, amount_failed: fail * a.rate_failed, total: del * a.rate_delivery + fail * a.rate_failed };
+  const sub = del * a.rate_delivery + fail * a.rate_failed;
+  const iva = Math.round(sub * 0.16 * 100) / 100;
+  const totals = { delivered: del, failed: fail, amount_delivered: del * a.rate_delivery, amount_failed: fail * a.rate_failed, total: sub, iva, total_iva: Math.round((sub + iva) * 100) / 100 };
   if (req.query.format === 'csv') {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const head = ['Guía', 'Fecha', 'Resultado', 'Entregado', 'Cliente', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
-    const lines = rows.map((r) => [r.tracking_code, r.scheduled_date, r.status, r.delivered_at || '', r.customer, r.address, r.colonia, r.driver, r.receiver, r.reason, r.serials, r.amount.toFixed(2)].map(q).join(','));
+    const head = ['Guía', 'Fecha de entrega', 'Resultado', 'Fecha programada', 'Cliente', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
+    const lines = rows.map((r) => [r.tracking_code, r.date, r.status, r.scheduled_date || '', r.customer, r.address, r.colonia, r.driver, r.receiver, r.reason, r.serials, r.amount.toFixed(2)].map(q).join(','));
     lines.push('', [q('Entregados'), del, q('Tarifa'), a.rate_delivery.toFixed(2), q('Importe'), totals.amount_delivered.toFixed(2)].join(','));
     lines.push([q('Fallidos'), fail, q('Tarifa'), a.rate_failed.toFixed(2), q('Importe'), totals.amount_failed.toFixed(2)].join(','));
-    lines.push([q('TOTAL'), '', '', '', '', totals.total.toFixed(2)].join(','));
+    lines.push([q('Subtotal'), '', '', '', '', totals.total.toFixed(2)].join(','));
+    lines.push([q('IVA 16%'), '', '', '', '', totals.iva.toFixed(2)].join(','));
+    lines.push([q('TOTAL a facturar'), '', '', '', '', totals.total_iva.toFixed(2)].join(','));
     const fname = `estado-de-cuenta-${a.name.replace(/[^\w-]+/g, '_')}-${from}-a-${to}.csv`;
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     return res.type('text/csv; charset=utf-8').send('﻿' + head.map(q).join(',') + '\n' + lines.join('\n'));
