@@ -3621,8 +3621,8 @@ async function accountDetail(id) {
         <div><small class="muted">Intentos fallidos</small><br><b>${t.failed}</b> × ${mxn(r.account.rate_failed)} = <b>${mxn(t.amount_failed)}</b></div>
         <div><small class="muted">Subtotal ${mxn(t.total)} + IVA 16% ${mxn(t.iva)}</small><br><b style="font-size:20px">${mxn(t.total_iva)}</b> <small class="muted">a facturar</small></div></div>
       <small class="muted">Cuenta por la fecha real de entrega.</small>
-      ${r.rows.length ? `<div class="table-wrap" style="max-height:260px;margin-top:8px"><table><thead><tr><th>Guía</th><th>Entregado</th><th>Cliente</th><th>Resultado</th><th class="r">Importe</th></tr></thead><tbody>
-        ${r.rows.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td class="num">${esc(x.date)}</td><td>${esc(x.customer)}${x.serials ? `<br><small class="muted mono">${esc(x.serials)}</small>` : ''}</td><td>${badge(x.status)}${x.reason ? `<br><small class="muted">${esc(x.reason)}</small>` : ''}</td><td class="r num">${mxn(x.amount)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Sin entregas ni intentos fallidos en este periodo.</p>'}`;
+      ${r.rows.length ? `<div class="table-wrap" style="max-height:260px;margin-top:8px"><table><thead><tr><th>Guía</th><th>Entregado</th><th>Cliente</th><th>Teléfono Telnor</th><th>Resultado</th><th class="r">Importe</th></tr></thead><tbody>
+        ${r.rows.map((x) => `<tr><td class="mono">${esc(x.tracking_code)}</td><td class="num">${esc(x.date)}</td><td>${esc(x.customer)}${x.serials ? `<br><small class="muted mono">${esc(x.serials)}</small>` : ''}</td><td class="mono">${esc(x.telnor_phone || '')}</td><td>${badge(x.status)}${x.reason ? `<br><small class="muted">${esc(x.reason)}</small>` : ''}</td><td class="r num">${mxn(x.amount)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Sin entregas ni intentos fallidos en este periodo.</p>'}`;
   };
   $('#stGo', m.el).onclick = () => stmt().catch((e) => toast(e.message, 'bad'));
   $('#stCsv', m.el).onclick = async () => {

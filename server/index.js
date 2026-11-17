@@ -1092,7 +1092,7 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
   // se cobra por la fecha real de la entrega (o de la última visita sin entrega), no por la fecha programada
   const [uf, ut] = utcRange(from, to);
   const rows = db.prepare(`SELECT * FROM (SELECT o.tracking_code, o.scheduled_date, o.status, o.delivered_at, o.attempts, c.name customer, c.address, c.colonia, u.name driver,
-      COALESCE(o.delivered_at, (SELECT MAX(e.created_at) FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido')) done_at,
+      COALESCE(o.delivered_at, (SELECT MAX(e.created_at) FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido')) done_at, c.external_id telnor_phone,
       (SELECT receiver_name FROM evidences e WHERE e.order_id = o.id AND e.result = o.status ORDER BY e.id DESC LIMIT 1) receiver,
       (SELECT reason FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido' ORDER BY e.id DESC LIMIT 1) reason,
       (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials
@@ -1108,8 +1108,8 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
   const totals = { delivered: del, failed: fail, amount_delivered: del * a.rate_delivery, amount_failed: fail * a.rate_failed, total: sub, iva, total_iva: Math.round((sub + iva) * 100) / 100 };
   if (req.query.format === 'csv') {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const head = ['Guía', 'Fecha de entrega', 'Resultado', 'Fecha programada', 'Cliente', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
-    const lines = rows.map((r) => [r.tracking_code, r.date, r.status, r.scheduled_date || '', r.customer, r.address, r.colonia, r.driver, r.receiver, r.reason, r.serials, r.amount.toFixed(2)].map(q).join(','));
+    const head = ['Guía', 'Fecha de entrega', 'Resultado', 'Fecha programada', 'Cliente', 'Teléfono Telnor', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
+    const lines = rows.map((r) => [r.tracking_code, r.date, r.status, r.scheduled_date || '', r.customer, r.telnor_phone || '', r.address, r.colonia, r.driver, r.receiver, r.reason, r.serials, r.amount.toFixed(2)].map(q).join(','));
     lines.push('', [q('Entregados'), del, q('Tarifa'), a.rate_delivery.toFixed(2), q('Importe'), totals.amount_delivered.toFixed(2)].join(','));
     lines.push([q('Fallidos'), fail, q('Tarifa'), a.rate_failed.toFixed(2), q('Importe'), totals.amount_failed.toFixed(2)].join(','));
     lines.push([q('Subtotal'), '', '', '', '', totals.total.toFixed(2)].join(','));
