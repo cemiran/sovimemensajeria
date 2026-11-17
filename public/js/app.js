@@ -1684,10 +1684,11 @@ async function routesReport() {
   const m = modal('Rutas y estatus por periodo', `<div class="stack">
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end"><label class="f">Desde<input type="date" id="rrFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="rrTo" value="${today()}" /></label>
       <label class="f">Repartidor<select id="rrDrv"><option value="">Todos</option>${list.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></label>
+      <label class="f">Estatus<select id="rrSt"><option value="">Todos</option><optgroup label="Resultado de la visita"><option value="entregado">Entregado</option><option value="fallido">No entregado</option><option value="sin_visita">Sin visita (pendiente en ruta)</option></optgroup><optgroup label="Cómo se registró"><option value="manual">Registro manual (por administración)</option><option value="mostrador">Entrega en mostrador</option></optgroup><optgroup label="Estatus actual del pedido"><option value="hoy_entregado">Hoy está entregado</option><option value="hoy_fallido">Hoy está no entregado</option><option value="hoy_abierto">Hoy sigue abierto (pendiente, asignado o cargado)</option></optgroup></select></label>
       <button class="btn primary" id="rrGo">Ver</button><button class="btn" id="rrCsv">${icon('download')} Excel (CSV)</button></div>
     <small class="muted">Incluye cada visita registrada en el periodo (entregada o no, en ruta, manual o en mostrador) y las paradas de rutas del periodo que siguen sin visitarse.</small>
     <div id="rrOut"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
-  const qs = () => `from=${$('#rrFrom', m.el).value}&to=${$('#rrTo', m.el).value}&driver_id=${$('#rrDrv', m.el).value}`;
+  const qs = () => `from=${$('#rrFrom', m.el).value}&to=${$('#rrTo', m.el).value}&driver_id=${$('#rrDrv', m.el).value}&status=${$('#rrSt', m.el).value}`;
   const VB = { Entregado: 'ok', 'No entregado': 'bad', 'Sin visita': 'warn' };
   const show = async () => {
     $('#rrOut', m.el).innerHTML = '<p class="muted">Cargando…</p>';
@@ -1698,9 +1699,11 @@ async function routesReport() {
         ${r.rows.map((x) => `<tr><td class="num">${esc(x.date)} ${esc(x.time)}</td><td>${esc(x.driver)}${x.route ? `<br><small class="muted">${esc(x.route)}${x.stop !== '' ? ' · parada ' + x.stop : ''}</small>` : ''}</td><td class="mono">${esc(x.tracking_code)}</td>
           <td>${esc(x.customer)}<br><small class="muted">${esc(x.address)}</small></td><td><span class="chip ${VB[x.visit] || ''}">${esc(x.visit)}</span>${x.recorded && x.recorded !== 'En ruta' ? `<br><small class="muted">${esc(x.recorded)}</small>` : ''}</td>
           <td><small>${esc(x.reason || x.receiver)}${x.notes ? `<br><span class="muted">${esc(x.notes)}</span>` : ''}</small></td><td>${esc(x.status)}</td></tr>`).join('')}</tbody></table></div>
-        ${r.total > r.rows.length ? `<small class="muted">Se muestran ${r.rows.length} de ${r.total}; descarga el Excel para verlos todos.</small>` : ''}` : ''}`;
+        ${r.total > r.rows.length ? `<small class="muted">Se muestran ${r.rows.length} de ${r.total}; descarga el Excel para verlos todos.</small>` : ''}` : `<p class="muted" style="margin-top:10px">Ningún renglón con ese estatus en el periodo.</p>`}
+      ${r.rows.length ? `<small class="muted">${fmtN(r.total)} renglón(es) en el detalle${$('#rrSt', m.el).value ? ' con el estatus elegido' : ''}.</small>` : ''}`;
   };
   $('#rrGo', m.el).onclick = () => show().catch((e) => toast(e.message, 'bad'));
+  for (const id of ['#rrSt', '#rrDrv']) $(id, m.el).onchange = () => show().catch((e) => toast(e.message, 'bad'));
   $('#rrCsv', m.el).onclick = async () => {
     try {
       const res = await fetch('/api/reports/routes?format=csv&' + qs(), { headers: { Authorization: 'Bearer ' + store.token } });

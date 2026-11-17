@@ -5192,6 +5192,12 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
     if (r.recorded === 'Registro manual') x.manual++;
   }
   const summary = Object.values(byDriver).sort((a, b) => b.entregados - a.entregados);
+  // filtro por estatus: el resumen por repartidor se queda completo; el detalle y el Excel solo llevan lo filtrado
+  const FILT = { entregado: (r) => r.visit === 'Entregado', fallido: (r) => r.visit === 'No entregado', sin_visita: (r) => r.visit === 'Sin visita',
+    manual: (r) => r.recorded === 'Registro manual', mostrador: (r) => r.recorded === 'Mostrador',
+    hoy_entregado: (r) => r.status === 'Entregado', hoy_fallido: (r) => r.status === 'No entregado', hoy_abierto: (r) => ['Pendiente', 'Asignado', 'Cargado'].includes(r.status) };
+  const st = String(req.query.status || '');
+  if (st && FILT[st]) { const keep = rows.filter(FILT[st]); rows.length = 0; rows.push(...keep); }
   if (req.query.format === 'csv') {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const head = ['Fecha', 'Hora', 'Ruta', 'Repartidor', 'Parada', 'Guía', 'Cliente', 'Teléfono', 'Dirección', 'Ciudad', 'C.P.', 'Resultado de la visita', 'Registrado', 'Motivo', 'Notas', 'Recibió', 'Distancia al domicilio (m)', 'S/N', 'Estatus actual del pedido', 'Intentos'];
@@ -5200,7 +5206,7 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
     lines.push('', [q('Resumen por repartidor'), q('Entregados'), q('No entregados'), q('Sin visita'), q('Registros manuales')].join(','));
     for (const s of summary) lines.push([q(s.driver), s.entregados, s.no_entregados, s.sin_visita, s.manual].join(','));
     const who = drv ? '-' + (db.prepare('SELECT name FROM users WHERE id = ?').get(drv)?.name || String(drv)).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '_') : '';
-    res.setHeader('Content-Disposition', `attachment; filename="rutas-${from}-a-${to}${who}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="rutas-${from}-a-${to}${who}${st && FILT[st] ? '-' + st : ''}.csv"`);
     return res.type('text/csv; charset=utf-8').send('\uFEFF' + head.map(q).join(',') + '\n' + lines.join('\n'));
   }
   res.json({ from, to, summary, rows: rows.slice(0, 2000), total: rows.length });
