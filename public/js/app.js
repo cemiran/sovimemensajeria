@@ -1676,6 +1676,45 @@ async function viewCustomers(v) {
 }
 
 // ================= Rutas =================
+// Reporte de rutas y estatus por periodo (para revisar incidencias): resumen por repartidor, detalle y descarga a Excel
+async function routesReport() {
+  const drivers = await GET('/api/users?role=repartidor').catch(() => []);
+  const list = (Array.isArray(drivers) ? drivers : drivers.rows || []).filter((u) => u.active !== 0).sort((a, b) => a.name.localeCompare(b.name));
+  const first = new Date(Date.now() - 6 * 864e5).toLocaleDateString('en-CA');
+  const m = modal('Rutas y estatus por periodo', `<div class="stack">
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end"><label class="f">Desde<input type="date" id="rrFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="rrTo" value="${today()}" /></label>
+      <label class="f">Repartidor<select id="rrDrv"><option value="">Todos</option>${list.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></label>
+      <button class="btn primary" id="rrGo">Ver</button><button class="btn" id="rrCsv">${icon('download')} Excel (CSV)</button></div>
+    <small class="muted">Incluye cada visita registrada en el periodo (entregada o no, en ruta, manual o en mostrador) y las paradas de rutas del periodo que siguen sin visitarse.</small>
+    <div id="rrOut"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
+  const qs = () => `from=${$('#rrFrom', m.el).value}&to=${$('#rrTo', m.el).value}&driver_id=${$('#rrDrv', m.el).value}`;
+  const VB = { Entregado: 'ok', 'No entregado': 'bad', 'Sin visita': 'warn' };
+  const show = async () => {
+    $('#rrOut', m.el).innerHTML = '<p class="muted">Cargando…</p>';
+    const r = await GET('/api/reports/routes?' + qs());
+    $('#rrOut', m.el).innerHTML = `<div class="table-wrap"><table><thead><tr><th>Repartidor</th><th class="r">Entregados</th><th class="r">No entregados</th><th class="r">Sin visita</th><th class="r">Manuales</th></tr></thead><tbody>
+      ${r.summary.map((s) => `<tr><td>${esc(s.driver)}</td><td class="r num">${s.entregados}</td><td class="r num">${s.no_entregados}</td><td class="r num">${s.sin_visita}</td><td class="r num">${s.manual}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin movimientos en el periodo</td></tr>'}</tbody></table></div>
+      ${r.rows.length ? `<div class="table-wrap" style="max-height:46vh;margin-top:10px"><table><thead><tr><th>Fecha</th><th>Repartidor</th><th>Guía</th><th>Cliente</th><th>Visita</th><th>Motivo / recibió</th><th>Estatus</th></tr></thead><tbody>
+        ${r.rows.map((x) => `<tr><td class="num">${esc(x.date)} ${esc(x.time)}</td><td>${esc(x.driver)}${x.route ? `<br><small class="muted">${esc(x.route)}${x.stop !== '' ? ' · parada ' + x.stop : ''}</small>` : ''}</td><td class="mono">${esc(x.tracking_code)}</td>
+          <td>${esc(x.customer)}<br><small class="muted">${esc(x.address)}</small></td><td><span class="chip ${VB[x.visit] || ''}">${esc(x.visit)}</span>${x.recorded && x.recorded !== 'En ruta' ? `<br><small class="muted">${esc(x.recorded)}</small>` : ''}</td>
+          <td><small>${esc(x.reason || x.receiver)}${x.notes ? `<br><span class="muted">${esc(x.notes)}</span>` : ''}</small></td><td>${esc(x.status)}</td></tr>`).join('')}</tbody></table></div>
+        ${r.total > r.rows.length ? `<small class="muted">Se muestran ${r.rows.length} de ${r.total}; descarga el Excel para verlos todos.</small>` : ''}` : ''}`;
+  };
+  $('#rrGo', m.el).onclick = () => show().catch((e) => toast(e.message, 'bad'));
+  $('#rrCsv', m.el).onclick = async () => {
+    try {
+      const res = await fetch('/api/reports/routes?format=csv&' + qs(), { headers: { Authorization: 'Bearer ' + store.token } });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'No se pudo generar el archivo');
+      const blob = await res.blob();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'rutas.csv';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+    } catch (e) { toast(e.message, 'bad'); }
+  };
+  show().catch((e) => toast(e.message, 'bad'));
+}
 async function viewRoutes(v) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
   const date = p.get('date') || today();
@@ -1689,7 +1728,7 @@ async function viewRoutes(v) {
   const pending = pend.rows.filter((o) => o.scheduled_date <= date);
   const totKm = routes.reduce((a, r) => a + (r.distance_km || 0), 0);
   const totOrig = routes.reduce((a, r) => a + (r.original_distance_km || 0), 0);
-  v.innerHTML = topbar('Planificación de rutas', `<input type="date" id="rdate" value="${date}" style="width:auto" /><button class="btn" id="xlsAll" title="Descarga un Excel con lo asignado a cada repartidor en esta fecha">${icon('download')} Excel por repartidor</button><button class="btn" id="manual">${icon('route')} Ruta manual</button><button class="btn primary" id="auto">⚡ Auto-planificar (${pending.length})</button>`) + `
+  v.innerHTML = topbar('Planificación de rutas', `<input type="date" id="rdate" value="${date}" style="width:auto" /><button class="btn" id="xlsAll" title="Descarga un Excel con lo asignado a cada repartidor en esta fecha">${icon('download')} Excel por repartidor</button><button class="btn" id="rrRep" title="Visitas y estatus de las rutas en un periodo, con descarga a Excel">${icon('chart')} Reporte por periodo</button><button class="btn" id="manual">${icon('route')} Ruta manual</button><button class="btn primary" id="auto">⚡ Auto-planificar (${pending.length})</button>`) + `
   <div class="grid g4">
     <div class="card kpi"><div class="label">Rutas</div><div class="value">${routes.length}</div><div class="sub">${routes.reduce((a, r) => a + r.stops, 0)} paradas</div></div>
     <div class="card kpi"><div class="label">Km planificados</div><div class="value">${fmtN(totKm, 1)}</div><div class="sub">vs ${fmtN(totOrig, 1)} km sin optimizar</div></div>
@@ -1739,6 +1778,7 @@ async function viewRoutes(v) {
   $('#aDay').onclick = () => { const f = $('#afilt'); f.pfrom.value = date; f.pto.value = date; f.requestSubmit(); };
   $('#aAll').onclick = () => { const f = $('#afilt'); f.pfrom.value = ''; f.pto.value = ''; f.requestSubmit(); };
   $('#xlsAll').onclick = () => exportAssignedExcel(date);
+  $('#rrRep').onclick = () => routesReport().catch((e) => toast(e.message, 'bad'));
   const map = makeMap($('#rmap'));
   const all = [depotLatLng()];
   L.marker(depotLatLng(), { icon: depotIcon() }).addTo(map).bindPopup(esc(SETTINGS.depot_name));

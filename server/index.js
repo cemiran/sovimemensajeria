@@ -5145,6 +5145,67 @@ app.delete(
   })
 );
 
+// Reporte de rutas y estatus por periodo (fecha local): visitas registradas y paradas sin visitar; JSON o CSV para Excel
+app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
+  const iso = (x) => (/^\d{4}-\d{2}-\d{2}$/.test(x || '') ? x : null);
+  const from = iso(req.query.from) || today();
+  const to = iso(req.query.to) || from;
+  if (to < from) throw new HttpError(400, 'La fecha final es anterior a la inicial');
+  const drv = req.query.driver_id ? Number(req.query.driver_id) : null;
+  const [uf, ut] = utcRange(from, to);
+  const localDT = (u) => (u ? new Date(String(u).replace(' ', 'T') + 'Z') : null);
+  const ymd = (d) => (d ? d.toLocaleDateString('en-CA') : '');
+  const hm = (d) => (d ? d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
+  const routeOf = db.prepare('SELECT id, name, date FROM routes WHERE driver_id = ? AND date = ? ORDER BY id DESC LIMIT 1');
+  const SEL = `o.id oid, o.tracking_code, o.status, o.attempts, o.stop_seq, c.name customer, c.phone, c.address, c.colonia, c.city, c.zip,
+    (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials`;
+  const visits = db.prepare(`SELECT ${SEL}, e.id eid, e.created_at at, e.result, e.kind, e.reason, e.notes, e.receiver_name, e.receiver_relation, e.distance_to_customer_m dist,
+      e.driver_id, u.name driver
+    FROM evidences e JOIN orders o ON o.id = e.order_id JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = e.driver_id
+    WHERE e.created_at >= ? AND e.created_at < ? ${drv ? 'AND e.driver_id = ?' : ''} ${inOffice(req, 'c')}
+    ORDER BY e.driver_id, e.created_at`).all(uf, ut, ...(drv ? [drv] : []));
+  const open = db.prepare(`SELECT ${SEL}, r.id rid, r.name rname, r.date rdate, r.driver_id, u.name driver
+    FROM orders o JOIN routes r ON r.id = o.route_id JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = r.driver_id
+    WHERE r.date BETWEEN ? AND ? AND o.status IN ('pendiente','asignado','cargado') ${drv ? 'AND r.driver_id = ?' : ''} ${inOffice(req, 'c')}
+    ORDER BY r.date, r.driver_id, o.stop_seq`).all(from, to, ...(drv ? [drv] : []));
+  const ST = { pendiente: 'Pendiente', asignado: 'Asignado', cargado: 'Cargado', entregado: 'Entregado', fallido: 'No entregado', cancelado: 'Cancelado' };
+  const KIND = { ruta: 'En ruta', manual: 'Registro manual', mostrador: 'Mostrador' };
+  const rows = [];
+  for (const v of visits) {
+    const d = localDT(v.at);
+    const r = v.driver_id ? routeOf.get(v.driver_id, ymd(d)) : null;
+    rows.push({ date: ymd(d), time: hm(d), route: r ? r.name || 'Ruta ' + r.id : '', driver: v.driver || '', stop: v.stop_seq ?? '', tracking_code: v.tracking_code,
+      customer: v.customer, phone: v.phone || '', address: [v.address, v.colonia].filter(Boolean).join(', '), city: v.city ? canonCity(v.city) : '', zip: v.zip || '',
+      visit: v.result === 'entregado' ? 'Entregado' : 'No entregado', recorded: KIND[v.kind] || v.kind || '', reason: v.reason || '', notes: v.notes || '',
+      receiver: [v.receiver_name, v.receiver_relation ? '(' + v.receiver_relation + ')' : ''].filter(Boolean).join(' '), dist: v.dist ?? '',
+      serials: v.serials || '', status: ST[v.status] || v.status, attempts: v.attempts || 0 });
+  }
+  for (const o of open) rows.push({ date: o.rdate, time: '', route: o.rname || 'Ruta ' + o.rid, driver: o.driver || '', stop: o.stop_seq ?? '', tracking_code: o.tracking_code,
+    customer: o.customer, phone: o.phone || '', address: [o.address, o.colonia].filter(Boolean).join(', '), city: o.city ? canonCity(o.city) : '', zip: o.zip || '',
+    visit: 'Sin visita', recorded: '', reason: '', notes: '', receiver: '', dist: '', serials: o.serials || '', status: ST[o.status] || o.status, attempts: o.attempts || 0 });
+  rows.sort((a, b) => (a.date + a.driver + (a.time || '99')).localeCompare(b.date + b.driver + (b.time || '99')));
+  const byDriver = {};
+  for (const r of rows) {
+    const k = r.driver || 'Sin repartidor';
+    const x = (byDriver[k] ||= { driver: k, entregados: 0, no_entregados: 0, sin_visita: 0, manual: 0 });
+    if (r.visit === 'Entregado') x.entregados++; else if (r.visit === 'No entregado') x.no_entregados++; else x.sin_visita++;
+    if (r.recorded === 'Registro manual') x.manual++;
+  }
+  const summary = Object.values(byDriver).sort((a, b) => b.entregados - a.entregados);
+  if (req.query.format === 'csv') {
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const head = ['Fecha', 'Hora', 'Ruta', 'Repartidor', 'Parada', 'Guía', 'Cliente', 'Teléfono', 'Dirección', 'Ciudad', 'C.P.', 'Resultado de la visita', 'Registrado', 'Motivo', 'Notas', 'Recibió', 'Distancia al domicilio (m)', 'S/N', 'Estatus actual del pedido', 'Intentos'];
+    const keys = ['date', 'time', 'route', 'driver', 'stop', 'tracking_code', 'customer', 'phone', 'address', 'city', 'zip', 'visit', 'recorded', 'reason', 'notes', 'receiver', 'dist', 'serials', 'status', 'attempts'];
+    const lines = rows.map((r) => keys.map((k) => q(r[k])).join(','));
+    lines.push('', [q('Resumen por repartidor'), q('Entregados'), q('No entregados'), q('Sin visita'), q('Registros manuales')].join(','));
+    for (const s of summary) lines.push([q(s.driver), s.entregados, s.no_entregados, s.sin_visita, s.manual].join(','));
+    const who = drv ? '-' + (db.prepare('SELECT name FROM users WHERE id = ?').get(drv)?.name || String(drv)).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '_') : '';
+    res.setHeader('Content-Disposition', `attachment; filename="rutas-${from}-a-${to}${who}.csv"`);
+    return res.type('text/csv; charset=utf-8').send('\uFEFF' + head.map(q).join(',') + '\n' + lines.join('\n'));
+  }
+  res.json({ from, to, summary, rows: rows.slice(0, 2000), total: rows.length });
+}));
+
 // ---------- App del repartidor ----------
 app.get(
   '/api/my/route',
