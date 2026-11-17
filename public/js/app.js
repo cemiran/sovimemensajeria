@@ -1761,6 +1761,7 @@ async function viewRoutes(v) {
         <button class="btn sm" id="selLasso" title="Encierra con el dedo o el ratón las entregas que quieras">${icon('edit')} Dibujar zona</button>
         <button class="btn sm" id="selTap" title="Toca cada pin para agregarlo o quitarlo">${icon('check')} Tocar pines</button>
         <select id="selZip" style="width:auto;max-width:170px" title="Marca todos los pedidos sin ruta de un código postal"><option value="">📮 Por CP…</option></select>
+        <input id="mapColQ" list="mapColList" placeholder="🏘️ Colonia… (Enter)" title="Escribe o elige una colonia y presiona Enter: se marcan todos sus pedidos sin ruta" style="width:auto;max-width:190px" autocomplete="off" /><datalist id="mapColList"></datalist>
         <button class="btn sm ghost" id="selClear" hidden>Quitar selección</button>
         <button class="btn sm ghost" id="mapFull" title="Mapa a pantalla completa">⛶</button>
         <small class="muted grow" id="selHint">Selecciona entregas en el mapa para asignarlas y optimizar su ruta.</small></div>
@@ -1788,6 +1789,13 @@ async function viewRoutes(v) {
       <span class="bulk-sep"></span>
       <small class="muted">Marca un pedido y agrega los más cercanos:</small><input type="number" id="nearN" min="1" value="20" style="width:80px" /><button type="button" class="btn sm" id="nearGo">${icon('live')} Seleccionar N más cercanos</button>
     </form>
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin:4px 0 6px">
+      <label class="search grow" style="min-width:240px;max-width:460px">${icon('search')}<input type="search" id="aq" placeholder="Buscar colonia, cliente, calle, guía o CP…" autocomplete="off" /></label>
+      <small class="muted" id="aqN"></small>
+      <button type="button" class="btn sm primary" id="aqSel" hidden>Seleccionar</button>
+      <button type="button" class="btn sm ghost" id="aqClr" hidden>Limpiar búsqueda</button>
+    </div>
+    <div id="colChips" class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px"></div>
     <small class="muted">Marca una ciudad completa, pedidos sueltos o los más cercanos y elige el repartidor en la barra de abajo. La ruta se ordena sola por el camino más corto; los marcados se resaltan en azul en el mapa.</small>
     <div class="table-wrap" style="max-height:520px;margin-top:8px"><table><thead><tr><th style="width:34px"><input type="checkbox" id="selAll" title="Seleccionar todos" /></th><th>#</th><th>Guía</th><th>Cliente</th><th>Colonia</th><th>Dirección</th><th>Fecha</th><th>Estado</th></tr></thead><tbody>
     ${pick.rows.map((o, ix) => `${o.city_group && (ix === 0 || pick.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row" style="background:var(--bg-soft,#f3f6fa)"><td><input type="checkbox" data-citysel="${esc(o.city_group)}" title="Seleccionar toda la ciudad" /></td><td colspan="7"><b>${icon('live')} ${esc(o.city_group)}</b> <small class="muted">· ${pick.rows.filter((x) => x.city_group === o.city_group).length} pedidos, por ${aGrp === 'cp' ? 'código postal' : 'colonia'} y cercanía desde la oficina</small></td></tr>` : ''}${o.col_group && (ix === 0 || pick.rows[ix - 1].col_group !== o.col_group || pick.rows[ix - 1].city_group !== o.city_group) ? `<tr class="grp-row col-row"><td><input type="checkbox" data-colsel="${esc(o.col_group)}" data-colcity="${esc(o.city_group)}" title="Seleccionar ${aGrp === 'cp' ? 'todo el código postal' : 'toda la colonia'}" /></td><td colspan="7" style="padding-left:22px">${aGrp === 'cp' ? '📮' : icon('building')} <b>${esc(o.col_group)}</b> <small class="muted">· ${pick.rows.filter((x) => x.city_group === o.city_group && x.col_group === o.col_group).length} pedido(s)</small></td></tr>` : ''}<tr class="click" data-oid="${o.id}"><td><input type="checkbox" data-sel="${o.id}" data-city="${esc(o.city_group || '')}" data-col="${esc(o.col_group || '')}" data-lat="${o.lat ?? ''}" data-lng="${o.lng ?? ''}" /></td><td class="num muted">${o.geo_seq ?? '<span title="Sin ubicación en el mapa">—</span>'}</td><td><b>${esc(o.tracking_code)}</b> ${o.priority === 'alta' ? '<span class="badge b-alta">Urgente</span>' : ''}</td><td>${esc(o.customer_name)}</td><td><small>${esc(o.customer_colonia || '')}</small>${o.customer_zip ? `<br><small class="muted mono">CP ${esc(o.customer_zip)}</small>` : ''}</td><td><small>${esc(o.address)}</small></td><td class="num">${esc(o.scheduled_date)}</td><td>${badge(o.status)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay pedidos sin ruta</td></tr>'}
@@ -1838,6 +1846,69 @@ async function viewRoutes(v) {
   };
   bulkAssign(v, 'orders');
   geoPickWire($('#asgCard', v), syncPick);
+  // Búsqueda rápida (colonia, cliente, calle, guía o CP) y selección por colonia: escribe, marca y asigna desde la barra de abajo
+  const normQ = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const colOf = (o) => { const c = String(o.customer_colonia || o.col_group || '').trim(); return /^sin colonia|^(na|n\/a|s\/n|-)$/i.test(c) ? '' : c; };
+  const qIdx = new Map(pick.rows.map((o) => [o.id, normQ([colOf(o), o.customer_name, o.address, o.tracking_code, o.customer_zip, o.city_group].join(' '))]));
+  const pickTr = $$('#asgCard tr[data-oid]', v);
+  const colCount = new Map();
+  for (const o of pick.rows) { const c = colOf(o); if (c) { const k = normQ(c); const x = colCount.get(k) || { name: c, n: 0, ids: [] }; x.n++; x.ids.push(o.id); colCount.set(k, x); } }
+  const pickChanged = () => { $('#asgCard [data-sel]', v)?.dispatchEvent(new Event('change')); };
+  const checkIds = (ids, on = true) => { const set = new Set(ids); $$('#asgCard [data-sel]', v).forEach((cb) => { if (set.has(Number(cb.dataset.sel)) && !cb.disabled) cb.checked = on; }); pickChanged(); };
+  const drawChips = (n) => {
+    const list = [...colCount.values()].filter((c) => !n || normQ(c.name).includes(n)).sort((a, b) => b.n - a.n).slice(0, n ? 40 : 24);
+    $('#colChips', v).innerHTML = list.length ? `<small class="muted" style="margin-right:2px">${n ? 'Colonias que coinciden' : 'Colonias con más pedidos'} (toca para marcarla completa):</small>` + list.map((c) => `<button type="button" class="btn sm" data-colq="${esc(normQ(c.name))}" title="Marcar los ${c.n} pedidos de ${esc(c.name)}">${esc(c.name)} <b>${c.n}</b></button>`).join('') : '';
+  };
+  const applyQ = () => {
+    const n = normQ($('#aq', v).value).trim();
+    const words = n.split(/\s+/).filter(Boolean);
+    let c = 0;
+    for (const tr of pickTr) { const ok = !words.length || words.every((w) => qIdx.get(Number(tr.dataset.oid))?.includes(w)); tr.hidden = !ok; if (ok) c++; }
+    // encabezados de ciudad y colonia: se ocultan si no les queda ningún pedido visible
+    for (const g of $$('#asgCard tr.grp-row', v)) {
+      const isCol = g.classList.contains('col-row');
+      let x = g.nextElementSibling, any = false;
+      while (x && !(x.classList.contains('grp-row') && (isCol || !x.classList.contains('col-row')))) { if (x.dataset.oid && !x.hidden) { any = true; break; } x = x.nextElementSibling; }
+      g.hidden = !!words.length && !any;
+    }
+    $('#aqN', v).textContent = words.length ? `${c} de ${pickTr.length} pedidos coinciden` : '';
+    $('#aqSel', v).hidden = !words.length || !c;
+    $('#aqSel', v).textContent = `Marcar los ${c}`;
+    $('#aqClr', v).hidden = !words.length;
+    drawChips(n);
+  };
+  let aqT;
+  $('#aq', v).oninput = () => { clearTimeout(aqT); aqT = setTimeout(applyQ, 150); };
+  $('#aq', v).onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); applyQ(); $('#aqSel', v).click(); } };
+  $('#aqSel', v).onclick = () => { const ids = pickTr.filter((tr) => !tr.hidden).map((tr) => Number(tr.dataset.oid)); checkIds(ids); toast(`${ids.length} pedido(s) marcados: elige el repartidor en la barra de abajo`, 'ok'); };
+  $('#aqClr', v).onclick = () => { $('#aq', v).value = ''; applyQ(); };
+  $('#colChips', v).onclick = (e) => {
+    const b = e.target.closest('[data-colq]');
+    if (!b) return;
+    const c = colCount.get(b.dataset.colq);
+    const on = !c.ids.every((id) => $(`#asgCard [data-sel="${id}"]`, v)?.checked);
+    checkIds(c.ids, on);
+    b.classList.toggle('primary', on);
+    toast(on ? `${c.name}: ${c.ids.length} pedido(s) marcados` : `${c.name}: desmarcada`, on ? 'ok' : '');
+  };
+  drawChips('');
+  // en el mapa: escribe la colonia y Enter = marca todos sus pedidos sin ruta (se ven en azul)
+  const mq = $('#mapColQ', v);
+  if (mq) {
+    $('#mapColList', v).innerHTML = [...colCount.values()].sort((a, b) => b.n - a.n).map((c) => `<option value="${esc(c.name)}">${c.n} pedido(s)</option>`).join('');
+    const go = () => {
+      const n = normQ(mq.value).trim();
+      if (!n) return;
+      const exact = colCount.get(n);
+      const ids = exact ? exact.ids : [...colCount.entries()].filter(([k]) => k.includes(n)).flatMap(([, c]) => c.ids);
+      if (!ids.length) return toast('No hay pedidos sin ruta en esa colonia', 'bad');
+      checkIds(ids);
+      toast(`${ids.length} pedido(s) de ${exact ? exact.name : `colonias con "${mq.value}"`} marcados: elige el repartidor en la barra de abajo`, 'ok');
+      mq.value = '';
+    };
+    mq.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
+    mq.onchange = () => { if (colCount.has(normQ(mq.value).trim())) go(); };
+  }
   $$('#asgCard [data-sel]', v).forEach((c) => c.addEventListener('change', syncPick));
   $('#selAll', v)?.addEventListener('change', syncPick);
   $$('#asgCard tr[data-oid]', v).forEach((tr) => (tr.onclick = () => orderDetail(tr.dataset.oid)));
@@ -2673,7 +2744,7 @@ async function bulkAssign(v, kind) {
     };
   };
   $$('[data-sel]', v).forEach((c) => { c.onclick = (e) => e.stopPropagation(); c.onchange = draw; });
-  $('#selAll', v)?.addEventListener('change', (e) => { boxes().forEach((c) => (c.checked = e.target.checked)); draw(); });
+  $('#selAll', v)?.addEventListener('change', (e) => { boxes().filter((c) => !c.closest('tr')?.hidden).forEach((c) => (c.checked = e.target.checked)); draw(); });
   v.bulkPicked = picked;
 }
 
