@@ -4471,19 +4471,22 @@ app.post(
 // Recepciones: evidencias de entrega (firma + foto) para consulta y comprobantes
 app.get(
   '/api/evidences',
-  auth(...STAFF),
+  auth(...STAFF, 'repartidor'),
   wrap((req, res) => {
     const { limit, offset } = paging(req);
     const where = [];
     const args = [];
+    // el repartidor solo ve sus propias recepciones
+    const own = req.user.role === 'repartidor';
+    if (own) { req.query.driver_id = req.user.id; req.query.office_id = ''; }
     if (req.query.from) { where.push("date(e.created_at, 'localtime') >= ?"); args.push(req.query.from); }
     if (req.query.to) { where.push("date(e.created_at, 'localtime') <= ?"); args.push(req.query.to); }
     if (req.query.result) { where.push('e.result = ?'); args.push(req.query.result); }
     if (req.query.kind) { where.push('e.kind = ?'); args.push(req.query.kind); }
     if (req.query.driver_id) { where.push('e.driver_id = ?'); args.push(Number(req.query.driver_id)); }
-    const offR = req.user.office || Number(req.query.office_id) || null;
+    const offR = own ? null : req.user.office || Number(req.query.office_id) || null;
     if (offR) { where.push(`${OFFICE_OF('c')} = ?`); args.push(offR); }
-    if (cityIn(req)) where.push('1' + cityIn(req));
+    if (!own && cityIn(req)) where.push('1' + cityIn(req));
     if (req.query.city) { where.push('lower(TRIM(c.city)) = lower(TRIM(?))'); args.push(String(req.query.city)); }
     if (req.query.q) { where.push('(o.tracking_code LIKE ? OR c.name LIKE ? OR e.receiver_name LIKE ?)'); args.push(...Array(3).fill(`%${req.query.q}%`)); }
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
@@ -5178,11 +5181,11 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
       customer: v.customer, phone: v.phone || '', address: [v.address, v.colonia].filter(Boolean).join(', '), city: v.city ? canonCity(v.city) : '', zip: v.zip || '',
       visit: v.result === 'entregado' ? 'Entregado' : 'No entregado', recorded: KIND[v.kind] || v.kind || '', reason: v.reason || '', notes: v.notes || '',
       receiver: [v.receiver_name, v.receiver_relation ? '(' + v.receiver_relation + ')' : ''].filter(Boolean).join(' '), dist: v.dist ?? '',
-      serials: v.serials || '', status: ST[v.status] || v.status, attempts: v.attempts || 0 });
+      serials: v.serials || '', status: ST[v.status] || v.status, attempts: v.attempts || 0, oid: v.oid, st: v.status });
   }
   for (const o of open) rows.push({ date: o.rdate, time: '', route: o.rname || 'Ruta ' + o.rid, driver: o.driver || '', stop: o.stop_seq ?? '', tracking_code: o.tracking_code,
     customer: o.customer, phone: o.phone || '', address: [o.address, o.colonia].filter(Boolean).join(', '), city: o.city ? canonCity(o.city) : '', zip: o.zip || '',
-    visit: 'Sin visita', recorded: '', reason: '', notes: '', receiver: '', dist: '', serials: o.serials || '', status: ST[o.status] || o.status, attempts: o.attempts || 0 });
+    visit: 'Sin visita', recorded: '', reason: '', notes: '', receiver: '', dist: '', serials: o.serials || '', status: ST[o.status] || o.status, attempts: o.attempts || 0, oid: o.oid, st: o.status });
   rows.sort((a, b) => (a.date + a.driver + (a.time || '99')).localeCompare(b.date + b.driver + (b.time || '99')));
   const byDriver = {};
   for (const r of rows) {
@@ -5196,8 +5199,9 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
   const FILT = { entregado: (r) => r.visit === 'Entregado', fallido: (r) => r.visit === 'No entregado', sin_visita: (r) => r.visit === 'Sin visita',
     manual: (r) => r.recorded === 'Registro manual', mostrador: (r) => r.recorded === 'Mostrador',
     hoy_entregado: (r) => r.status === 'Entregado', hoy_fallido: (r) => r.status === 'No entregado', hoy_abierto: (r) => ['Pendiente', 'Asignado', 'Cargado'].includes(r.status) };
-  const st = String(req.query.status || '');
-  if (st && FILT[st]) { const keep = rows.filter(FILT[st]); rows.length = 0; rows.push(...keep); }
+  const sts = String(req.query.status || '').split(',').filter((k) => FILT[k]);
+  const st = sts.join('-');
+  if (sts.length) { const keep = rows.filter((r) => sts.some((k) => FILT[k](r))); rows.length = 0; rows.push(...keep); }
   if (req.query.format === 'csv') {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const head = ['Fecha', 'Hora', 'Ruta', 'Repartidor', 'Parada', 'Guía', 'Cliente', 'Teléfono', 'Dirección', 'Ciudad', 'C.P.', 'Resultado de la visita', 'Registrado', 'Motivo', 'Notas', 'Recibió', 'Distancia al domicilio (m)', 'S/N', 'Estatus actual del pedido', 'Intentos'];
@@ -5206,7 +5210,7 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
     lines.push('', [q('Resumen por repartidor'), q('Entregados'), q('No entregados'), q('Sin visita'), q('Registros manuales')].join(','));
     for (const s of summary) lines.push([q(s.driver), s.entregados, s.no_entregados, s.sin_visita, s.manual].join(','));
     const who = drv ? '-' + (db.prepare('SELECT name FROM users WHERE id = ?').get(drv)?.name || String(drv)).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '_') : '';
-    res.setHeader('Content-Disposition', `attachment; filename="rutas-${from}-a-${to}${who}${st && FILT[st] ? '-' + st : ''}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="rutas-${from}-a-${to}${who}${st ? '-' + st : ''}.csv"`);
     return res.type('text/csv; charset=utf-8').send('\uFEFF' + head.map(q).join(',') + '\n' + lines.join('\n'));
   }
   res.json({ from, to, summary, rows: rows.slice(0, 2000), total: rows.length });

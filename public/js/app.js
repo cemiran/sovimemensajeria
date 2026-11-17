@@ -167,7 +167,7 @@ function modal(title, body, { wide = false, footer = '', onClose, sheet = false 
   bg.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">
     <header><h2>${esc(title)}</h2><button class="btn ghost sm" data-close aria-label="Cerrar">${icon('x')}</button></header>
     <div class="body">${body}</div>${footer ? `<footer>${footer}</footer>` : ''}</div>`;
-  const close = () => { bg.remove(); onClose?.(); };
+  const close = () => { bg.remove(); onClose?.(); setTimeout(() => window.__modalClosed?.(), 50); };
   bg.addEventListener('click', (e) => { if (e.target === bg || e.target.closest('[data-close]')) close(); });
   document.body.appendChild(bg);
   return { el: bg, close };
@@ -885,8 +885,8 @@ const NAV_GROUPS = [
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['hr', 'Capital Humano', 'person'], ['settle', 'Liquidación semanal', 'sheet'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
-const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['liq', 'Liquidación', 'chart'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['history', 'Historial', 'history']];
-const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['inventory', 'Inventario', 'inv']];
+const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['liq', 'Liquidación', 'chart'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['receipts', 'Recepciones', 'sign'], ['history', 'Historial', 'history']];
+const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['receipts', 'Recepciones', 'sign'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
 function shell(active, content) {
@@ -1684,26 +1684,44 @@ async function routesReport() {
   const m = modal('Rutas y estatus por periodo', `<div class="stack">
     <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end"><label class="f">Desde<input type="date" id="rrFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="rrTo" value="${today()}" /></label>
       <label class="f">Repartidor<select id="rrDrv"><option value="">Todos</option>${list.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></label>
-      <label class="f">Estatus<select id="rrSt"><option value="">Todos</option><optgroup label="Resultado de la visita"><option value="entregado">Entregado</option><option value="fallido">No entregado</option><option value="sin_visita">Sin visita (pendiente en ruta)</option></optgroup><optgroup label="Cómo se registró"><option value="manual">Registro manual (por administración)</option><option value="mostrador">Entrega en mostrador</option></optgroup><optgroup label="Estatus actual del pedido"><option value="hoy_entregado">Hoy está entregado</option><option value="hoy_fallido">Hoy está no entregado</option><option value="hoy_abierto">Hoy sigue abierto (pendiente, asignado o cargado)</option></optgroup></select></label>
+      <div class="f" style="position:relative">Estatus<button type="button" class="btn" id="rrStBtn" style="min-width:190px;justify-content:space-between">Todos ▾</button><div id="rrSt" class="card" style="display:none;position:absolute;z-index:30;top:100%;left:0;min-width:300px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.18)"><small class="muted" style="display:block;margin:6px 0 2px;font-weight:700">Resultado de la visita</small><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="entregado" /> Entregado</label><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="fallido" /> No entregado</label><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="sin_visita" /> Sin visita (pendiente en ruta)</label><small class="muted" style="display:block;margin:6px 0 2px;font-weight:700">Cómo se registró</small><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="manual" /> Registro manual (por administración)</label><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="mostrador" /> Entrega en mostrador</label><small class="muted" style="display:block;margin:6px 0 2px;font-weight:700">Estatus actual del pedido</small><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="hoy_entregado" /> Hoy está entregado</label><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="hoy_fallido" /> Hoy está no entregado</label><label class="row" style="gap:6px;padding:2px 0;font-weight:400"><input type="checkbox" value="hoy_abierto" /> Hoy sigue abierto (pendiente, asignado o cargado)</label><div class="row" style="gap:6px;margin-top:8px;justify-content:flex-end"><button type="button" class="btn sm ghost" id="rrStClr">Quitar filtro</button><button type="button" class="btn sm primary" id="rrStOk">Aplicar</button></div></div></div>
       <button class="btn primary" id="rrGo">Ver</button><button class="btn" id="rrCsv">${icon('download')} Excel (CSV)</button></div>
     <small class="muted">Incluye cada visita registrada en el periodo (entregada o no, en ruta, manual o en mostrador) y las paradas de rutas del periodo que siguen sin visitarse.</small>
     <div id="rrOut"></div></div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
-  const qs = () => `from=${$('#rrFrom', m.el).value}&to=${$('#rrTo', m.el).value}&driver_id=${$('#rrDrv', m.el).value}&status=${$('#rrSt', m.el).value}`;
+  const qs = () => `from=${$('#rrFrom', m.el).value}&to=${$('#rrTo', m.el).value}&driver_id=${$('#rrDrv', m.el).value}&status=${stSel().join(',')}`;
+  const stSel = () => $$('#rrSt input:checked', m.el).map((x) => x.value);
   const VB = { Entregado: 'ok', 'No entregado': 'bad', 'Sin visita': 'warn' };
   const show = async () => {
     $('#rrOut', m.el).innerHTML = '<p class="muted">Cargando…</p>';
     const r = await GET('/api/reports/routes?' + qs());
     $('#rrOut', m.el).innerHTML = `<div class="table-wrap"><table><thead><tr><th>Repartidor</th><th class="r">Entregados</th><th class="r">No entregados</th><th class="r">Sin visita</th><th class="r">Manuales</th></tr></thead><tbody>
       ${r.summary.map((s) => `<tr><td>${esc(s.driver)}</td><td class="r num">${s.entregados}</td><td class="r num">${s.no_entregados}</td><td class="r num">${s.sin_visita}</td><td class="r num">${s.manual}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin movimientos en el periodo</td></tr>'}</tbody></table></div>
-      ${r.rows.length ? `<div class="table-wrap" style="max-height:46vh;margin-top:10px"><table><thead><tr><th>Fecha</th><th>Repartidor</th><th>Guía</th><th>Cliente</th><th>Visita</th><th>Motivo / recibió</th><th>Estatus</th></tr></thead><tbody>
+      ${r.rows.length ? `<div class="table-wrap" style="max-height:46vh;margin-top:10px"><table><thead><tr><th>Fecha</th><th>Repartidor</th><th>Guía</th><th>Cliente</th><th>Visita</th><th>Motivo / recibió</th><th>Estatus</th><th></th></tr></thead><tbody>
         ${r.rows.map((x) => `<tr><td class="num">${esc(x.date)} ${esc(x.time)}</td><td>${esc(x.driver)}${x.route ? `<br><small class="muted">${esc(x.route)}${x.stop !== '' ? ' · parada ' + x.stop : ''}</small>` : ''}</td><td class="mono">${esc(x.tracking_code)}</td>
-          <td>${esc(x.customer)}<br><small class="muted">${esc(x.address)}</small></td><td><span class="chip ${VB[x.visit] || ''}">${esc(x.visit)}</span>${x.recorded && x.recorded !== 'En ruta' ? `<br><small class="muted">${esc(x.recorded)}</small>` : ''}</td>
-          <td><small>${esc(x.reason || x.receiver)}${x.notes ? `<br><span class="muted">${esc(x.notes)}</span>` : ''}</small></td><td>${esc(x.status)}</td></tr>`).join('')}</tbody></table></div>
+          <td>${esc(x.customer)}<br><small class="muted">${esc(x.address)}</small>${x.serials ? `<br><small class="mono">S/N ${esc(x.serials)}</small>` : ''}</td><td><span class="chip ${VB[x.visit] || ''}">${esc(x.visit)}</span>${x.recorded && x.recorded !== 'En ruta' ? `<br><small class="muted">${esc(x.recorded)}</small>` : ''}</td>
+          <td><small>${esc(x.reason || x.receiver)}${x.notes ? `<br><span class="muted">${esc(x.notes)}</span>` : ''}</small></td><td>${esc(x.status)}</td><td class="r" style="white-space:nowrap">${x.st !== 'cancelado' && (x.st !== 'entregado' || store.user.role === 'admin') ? `<button type="button" class="btn sm" data-rrst="${x.oid}" data-tc="${esc(x.tracking_code)}" data-cur="${x.st}" title="Cambiar el estatus del pedido">Estatus</button> ` : ''}<button type="button" class="btn sm" data-rrod="${x.oid}" title="Ver el pedido: producto, S/N, evidencias y edición">Producto</button></td></tr>`).join('')}</tbody></table></div>
         ${r.total > r.rows.length ? `<small class="muted">Se muestran ${r.rows.length} de ${r.total}; descarga el Excel para verlos todos.</small>` : ''}` : `<p class="muted" style="margin-top:10px">Ningún renglón con ese estatus en el periodo.</p>`}
-      ${r.rows.length ? `<small class="muted">${fmtN(r.total)} renglón(es) en el detalle${$('#rrSt', m.el).value ? ' con el estatus elegido' : ''}.</small>` : ''}`;
+      ${r.rows.length ? `<small class="muted">${fmtN(r.total)} renglón(es) en el detalle${stSel().length ? ' con el estatus elegido' : ''}.</small>` : ''}`;
   };
   $('#rrGo', m.el).onclick = () => show().catch((e) => toast(e.message, 'bad'));
-  for (const id of ['#rrSt', '#rrDrv']) $(id, m.el).onchange = () => show().catch((e) => toast(e.message, 'bad'));
+  $('#rrDrv', m.el).onchange = () => show().catch((e) => toast(e.message, 'bad'));
+  // estatus de selección múltiple
+  const stBox = $('#rrSt', m.el);
+  const stLabel = () => { const n = stSel(); $('#rrStBtn', m.el).textContent = (n.length ? n.length === 1 ? $(`#rrSt input[value="${n[0]}"]`, m.el).parentElement.textContent.trim() : `${n.length} estatus` : 'Todos') + ' ▾'; };
+  $('#rrStBtn', m.el).onclick = () => (stBox.style.display = stBox.style.display === 'none' ? 'block' : 'none');
+  $('#rrStOk', m.el).onclick = () => { stBox.style.display = 'none'; stLabel(); show().catch((e) => toast(e.message, 'bad')); };
+  $('#rrStClr', m.el).onclick = () => { $$('#rrSt input', m.el).forEach((x) => (x.checked = false)); stBox.style.display = 'none'; stLabel(); show().catch((e) => toast(e.message, 'bad')); };
+  // editar desde el renglón: al cerrar el pedido o el cambio de estatus, el reporte se actualiza
+  let dirty = false;
+  const refresh = () => { if (!document.body.contains(m.el)) return; if (dirty && [...document.querySelectorAll('.modal-bg')].pop() === m.el) { dirty = false; show().catch(() => {}); } };
+  m.el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-rrst],[data-rrod]');
+    if (!b) return;
+    dirty = true;
+    if (b.dataset.rrod) return orderDetail(Number(b.dataset.rrod));
+    statusPicker({ id: Number(b.dataset.rrst), tracking_code: b.dataset.tc, status: b.dataset.cur }, () => { dirty = true; refresh(); });
+  });
+  window.__modalClosed = refresh;
   $('#rrCsv', m.el).onclick = async () => {
     try {
       const res = await fetch('/api/reports/routes?format=csv&' + qs(), { headers: { Authorization: 'Bearer ' + store.token } });
@@ -5786,13 +5804,15 @@ function openReceipt(e) {
 const rcState = { q: '', from: '', to: '', kind: '', result: 'entregado', office_id: '', city: '', driver_id: '' };
 async function viewReceipts(v) {
   if (!rcState.from) { rcState.from = new Date(Date.now() - 6 * 864e5).toLocaleDateString('en-CA'); rcState.to = today(); }
-  const [rcOffs, rcCities, rcDrivers] = await Promise.all([
+  const mine = driverMode();
+  if (mine) Object.assign(rcState, { office_id: '', city: '', driver_id: '' });
+  const [rcOffs, rcCities, rcDrivers] = mine ? [[], [], []] : await Promise.all([
     store.user.role === 'admin' ? GET('/api/warehouses').catch(() => []) : [],
     GET(`/api/dashboard/breakdown?office_id=${rcState.office_id}`).then((r) => r.city_list || []).catch(() => []),
     GET('/api/users?role=repartidor').catch(() => []),
   ]);
-  v.innerHTML = topbar('Recepciones', `<button class="btn primary" id="ctrBtn">${icon('sign')} Recepción en mostrador</button>`,
-    'Quién recibió cada paquete, con firma, fotografía, hora y ubicación.') + `
+  v.innerHTML = topbar(mine ? 'Mis recepciones' : 'Recepciones', mine ? '' : `<button class="btn primary" id="ctrBtn">${icon('sign')} Recepción en mostrador</button>`,
+    mine ? 'Tus entregas y visitas: quién recibió, firma, fotografía y hora.' : 'Quién recibió cada paquete, con firma, fotografía, hora y ubicación.') + `
   <div class="card">
     <form class="toolbar" id="rcF">
       <label class="search">${icon('search')}<input name="q" type="search" placeholder="Guía, cliente o quien recibió…" value="${esc(rcState.q)}" /></label>
@@ -5801,8 +5821,8 @@ async function viewReceipts(v) {
       <select name="kind" aria-label="Tipo"><option value="">Ruta y mostrador</option><option value="ruta">En ruta</option><option value="mostrador">En mostrador</option></select>
       <select name="result" aria-label="Resultado"><option value="entregado">Entregados</option><option value="fallido">No entregados</option><option value="">Todos</option></select>
       ${rcOffs.length > 1 ? `<select name="office_id" aria-label="Oficina"><option value="">Todas las oficinas</option>${rcOffs.map((w) => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select>` : ''}
-      <select name="city" aria-label="Ciudad"><option value="">Todas las ciudades</option>${rcCities.map((c) => `<option>${esc(c)}</option>`).join('')}</select>
-      <select name="driver_id" aria-label="Repartidor"><option value="">Todos los repartidores</option>${rcDrivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.active ? '' : ' (inactivo)'}</option>`).join('')}</select>
+      ${mine ? '' : `<select name="city" aria-label="Ciudad"><option value="">Todas las ciudades</option>${rcCities.map((c) => `<option>${esc(c)}</option>`).join('')}</select>
+      <select name="driver_id" aria-label="Repartidor"><option value="">Todos los repartidores</option>${rcDrivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.active ? '' : ' (inactivo)'}</option>`).join('')}</select>`}
     </form>
     <div id="rcList" class="rc-grid"></div>
     <div class="pager" id="rcMore"></div>
@@ -5811,8 +5831,8 @@ async function viewReceipts(v) {
   f.kind.value = rcState.kind; f.result.value = rcState.result;
   if (f.office_id) f.office_id.value = rcState.office_id;
   if (rcState.city && !rcCities.some((c) => c.toLowerCase() === rcState.city.toLowerCase())) rcState.city = '';
-  f.city.value = rcCities.find((c) => c.toLowerCase() === rcState.city.toLowerCase()) || '';
-  f.driver_id.value = rcState.driver_id;
+  if (f.city) f.city.value = rcCities.find((c) => c.toLowerCase() === rcState.city.toLowerCase()) || '';
+  if (f.driver_id) f.driver_id.value = rcState.driver_id;
   // al cambiar de oficina se recargan sus ciudades
   f.office_id?.addEventListener('change', (e) => { e.stopPropagation(); Object.assign(rcState, Object.fromEntries(new FormData(f)), { city: '' }); render(); });
   let offset = 0;
@@ -5842,7 +5862,7 @@ async function viewReceipts(v) {
   const apply = () => { Object.assign(rcState, Object.fromEntries(new FormData(f))); load(true); };
   f.oninput = (e) => { clearTimeout(t); t = setTimeout(apply, e.target.name === 'q' ? 300 : 0); };
   f.onsubmit = (e) => { e.preventDefault(); apply(); };
-  $('#ctrBtn').onclick = () => counterReception(() => load(true));
+  if ($('#ctrBtn')) $('#ctrBtn').onclick = () => counterReception(() => load(true));
   await load(true);
 }
 
@@ -6748,7 +6768,7 @@ async function render() {
   if (store.user.can_deliver === undefined) { try { store.user = { ...store.user, ...(await GET('/api/me')) }; } catch {} }
   const driver = driverMode();
   const routes = driver
-    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, liq: viewMySettlement, 'new-customer': viewNewCustomer }
+    ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, liq: viewMySettlement, 'new-customer': viewNewCustomer, receipts: viewReceipts }
     : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settle: viewSettlements, settings: viewSettings };
   if (store.user.role !== 'admin') pendingLegal();
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
