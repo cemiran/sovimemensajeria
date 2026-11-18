@@ -2873,11 +2873,20 @@ function bulkStatus(status, kind, ids, onDone) {
   const m = modal(T[0], `<form id="bsF" class="stack"><p style="margin:0">${T[1]}</p>
     ${status === 'pendiente' ? `<label class="f"><span>Nueva fecha de entrega <small class="muted">(opcional)</small></span><input type="date" name="date" /></label>` : ''}
     ${status === 'fallido' ? `<label class="f">Motivo *<select name="reason" required>${FAIL_REASONS.map((r) => `<option>${esc(r)}</option>`).join('')}</select></label>` : ''}
-    ${status === 'entregado' ? `<label class="f">¿Quién recibió? *<input name="receiver_name" required placeholder="Nombre de quien recibió" /></label>` : ''}
+    ${status === 'entregado' ? `<label class="f">¿Quién recibió? *<input name="receiver_name" required placeholder="Nombre de quien recibió" /></label><div id="bsSn"></div>` : ''}
     ${['fallido', 'entregado'].includes(status) ? `<div><label class="btn block">${icon('camera')} Adjuntar foto de evidencia <small class="muted">(opcional)</small><input type="file" accept="image/*" id="bsPhoto" hidden /></label><img id="bsPrev" class="photo-prev" hidden alt="Foto" /></div>
       <label class="f">Nota<input name="note" maxlength="300" placeholder="Detalle para la bitácora" /></label>
       <label class="row"><input type="checkbox" name="notify" /> Avisar a los clientes (WhatsApp / SMS / correo según la configuración)</label>` : ''}</form>`,
     { footer: `<button class="btn" data-close>Volver</button><button class="btn ${status === 'cancelado' ? 'bad' : 'primary'}" id="bsGo">${T[0]}</button>` });
+  // entrega manual: un campo de Telmex S/N por cada pieza que le falta a cada pedido
+  if (status === 'entregado' && kind !== 'customers') {
+    const box = $('#bsSn', m.el);
+    box.innerHTML = '<small class="muted">Revisando números de serie…</small>';
+    Promise.all(ids.slice(0, 60).map((id) => GET('/api/orders/' + id).catch(() => null))).then((os) => {
+      const need = os.filter((o) => o && o.serials_missing > 0);
+      box.innerHTML = need.length ? `<b>Telmex S/N *</b> <small class="muted">el de la etiqueta «Telmex S/N» (HWTC…), no el PROD ID</small>` + need.map((o) => Array.from({ length: o.serials_missing }, (_, i) => `<label class="f" style="margin-top:6px"><span class="mono">${esc(o.tracking_code)}</span> · ${esc(o.customer_name || '')}${o.serials_missing > 1 ? ` (pieza ${i + 1})` : ''}<input data-bssn="${o.id}" required autocomplete="off" placeholder="HWTC…" style="text-transform:uppercase" pattern="\\s*[Hh][Ww][Tt][Cc][0-9A-Fa-f]{8}\\s*" title="Telmex S/N: HWTC + 8 caracteres" /></label>`).join('')).join('') : '';
+    });
+  }
   let bsPhoto = null;
   $('#bsPhoto', m.el)?.addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -2891,6 +2900,8 @@ function bulkStatus(status, kind, ids, onDone) {
     const btn = e.currentTarget;
     const fd = Object.fromEntries(new FormData(f));
     if (bsPhoto) fd.photo = bsPhoto;
+    const sns = $$('[data-bssn]', m.el);
+    if (sns.length) { fd.serials = {}; for (const x of sns) (fd.serials[x.dataset.bssn] ||= []).push(x.value.trim().toUpperCase()); }
     btn.disabled = true;
     try {
       const r = await POST('/api/orders/bulk-status', { status, ...fd, notify: !!f.notify?.checked, [kind === 'customers' ? 'customer_ids' : 'order_ids']: ids });

@@ -4187,6 +4187,15 @@ app.post(
           db.prepare("UPDATE orders SET status='cancelado', route_id=NULL, stop_seq=NULL, eta=NULL WHERE id=?").run(o.id);
           returnOrderStock(o.id, o.tracking_code, req.user.id);
         } else {
+          // entrega manual: el Telmex S/N de cada pieza es obligatorio (se captura en el mismo diálogo)
+          if (status === 'entregado' && missingSerialCount(o.id)) {
+            const given = b.serials && typeof b.serials === 'object' ? [].concat(b.serials[o.id] || b.serials[String(o.id)] || []).map((x) => String(x || '').trim()).filter(Boolean) : [];
+            let err = null;
+            db.exec('SAVEPOINT msn');
+            try { for (const sn of given) assignSerial(o, sn, req.user); } catch (e) { err = e.message; }
+            if (err || missingSerialCount(o.id)) { db.exec('ROLLBACK TO msn'); db.exec('RELEASE msn'); skipped.push({ tracking_code: o.tracking_code, reason: err || 'Falta el Telmex S/N (HWTC…)' }); continue; }
+            db.exec('RELEASE msn');
+          }
           const ev = db.prepare(`INSERT INTO evidences (order_id, driver_id, result, receiver_name, reason, notes, kind, photo_path) VALUES (?,?,?,?,?,?, 'manual', ?)`)
             .run(o.id, o.driver_id || null, status, status === 'entregado' ? receiver : null, status === 'fallido' ? reason : null,
               `Registro manual por ${who}${note ? ' · ' + note : ''}${manualPhoto ? ' · con foto' : ''}`, manualPhoto);
