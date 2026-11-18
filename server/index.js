@@ -799,6 +799,22 @@ app.post(
 // ---------- Números de serie (control por equipo) ----------
 const SERIAL_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{2,63}$/;
 const normSerial = (s) => String(s || '').trim().replace(/^S\/?N[:\s]*/i, '').toUpperCase();
+// Telmex S/N: es el único número que se guarda (HWTC + 8 caracteres, p. ej. HWTCE4A377BA). Se puede desactivar con serial_telmex_only = '0'
+const TELMEX_RE = /^HWTC[0-9A-F]{8}$/;
+function telmexSerial(raw) {
+  const sn = normSerial(raw).replace(/^TELMEX\s*S\/?N[:\s]*/, '').replace(/[^A-Z0-9]/g, '');
+  if (getSettings().serial_telmex_only === '0') return normSerial(raw);
+  if (TELMEX_RE.test(sn)) return sn;
+  // prefijo mal capturado (HETC, HWYC, HTWC…) o incompleto (CE43D63BA): si el resto coincide con un equipo del inventario, se usa ese
+  const cands = [];
+  if (sn.length === 12) cands.push('HWTC' + sn.slice(4));
+  if (sn.length === 9) cands.push('HWT' + sn);
+  if (sn.length === 8) cands.push('HWTC' + sn);
+  for (const c of cands) if (TELMEX_RE.test(c) && db.prepare('SELECT 1 FROM serials WHERE serial = ?').get(c)) return c;
+  if (/^2150080/.test(sn)) throw new HttpError(400, `${sn} es el PROD ID de la caja. Escanea el código de «Telmex S/N» (empieza con HWTC, p. ej. HWTCE4A377BA).`);
+  if (/^\d+$/.test(sn)) throw new HttpError(400, `${sn} es el código de barras del producto, no el número de serie. Escanea el código de «Telmex S/N» (empieza con HWTC).`);
+  throw new HttpError(400, `«${String(raw).trim()}» no es un Telmex S/N. Debe empezar con HWTC y tener 12 caracteres (p. ej. HWTCE4A377BA).`);
+}
 function serialEvent(serialId, event, orderId, userId, detail) {
   db.prepare('INSERT INTO serial_events (serial_id, event, order_id, user_id, detail) VALUES (?,?,?,?,?)').run(serialId, event, orderId ?? null, userId ?? null, detail ?? null);
 }
@@ -822,7 +838,7 @@ function serialsRequiredError(o) {
   return e;
 }
 function assignSerial(o, raw, user) {
-  const sn = normSerial(raw);
+  const sn = telmexSerial(raw);
   if (!SERIAL_RE.test(sn)) throw new HttpError(400, `"${raw}" no parece un número de serie válido`);
   const lateDelivered = o.status === 'entregado' && STAFF.includes(user.role);
   if (!['pendiente', 'asignado', 'cargado', 'fallido'].includes(o.status) && !lateDelivered) throw new HttpError(409, `El pedido está "${o.status}"`);
@@ -973,6 +989,7 @@ app.post(
         if (seen.has(sn)) { results.push({ serial: sn, ok: false, error: 'Repetido en la lista' }); continue; }
         seen.add(sn);
         if (!SERIAL_RE.test(sn)) { results.push({ serial: sn, ok: false, error: 'Formato no válido' }); continue; }
+        if (getSettings().serial_telmex_only !== '0' && !TELMEX_RE.test(sn)) { results.push({ serial: sn, ok: false, error: /^2150080/.test(sn) ? 'Es el PROD ID: captura el Telmex S/N (HWTC…)' : 'No es un Telmex S/N (HWTC + 8 caracteres)' }); continue; }
         const ex = db.prepare('SELECT s.status, p.name FROM serials s JOIN products p ON p.id=s.product_id WHERE s.serial = ?').get(sn);
         if (ex) { results.push({ serial: sn, ok: false, error: `Ya registrado (${ex.name}, ${ex.status})` }); continue; }
         if (dry) { results.push({ serial: sn, ok: true }); continue; }
@@ -2629,7 +2646,7 @@ app.post('/api/orders/:id/serials/fix', auth(...STAFF), wrap((req, res) => {
   const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
   if (!o) throw new HttpError(404, 'No encontrado');
   if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
-  const oldS = normSerial(req.body?.old_serial), newS = normSerial(req.body?.new_serial);
+  const oldS = normSerial(req.body?.old_serial), newS = telmexSerial(req.body?.new_serial);
   if (!newS || newS.length < 5) throw new HttpError(400, 'Escribe el número de serie correcto');
   if (newS === oldS) throw new HttpError(400, 'Es el mismo número de serie');
   const old = db.prepare('SELECT * FROM serials WHERE serial=? AND order_id=?').get(oldS, o.id);
@@ -6101,5 +6118,5 @@ if (require.main === module) {
   });
 })();
 app.releaseOverdue = releaseOverdue;
-app.internal = { diarioRows, persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
+app.internal = { telmexSerial, diarioRows, persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
 module.exports = app;
