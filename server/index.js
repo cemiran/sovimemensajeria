@@ -5214,6 +5214,7 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
   const summary = Object.values(byDriver).sort((a, b) => b.entregados - a.entregados);
   // filtro por estatus: el resumen por repartidor se queda completo; el detalle y el Excel solo llevan lo filtrado
   const FILT = { entregado: (r) => r.visit === 'Entregado', fallido: (r) => r.visit === 'No entregado', sin_visita: (r) => r.visit === 'Sin visita',
+    sin_telmex: (r) => r.visit === 'Entregado' && r.status === 'Entregado' && (!r.serials || r.serials.split(' ').some((x) => !/^HWTC[0-9A-F]{8}$/.test(x))),
     manual: (r) => r.recorded === 'Registro manual', mostrador: (r) => r.recorded === 'Mostrador',
     hoy_entregado: (r) => r.status === 'Entregado', hoy_fallido: (r) => r.status === 'No entregado', hoy_abierto: (r) => ['Pendiente', 'Asignado', 'Cargado'].includes(r.status) };
   const sts = String(req.query.status || '').split(',').filter((k) => FILT[k]);
