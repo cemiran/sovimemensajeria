@@ -5243,6 +5243,21 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
   res.json({ from, to, summary, rows: rows.slice(0, 2000), total: rows.length });
 }));
 
+// Organización de cada persona: ciudad (la principal de su oficina), oficina y célula operativa (su coordinador, o la suya si coordina)
+app.get('/api/org', auth(...STAFF), wrap((req, res) => {
+  const where = ['u.deleted_at IS NULL'];
+  if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
+  if (req.user.team?.length) where.push(`u.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})`);
+  const rows = db.prepare(`SELECT u.id, u.name, u.reports_to, w.name office, w.city office_cities,
+      (SELECT COUNT(*) FROM users t WHERE t.reports_to = u.id AND t.deleted_at IS NULL) team
+    FROM users u LEFT JOIN warehouses w ON w.id = ${OFFICE_OF('u')} WHERE ${where.join(' AND ')}`).all();
+  const names = new Map(db.prepare('SELECT id, name FROM users').all().map((u) => [u.id, u.name]));
+  res.json(rows.map((u) => {
+    const city = canonCity(String(u.office_cities || '').split(',')[0].trim()) || u.office || 'Sin ciudad';
+    const cell = u.reports_to || (u.team ? u.id : null);
+    return { id: u.id, office: u.office || '', city, cell_id: cell || 0, cell_name: cell ? names.get(cell) || '' : '', leads: u.team || 0 };
+  }));
+}));
 // ---------- App del repartidor ----------
 app.get(
   '/api/my/route',

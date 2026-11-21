@@ -886,6 +886,7 @@ const NAV_GROUPS = [
   ['Administración', [['guide', 'Guía', 'info'], ['users', 'Usuarios', 'users'], ['hr', 'Capital Humano', 'person'], ['settle', 'Liquidación semanal', 'sheet'], ['activity', 'Actividad', 'activity'], ['settings', 'Configuración', 'cog']], 'admin'],
 ];
 const DRIVER_NAV = [['my', 'Mi ruta', 'route'], ['liq', 'Liquidación', 'chart'], ['load', 'Cargar', 'truck'], ['stock', 'Inventario', 'inv'], ['scan', 'Buscar', 'search'], ['new-customer', 'Cliente', 'search'], ['receipts', 'Recepciones', 'sign'], ['history', 'Historial', 'history']];
+const DRIVER_MAIN = ['my', 'load', 'scan', 'history'];
 const MOBILE_STAFF = [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['receipts', 'Recepciones', 'sign'], ['inventory', 'Inventario', 'inv']];
 const navGroups = (u) => NAV_GROUPS.filter((g) => !g[2] || g[2] === u.role);
 
@@ -895,8 +896,8 @@ function shell(active, content) {
   const groups = driver ? [['Mi trabajo', DRIVER_NAV]] : navGroups(u);
   const all = groups.flatMap((g) => g[1]);
   const title = (all.find(([k]) => k === active) || [, active === 'profile' ? 'Mi perfil' : ''])[1];
-  const mobile = driver ? DRIVER_NAV : MOBILE_STAFF;
-  const moreActive = !driver && !MOBILE_STAFF.some(([k]) => k === active);
+  const mobile = driver ? DRIVER_NAV.filter(([k]) => DRIVER_MAIN.includes(k)) : MOBILE_STAFF;
+  const moreActive = !mobile.some(([k]) => k === active);
   $('#app').innerHTML = `${SETTINGS.practice_mode === '1' ? '<div class="practice-bar">🧪 COPIA DE PRÁCTICA · los datos son de ejemplo y no se envían mensajes ni filas a Google Sheets</div>' : ''}
   <div class="shell">
     <aside class="side">
@@ -918,7 +919,7 @@ function shell(active, content) {
     </div>
   </div>
   <nav class="bottomnav">${mobile.map(([k, l, i]) => `<a href="#/${k}" class="${k === active ? 'active' : ''}">${icon(i)}<span>${l}</span></a>`).join('')}
-    ${driver ? '' : `<button class="${moreActive ? 'active' : ''}" id="moreBtn">${icon('more')}<span>Más</span></button>`}</nav>`;
+    <button class="${moreActive ? 'active' : ''}" id="moreBtn">${icon('more')}<span>Más</span></button></nav>`;
   $('#moreBtn')?.addEventListener('click', () => moreSheet(groups, active));
   $('#qsF')?.addEventListener('submit', (e) => { e.preventDefault(); const q = $('#qsIn').value.trim(); if (q) quickFind(q); });
   $('#qsBtn')?.addEventListener('click', () => {
@@ -1761,7 +1762,7 @@ async function viewRoutes(v) {
         <button class="btn sm" id="selLasso" title="Encierra con el dedo o el ratón las entregas que quieras">${icon('edit')} Dibujar zona</button>
         <button class="btn sm" id="selTap" title="Toca cada pin para agregarlo o quitarlo">${icon('check')} Tocar pines</button>
         <select id="selZip" style="width:auto;max-width:170px" title="Marca todos los pedidos sin ruta de un código postal"><option value="">📮 Por CP…</option></select>
-        <input id="mapColQ" list="mapColList" placeholder="🏘️ Colonia… (Enter)" title="Escribe o elige una colonia y presiona Enter: se marcan todos sus pedidos sin ruta" style="width:auto;max-width:190px" autocomplete="off" /><datalist id="mapColList"></datalist>
+        <input id="mapColQ" list="mapColList" placeholder="🏘️ Colonias… (Enter)" title="Escribe una o varias colonias separadas por coma y presiona Enter: se marcan todos sus pedidos sin ruta" style="width:auto;max-width:190px" autocomplete="off" /><datalist id="mapColList"></datalist>
         <button class="btn sm ghost" id="selClear" hidden>Quitar selección</button>
         <button class="btn sm ghost" id="mapFull" title="Mapa a pantalla completa">⛶</button>
         <small class="muted grow" id="selHint">Selecciona entregas en el mapa para asignarlas y optimizar su ruta.</small></div>
@@ -1794,6 +1795,7 @@ async function viewRoutes(v) {
       <small class="muted" id="aqN"></small>
       <button type="button" class="btn sm primary" id="aqSel" hidden>Seleccionar</button>
       <button type="button" class="btn sm ghost" id="aqClr" hidden>Limpiar búsqueda</button>
+      <button type="button" class="btn sm" id="colMulti" title="Marca los pedidos de varias colonias a la vez">🏘️ Elegir varias colonias</button>
     </div>
     <div id="colChips" class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px"></div>
     <small class="muted">Marca una ciudad completa, pedidos sueltos o los más cercanos y elige el repartidor en la barra de abajo. La ruta se ordena sola por el camino más corto; los marcados se resaltan en azul en el mapa.</small>
@@ -1892,15 +1894,41 @@ async function viewRoutes(v) {
     toast(on ? `${c.name}: ${c.ids.length} pedido(s) marcados` : `${c.name}: desmarcada`, on ? 'ok' : '');
   };
   drawChips('');
+  // varias colonias a la vez: lista con casillas, búsqueda y conteo; se marcan todos sus pedidos sin ruta
+  $('#colMulti', v).onclick = () => {
+    const all = [...colCount.entries()].sort((a, b) => b[1].n - a[1].n);
+    const m = modal('Elegir varias colonias', `<div class="stack"><label class="search">${icon('search')}<input type="search" id="cmQ" placeholder="Filtrar colonias…" autocomplete="off" /></label>
+      <div class="row between"><label class="row" style="gap:6px"><input type="checkbox" id="cmAll" /> Todas las que se ven</label><small class="muted" id="cmN"></small></div>
+      <div id="cmList" style="max-height:52vh;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px 10px">${all.map(([k, c]) => `<label class="row" style="gap:8px;padding:5px 0;border-bottom:1px solid var(--border)" data-cmk="${esc(k)}"><input type="checkbox" value="${esc(k)}" ${c.ids.every((id) => $(`#asgCard [data-sel="${id}"]`, v)?.checked) ? 'checked' : ''} /> <span class="grow">${esc(c.name)}</span><b class="num">${c.n}</b></label>`).join('')}</div></div>`,
+      { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="cmGo">Marcar</button>' });
+    const boxes = () => $$('#cmList input', m.el);
+    const init = new Set(boxes().filter((b) => b.checked).map((b) => b.value));
+    const count = () => { const ks = boxes().filter((b) => b.checked).map((b) => b.value); const n = ks.reduce((a, k) => a + colCount.get(k).n, 0); $('#cmN', m.el).textContent = `${ks.length} colonia(s) · ${n} pedido(s)`; $('#cmGo', m.el).textContent = n ? `Marcar ${n} pedido(s)` : 'Marcar'; };
+    $('#cmQ', m.el).oninput = (e) => { const n = normQ(e.target.value).trim(); $$('[data-cmk]', m.el).forEach((l) => (l.hidden = !!n && !l.dataset.cmk.includes(n))); };
+    $('#cmAll', m.el).onchange = (e) => { $$('[data-cmk]', m.el).filter((l) => !l.hidden).forEach((l) => ($('input', l).checked = e.target.checked)); count(); };
+    $('#cmList', m.el).onchange = count;
+    count();
+    $('#cmGo', m.el).onclick = () => {
+      const ks = boxes().filter((b) => b.checked).map((b) => b.value);
+      const off = boxes().filter((b) => !b.checked && init.has(b.value)).flatMap((b) => colCount.get(b.value).ids);
+      checkIds(off, false);
+      const ids = ks.flatMap((k) => colCount.get(k).ids);
+      checkIds(ids, true);
+      $$('#colChips [data-colq]', v).forEach((b) => b.classList.toggle('primary', ks.includes(b.dataset.colq)));
+      m.close();
+      toast(ids.length ? `${ks.length} colonia(s), ${ids.length} pedido(s) marcados: elige el repartidor en la barra de abajo` : 'Sin colonias marcadas', ids.length ? 'ok' : '');
+    };
+  };
   // en el mapa: escribe la colonia y Enter = marca todos sus pedidos sin ruta (se ven en azul)
   const mq = $('#mapColQ', v);
   if (mq) {
     $('#mapColList', v).innerHTML = [...colCount.values()].sort((a, b) => b.n - a.n).map((c) => `<option value="${esc(c.name)}">${c.n} pedido(s)</option>`).join('');
     const go = () => {
-      const n = normQ(mq.value).trim();
-      if (!n) return;
-      const exact = colCount.get(n);
-      const ids = exact ? exact.ids : [...colCount.entries()].filter(([k]) => k.includes(n)).flatMap(([, c]) => c.ids);
+      const parts = normQ(mq.value).split(',').map((x) => x.trim()).filter(Boolean);
+      if (!parts.length) return;
+      const n = parts.join(', ');
+      const exact = parts.length === 1 ? colCount.get(parts[0]) : null;
+      const ids = [...new Set(parts.flatMap((p) => colCount.get(p) ? colCount.get(p).ids : [...colCount.entries()].filter(([k]) => k.includes(p)).flatMap(([, c]) => c.ids)))];
       if (!ids.length) return toast('No hay pedidos sin ruta en esa colonia', 'bad');
       checkIds(ids);
       toast(`${ids.length} pedido(s) de ${exact ? exact.name : `colonias con "${mq.value}"`} marcados: elige el repartidor en la barra de abajo`, 'ok');
@@ -4794,8 +4822,45 @@ const PERMS = [
 const uState = { q: '', role: '', status: '1', page: 0 };
 const PAGE = 20;
 
+// Organización: ciudad (de su oficina) y célula operativa (coordinador y su equipo) de cada persona, para filtrar y agrupar
+const orgState = { city: '', cell: '', group: false };
+let ORG = null;
+async function orgMap() {
+  if (!ORG || Date.now() - ORG.t > 60000) ORG = { t: Date.now(), m: new Map((await GET('/api/org').catch(() => [])).map((o) => [o.id, o])) };
+  return ORG.m;
+}
+const orgOf = (m, id) => m.get(Number(id)) || { city: 'Sin ciudad', cell_id: 0, cell_name: '' };
+const orgPass = (m, id) => { const o = orgOf(m, id); return (!orgState.city || o.city === orgState.city) && (orgState.cell === '' || String(o.cell_id || 0) === orgState.cell); };
+function orgBar(m, ids) {
+  const os = ids.map((id) => orgOf(m, id));
+  const cities = [...new Set(os.map((o) => o.city))].sort((a, b) => a.localeCompare(b));
+  const cells = [...new Map(os.filter((o) => o.cell_id).map((o) => [o.cell_id, o.cell_name])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  return `<span class="row" style="gap:6px;flex-wrap:wrap"><select data-org="city" aria-label="Ciudad" style="width:auto"><option value="">📍 Todas las ciudades</option>${cities.map((c) => `<option ${c === orgState.city ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+    <select data-org="cell" aria-label="Célula operativa" style="width:auto"><option value="">👥 Todas las células</option>${cells.map(([id, n]) => `<option value="${id}" ${String(id) === orgState.cell ? 'selected' : ''}>Célula de ${esc(n)}</option>`).join('')}<option value="0" ${orgState.cell === '0' ? 'selected' : ''}>Sin célula</option></select>
+    <label class="row" style="gap:4px;white-space:nowrap"><input type="checkbox" data-org="group" ${orgState.group ? 'checked' : ''} /> Agrupar por célula</label></span>`;
+}
+function orgWire(root, onChange) { $$('[data-org]', root).forEach((el) => (el.onchange = () => { const k = el.dataset.org; orgState[k] = k === 'group' ? el.checked : el.value; onChange(); })); }
+// agrupa las filas de una tabla por célula (con encabezado por célula); respeta el orden dentro de cada grupo
+function orgApply(tbody, m, idOf) {
+  if (!tbody) return;
+  $$('tr.org-h', tbody).forEach((r) => r.remove());
+  const rows = [...tbody.rows].filter((tr) => idOf(tr));
+  if (!orgState.group || !rows.length) return;
+  const cols = Math.max(...rows.map((tr) => [...tr.cells].reduce((a, c) => a + (c.colSpan || 1), 0)));
+  const g = new Map();
+  for (const tr of rows) { const o = orgOf(m, idOf(tr)); const k = o.cell_id || 0; if (!g.has(k)) g.set(k, { name: k ? `Célula de ${o.cell_name}` : 'Sin célula', cities: new Set(), rows: [] }); const x = g.get(k); x.cities.add(o.city); x.rows.push(tr); }
+  const groups = [...g.values()].sort((a, b) => (a.name === 'Sin célula') - (b.name === 'Sin célula') || a.name.localeCompare(b.name));
+  for (const x of groups) {
+    const h = document.createElement('tr');
+    h.className = 'org-h grp-row';
+    h.innerHTML = `<td colspan="${cols}" style="background:var(--surface-2,#f3f6fa)"><b>👥 ${esc(x.name)}</b> <small class="muted">· ${[...x.cities].map(esc).join(', ')} · ${x.rows.length} persona${x.rows.length === 1 ? '' : 's'}</small></td>`;
+    tbody.appendChild(h);
+    x.rows.forEach((tr) => tbody.appendChild(tr));
+  }
+}
 async function viewUsers(v) {
-  const users = await GET('/api/users');
+  const [allUsers, om] = await Promise.all([GET('/api/users'), orgMap()]);
+  const users = allUsers.filter((u) => orgPass(om, u.id));
   const me = store.user;
   const isAdmin = me.role === 'admin';
   const cnt = (f) => users.filter(f).length;
@@ -4813,7 +4878,7 @@ async function viewUsers(v) {
       ? `<div class="empty">${icon('users')}<p><b>Sin resultados</b><br>Prueba con otro nombre o quita los filtros.</p></div>`
       : `<div class="table-wrap desk-only"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Teléfono</th><th>Vehículo</th><th class="r">Entregas</th><th>Último acceso</th><th>Estado</th></tr></thead><tbody>
         ${rows.map((u) => `<tr class="click" data-id="${u.id}"><td><div class="ucell">${avatar(u)}<div><b>${esc(u.name)}</b>${u.id === me.id ? ' <small class="muted">(tú)</small>' : ''}<br><small class="muted">${esc(u.email)}</small></div></div></td>
-          <td>${roleChip(roleOf(u), u)}${u.suspended_reason ? `<br><span class="chip off" title="${esc(u.suspended_reason)}">⛔ suspendido</span>` : ''}${u.team_size ? `<br><small class="muted">${icon('users')} coordina ${u.team_size}</small>` : ''}${u.reports_to_name ? `<br><small class="muted">Coordinado por ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
+          <td>${roleChip(roleOf(u), u)}<br><small class="muted">📍 ${esc(orgOf(om, u.id).city)}${orgOf(om, u.id).cell_id ? ' · ' + (orgOf(om, u.id).cell_id === u.id ? 'coordina su célula' : 'célula de ' + esc(orgOf(om, u.id).cell_name)) : ''}</small>${u.suspended_reason ? `<br><span class="chip off" title="${esc(u.suspended_reason)}">⛔ suspendido</span>` : ''}${u.team_size ? `<br><small class="muted">${icon('users')} coordina ${u.team_size}</small>` : ''}${u.reports_to_name ? `<br><small class="muted">Coordinado por ${esc(u.reports_to_name)}</small>` : ''}</td><td>${esc(u.phone || '—')}</td><td>${u.role === 'repartidor' ? `${esc(u.vehicle || '—')}<br><small class="muted">${u.capacity} paquetes</small>` : '—'}</td>
           <td class="r num">${u.role === 'repartidor' ? u.delivered : '—'}</td><td><small>${ago(u.last_login)}</small></td><td>${statusBadge(u)}</td></tr>`).join('')}
         </tbody></table></div>
         <div class="ucards mob-only">${rows.map((u) => `<button class="ucard" data-id="${u.id}">${avatar(u, 'lg')}<span class="grow"><b>${esc(u.name)}</b><small class="muted">${esc(u.email)}</small><span class="row" style="margin-top:4px">${roleChip(roleOf(u), u)} ${statusBadge(u)}</span></span>${icon('chev')}</button>`).join('')}</div>`;
@@ -4822,6 +4887,8 @@ async function viewUsers(v) {
       : `<small class="muted">${list.length} usuario${list.length === 1 ? '' : 's'}</small>`;
     $$('[data-pg]', v).forEach((b) => (b.onclick = () => { uState.page += Number(b.dataset.pg); draw(); }));
     $$('[data-id]', $('#uList')).forEach((el) => (el.onclick = () => (isAdmin ? userPanel(Number(el.dataset.id)) : null)));
+    orgApply($('#uList tbody'), om, (tr) => tr.dataset.id);
+    orgWire(v, () => { uState.page = 0; render(); });
   };
   v.innerHTML = topbar('Usuarios', isAdmin ? `<button class="btn" id="impU">${icon('upload')} Importar</button><button class="btn primary" id="newU">${icon('plus')} Nuevo usuario</button>` : '',
     'Da de alta a tu equipo, asigna roles y controla el acceso.') + `
@@ -4836,6 +4903,7 @@ async function viewUsers(v) {
       <label class="search">${icon('search')}<input id="uq" type="search" placeholder="Buscar por nombre, correo, teléfono…" value="${esc(uState.q)}" /></label>
       <div class="pill-tabs" id="uRole">${[['', 'Todos'], ['admin', 'Admin'], ['supervisor', 'Coordinadores'], ['despachador', 'Despacho'], ['repartidor', 'Repartidores']].map(([k, l]) => `<button data-r="${k}" class="${uState.role === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <select id="uSt" aria-label="Estado"><option value="1">Activos</option><option value="0">Inactivos</option><option value="">Todos los estados</option></select>
+      ${orgBar(om, allUsers.map((u) => u.id))}
     </div>
     <div id="uList"></div>
     <div class="pager" id="uPager"></div>
@@ -5108,18 +5176,20 @@ async function viewMySettlement(v) {
 // administrador: liquidaciones de la semana, CFDI, archivo SPEI y pagadas
 const settleState = { week: '' };
 async function viewSettlements(v) {
-  const r = await GET('/api/settlements' + (settleState.week ? '?week=' + settleState.week : ''));
+  const [r, om] = await Promise.all([GET('/api/settlements' + (settleState.week ? '?week=' + settleState.week : '')), orgMap()]);
+  const slAll = r.rows;
+  r.rows = slAll.filter((x) => orgPass(om, x.user_id));
   settleState.week = r.from;
   const shift = (d) => { const x = new Date(r.from + 'T12:00:00'); x.setDate(x.getDate() + d * 7); return x.toLocaleDateString('en-CA'); };
   const sum = (k, f = () => true) => r.rows.filter(f).reduce((a, x) => a + (x[k] || 0), 0);
   v.innerHTML = topbar('Liquidación semanal', `<button class="btn" id="slClose">${r.closed ? 'Recalcular corte' : 'Cerrar corte'}</button>`, 'Corte de lunes a domingo con servicios confirmados con evidencia, CFDI de cada prestador validado contra el SAT y archivo para la transferencia SPEI.') + `
-    <div class="row" style="gap:8px;margin-bottom:12px"><button class="btn sm" id="slPrev">‹ Semana anterior</button><b>${perLbl(r)}</b><button class="btn sm" id="slNext">Semana siguiente ›</button></div>
+    <div class="row" style="gap:8px;margin-bottom:12px"><button class="btn sm" id="slPrev">‹ Semana anterior</button><b>${perLbl(r)}</b><button class="btn sm" id="slNext">Semana siguiente ›</button><span class="grow"></span>${orgBar(om, slAll.map((x) => x.user_id))}</div>
     <div class="grid g4"><div class="card kpi"><div class="label">Prestadores</div><div class="value">${r.rows.length}</div></div>
       <div class="card kpi"><div class="label">Importe de la semana</div><div class="value">${money(sum('amount'))}</div></div>
       <div class="card kpi"><div class="label">CFDI validados</div><div class="value">${r.rows.filter((x) => ['validada', 'pagada'].includes(x.status)).length}/${r.rows.length}</div></div>
       <div class="card kpi"><div class="label">Por transferir</div><div class="value">${money(sum('to_pay', (x) => x.status === 'validada'))}</div></div></div>
     <div class="card" style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="slAll" /></th><th>Prestador</th><th class="r">Servicios</th><th class="r">Subtotal</th><th class="r">Anticipos</th><th class="r">A transferir</th><th>CFDI</th><th></th></tr></thead><tbody>
-      ${r.rows.map((x) => `<tr><td>${x.status === 'validada' ? `<input type="checkbox" data-sl="${x.id}" />` : ''}</td><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.rfc || 'sin RFC')} · ${x.clabe ? 'CLABE …' + esc(String(x.clabe).slice(-4)) : '<b style="color:var(--bad)">sin CLABE</b>'}</small></td>
+      ${r.rows.map((x) => `<tr data-uid="${x.user_id}"><td>${x.status === 'validada' ? `<input type="checkbox" data-sl="${x.id}" />` : ''}</td><td><b>${esc(x.name)}</b><br><small class="muted">${esc(x.rfc || 'sin RFC')} · ${x.clabe ? 'CLABE …' + esc(String(x.clabe).slice(-4)) : '<b style="color:var(--bad)">sin CLABE</b>'}</small></td>
         <td class="r num">${fmtN(x.delivered)}</td><td class="r num">${money(x.amount)}</td><td class="r num">${x.anticipos ? '−' + money(x.anticipos) : '—'}</td><td class="r num"><b>${money(x.to_pay)}</b></td>
         <td>${!x.amount && x.status === 'cerrada' ? '<span class="chip off" title="Tiene servicios pero no tiene tarifa: ponla en su expediente y recalcula el corte">Sin importe · falta tarifa</span>' : `<span class="chip ${ST_LIQ[x.status][1]}">${ST_LIQ[x.status][0]}</span>`}${x.cfdi_uuid ? `<br><small class="muted mono">${esc(x.cfdi_uuid.slice(0, 8))}… · SAT ${esc(x.sat_estado || '—')}</small>` : ''}${x.issues?.length ? `<br><small style="color:var(--bad)">${x.issues.map(esc).join('<br>')}</small>` : ''}</td>
         <td class="r"><div class="row" style="gap:4px;justify-content:flex-end">${x.cfdi_xml ? `<button class="btn sm" data-fx="${x.id}">XML</button>` : ''}${x.cfdi_pdf ? `<button class="btn sm" data-fp="${x.id}">PDF</button>` : ''}${x.cfdi_xml && x.status !== 'pagada' ? `<button class="btn sm ghost" data-re="${x.id}">Revalidar</button>` : ''}</div></td></tr>`).join('') || '<tr><td colspan="8" class="empty">Sin liquidaciones en esta semana. El corte se cierra solo el lunes; también puedes cerrarlo con el botón.</td></tr>'}
@@ -5127,6 +5197,8 @@ async function viewSettlements(v) {
     <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn primary" id="slSpei">${icon('download')} Archivo SPEI de lo marcado</button><button class="btn" id="slPaid">Marcar pagadas</button><small class="muted">Solo se pueden transferir liquidaciones con CFDI validado.</small></div></div>`;
   const sel = () => $$('[data-sl]:checked', v).map((x) => Number(x.dataset.sl));
   $('#slAll', v).onchange = (e) => $$('[data-sl]', v).forEach((x) => (x.checked = e.target.checked));
+  orgWire(v, () => render());
+  orgApply($('#slAll', v).closest('table').tBodies[0], om, (tr) => tr.dataset.uid);
   $('#slPrev', v).onclick = () => { settleState.week = shift(-1); render(); };
   $('#slNext', v).onclick = () => { settleState.week = shift(1); render(); };
   $('#slClose', v).onclick = async () => { try { const x = await POST('/api/settlements/close', { week: r.from }); toast(`Corte ${perLbl(x)}: ${x.closed} liquidaciones`, 'ok'); render(); } catch (e) { toast(e.message, 'bad'); } };
@@ -5149,13 +5221,16 @@ async function viewSettlements(v) {
 }
 async function viewHR(v) {
   const qs = hrState.from && hrState.to ? `from=${hrState.from}&to=${hrState.to}` : `offset=${hrState.offset}`;
-  const r = await GET('/api/hr?' + qs);
+  const [r, om] = await Promise.all([GET('/api/hr?' + qs), orgMap()]);
+  const hrAll = r.rows;
+  r.rows = hrAll.filter((x) => orgPass(om, x.id));
   const sum = (k) => r.rows.reduce((a, x) => a + (x[k] || 0), 0);
   v.innerHTML = topbar('Capital Humano', '<button class="btn" id="hrX">' + icon('download') + ' Excel</button>', 'Liquidación de cada prestador según sus servicios y su periodo: tarifas, pagos, anticipos, bonos, descuentos y saldo por liquidar.') + `
   <div class="toolbar card" style="margin-bottom:12px">
     <div class="pill-tabs" id="hrPer">${[[0, 'Periodo actual'], [-1, 'Periodo anterior'], [-2, 'Hace 2 periodos'], ['c', 'Fechas…']].map(([k, l]) => `<button data-o="${k}" class="${(k === 'c' ? !!hrState.from : !hrState.from && hrState.offset === k) ? 'on' : ''}">${l}</button>`).join('')}</div>
     <span id="hrDates" class="row" style="gap:6px" ${hrState.from ? '' : 'hidden'}><input type="date" id="hrF" value="${hrState.from}" /><input type="date" id="hrT" value="${hrState.to}" /><button class="btn sm" id="hrGo">Ver</button></span>
     <label class="search">${icon('search')}<input id="hrQ" type="search" placeholder="Buscar prestador…" value="${esc(hrState.q)}" /></label>
+    ${orgBar(om, hrAll.map((x) => x.id))}
   </div>
   <div class="grid g4">
     <div class="card kpi"><div class="label">Ganado en el periodo</div><div class="value">${money(sum('earned'))}</div><div class="sub">${fmtN(sum('delivered'))} entregas · ${fmtN(sum('failed'))} intentos</div></div>
@@ -5175,6 +5250,7 @@ async function viewHR(v) {
       <td class="r num">${money(x.total_balance)}</td><td class="r"><button class="btn sm primary" data-pay="${x.id}">Registrar pago</button></td></tr>`).join('') || '<tr><td colspan="10" class="empty">Sin colaboradores con entregas o tarifa.</td></tr>';
     $$('[data-pay]', v).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const x = r.rows.find((y) => y.id === Number(b.dataset.pay)); hrMove(x, 'pago', () => render()); }));
     $$('[data-hr]', v).forEach((tr) => (tr.onclick = () => hrDetail(Number(tr.dataset.hr))));
+    orgApply($('#hrBody', v), om, (tr) => tr.dataset.hr);
   };
   draw();
   $$('#hrPer button', v).forEach((b) => (b.onclick = () => {
@@ -5183,6 +5259,7 @@ async function viewHR(v) {
   }));
   $('#hrGo', v).onclick = () => { const f = $('#hrF', v).value, t = $('#hrT', v).value; if (!f || !t || f > t) return toast('Elige las fechas', 'bad'); hrState.from = f; hrState.to = t; render(); };
   $('#hrQ', v).oninput = (e) => { hrState.q = e.target.value; draw(); };
+  orgWire(v, () => render());
   $('#hrX', v).onclick = async () => {
     const X = await loadXLSX(); const wb = X.utils.book_new();
     const rows = [['Colaborador', 'Tipo', 'Oficina', 'Periodo de pago', 'Desde', 'Hasta', 'Entregas', 'Fallidos', 'Tarifa entrega', 'Tarifa fallido', 'Ganado', 'Bonos', 'Descuentos', 'Anticipos', 'Pagos', 'Saldo periodo', 'Saldo acumulado', 'Banco', 'CLABE']]
@@ -6526,7 +6603,9 @@ async function viewDeliver(v, id, mode) {
       ${o.cod_amount && !isFail ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(o.cod_amount)} al cliente</div>` : ''}</div>
     ${!isFail && (o.serial_needs || []).some((n) => n.missing) ? `<div class="card" id="snFind" style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>${icon('search')} Elige el equipo que dejas al cliente</b>
       <br><small class="muted">Este pedido lleva: ${(o.serial_needs || []).filter((n) => n.missing).map((n) => `<b>${esc(n.name)}</b>${n.missing > 1 ? ' × ' + n.missing : ''}`).join(', ')}</small>
-      <input id="snQ" inputmode="text" placeholder="Busca por S/N, serie o descripción (ej. 3E15 u ONT)" autocomplete="off" style="margin-top:6px" />
+      <button type="button" class="btn primary block" id="snScan" style="margin-top:8px">${icon('scan')} Escanear Telmex S/N</button>
+      <small class="muted">Escanea el código que dice <b>«Telmex S/N»</b> (empieza con HWTC). No uses el PROD ID ni el código de la caja.</small>
+      <input id="snQ" inputmode="text" placeholder="…o escribe parte del S/N (ej. E4A3)" autocomplete="off" style="margin-top:6px" />
       <div id="snRes" class="stack" style="gap:4px;margin-top:6px;max-height:320px;overflow:auto"><small class="muted">Cargando equipos…</small></div><small class="muted">Primero aparecen los del producto del pedido y los que traes. También puedes tocar <b>Verificar</b> para escanearlo.</small></div>` : ''}
     <div class="row between" id="verifyRow"><span id="verifyTxt">${verified ? '✅ Paquete verificado por escaneo' : '⚠️ Escanea la etiqueta para verificar el paquete'}</span>${verified ? '' : `<button class="btn sm" id="verify">${icon('scan')} Verificar</button>`}</div>
     ${isFail ? `
@@ -6540,7 +6619,7 @@ async function viewDeliver(v, id, mode) {
       <div class="grid g3"><label class="f">Nombre de quien recibe <b class="req">*</b><input id="rname" value="${esc(o.customer_name)}" autocomplete="off" /></label>
       <label class="f">Relación<select id="rrel"><option>Titular</option><option>Familiar</option><option>Vecino</option><option>Recepción / vigilancia</option><option>Otro</option></select></label>
       <label class="f">Identificación<input id="rdoc" placeholder="INE, gafete… (opcional)" autocomplete="off" /></label></div>`}
-    <div><label class="f">Fotografía ${isFail ? '(fachada / lugar)' : '(paquete entregado)'} ${needPhoto ? '<b class="req">*</b>' : ''}</label>
+    <div><label class="f">Fotografía ${isFail ? '(fachada / lugar)' : '(paquete entregado)'} ${needPhoto ? '<b class="req">*</b>' : ''}</label>${isFail ? '' : '<small class="muted">📸 Que se vea la etiqueta con el <b>Telmex S/N</b> de la caja.</small>'}
       <label class="btn block" style="margin-top:4px">${icon('camera')} Tomar foto<input type="file" accept="image/*" capture="environment" id="photo" hidden /></label>
       <img id="photoPrev" class="photo-prev" hidden alt="Vista previa" /></div>
     ${isFail ? '' : `<div><label class="f">Firma de quien recibe ${needSig ? '<b class="req">*</b>' : ''}</label><div class="sig-wrap" style="margin-top:4px"><canvas id="sig"></canvas><button type="button" class="btn sm clear" id="sigClear">Borrar</button><span class="sig-hint" id="sigHint">Firme aquí</span></div></div>`}
@@ -6603,6 +6682,12 @@ async function viewDeliver(v, id, mode) {
     $$('[data-snp]', $('#snRes')).forEach((b) => (b.onclick = () => snPick(b.dataset.snp, b.dataset.other)));
   };
   if ($('#snQ')) snSearch('');
+  $('#snScan')?.addEventListener('click', () => openScanner({ title: 'Escanear Telmex S/N', hint: 'Apunta al código de barras que dice «Telmex S/N: HWTC…»', onCode: (c) => {
+    const sn = String(c || '').toUpperCase().replace(/^.*S\/?N[:\s]*/, '').replace(/[^A-Z0-9]/g, '');
+    if (/^2150080/.test(sn)) return toast('Ese es el PROD ID. Escanea el código que dice «Telmex S/N» (HWTC…)', 'bad');
+    if (!/^HWTC/.test(sn)) toast('Ese código no parece un Telmex S/N (debe empezar con HWTC)', 'bad');
+    $('#snQ').value = sn; snSearch(sn);
+  } }));
   $('#snQ')?.addEventListener('input', (e) => {
     clearTimeout(snT);
     const q = e.target.value.trim();
