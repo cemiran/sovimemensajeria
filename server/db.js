@@ -335,6 +335,7 @@ const moreDefaults = {
   phone_country: '52',
   require_photo: '1',
   require_signature: '1',
+  require_client_confirm: '1',
   fail_geofence_m: '300',
   workday_minutes: '540',
   osrm_url: 'https://routing.openstreetmap.de/routed-car',

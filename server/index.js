@@ -4312,7 +4312,19 @@ function registerEvidence(req, result) {
   if (result === 'fallido' && !b.reason) throw new HttpError(400, 'Indica el motivo');
   if (result === 'fallido' && !counter && req.user.role === 'repartidor') presenceCheck(o, b, b.reason);
   if (result === 'entregado' && missingSerialCount(o.id)) throw serialsRequiredError(o);
+  // entrega en ruta del repartidor: prevalece la entrega confirmada (es el cliente y dio su número Telnor). El GPS se guarda si lo hay, nunca bloquea.
+  let idConf = null;
+  if (result === 'entregado' && !counter && req.user.role === 'repartidor' && s.require_client_confirm === '1') {
+    const tel = String(db.prepare('SELECT external_id FROM customers WHERE id=?').get(o.customer_id)?.external_id || '').replace(/\D/g, '').slice(-10);
+    const dicho = String(b.telnor_confirm || '').replace(/\D/g, '').slice(-10);
+    if (tel.length >= 4) {
+      if (dicho.length < 4) throw new HttpError(400, 'Confirma con el cliente los últimos 4 dígitos de su número Telnor');
+      if (!tel.endsWith(dicho)) throw new HttpError(400, 'El número Telnor no coincide con el del cliente: pídele que lo confirme');
+    } else if (!b.id_confirmed) throw new HttpError(400, 'Confirma que quien recibe es el cliente');
+    idConf = { cliente_confirmado: true, telnor_confirmado: tel.length >= 4 };
+  }
   const comp = deliveryCompliance(o, req.user, b);
+  if (idConf) Object.assign(comp.c, idConf);
   if (result === 'entregado') {
     if (comp.needsTemp && comp.c.temp_c == null) throw new HttpError(400, `Envío de ${SHIPMENT_TYPES[o.shipment_type].toLowerCase()}: registra la temperatura al entregar`);
     if (comp.needsSeal && comp.c.seal_ok == null) throw new HttpError(400, 'Indica si el sello o precinto llegó íntegro');

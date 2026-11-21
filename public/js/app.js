@@ -5512,6 +5512,7 @@ async function viewSettings(v) {
       <h2>Evidencia de recepción</h2>
       <label class="switch"><input type="checkbox" name="require_signature" ${s.require_signature === '1' ? 'checked' : ''} /><span></span><div><b>Firma obligatoria</b><br><small class="muted">Quien recibe firma en la pantalla del teléfono o en el mostrador.</small></div></label>
       <label class="switch"><input type="checkbox" name="require_photo" ${s.require_photo === '1' ? 'checked' : ''} /><span></span><div><b>Fotografía obligatoria</b><br><small class="muted">Foto del paquete entregado con fecha y hora impresas.</small></div></label>
+      <label class="switch"><input type="checkbox" name="require_client_confirm" ${s.require_client_confirm !== '0' ? 'checked' : ''} /><span></span><div><b>Confirmar cliente con su número Telnor</b><br><small class="muted">Al entregar, el repartidor escribe los últimos 4 dígitos del número Telnor que le dice el cliente. Si coinciden, la entrega se registra aunque no haya GPS o el pin esté lejos.</small></div></label>
       <h2 style="margin-top:8px">Intentos y jornada</h2>
       <div class="grid g2"><label class="f">Distancia máxima al domicilio para registrar un fallo (m)<input type="number" name="fail_geofence_m" min="50" max="5000" value="${esc(s.fail_geofence_m || '300')}" /><small class="muted">"Cliente ausente", "Rechazado" u "Otro" solo se registran en el domicilio. Con pin aproximado se permiten hasta 2 km.</small></label>
       <label class="f">Tiempo máximo sugerido por ruta (horas)<input type="number" name="workday_h" min="4" max="14" step="0.5" value="${(Number(s.workday_minutes) || 540) / 60}" /><small class="muted">Las rutas que pasen de esto se marcan en rojo al asignar.</small></label></div>
@@ -5522,7 +5523,7 @@ async function viewSettings(v) {
     $('#ef').onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
-      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim(), fail_geofence_m: f.fail_geofence_m.value, workday_minutes: String(Math.round(Number(f.workday_h.value || 9) * 60)) });
+      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', require_client_confirm: f.require_client_confirm.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim(), fail_geofence_m: f.fail_geofence_m.value, workday_minutes: String(Math.round(Number(f.workday_h.value || 9) * 60)) });
       toast('Guardado', 'ok');
     };
   }
@@ -6620,6 +6621,9 @@ async function viewDeliver(v, id, mode) {
   const isFail = mode === 'fail';
   const needPhoto = !isFail && SETTINGS.require_photo === '1';
   const needSig = !isFail && SETTINGS.require_signature === '1';
+  const needId = !isFail && driverMode() && SETTINGS.require_client_confirm !== '0';
+  const telD = String(o.telnor_phone || '').replace(/\D/g, '').slice(-10);
+  const hasTel = telD.length >= 4;
   startTracking();
   v.innerHTML = topbar(isFail ? 'Entrega no realizada' : 'Recepción del cliente', `<a href="#/my" class="btn sm">Volver</a>`) + `
   <div class="card stack">
@@ -6641,6 +6645,9 @@ async function viewDeliver(v, id, mode) {
         <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="contacted" style="width:22px;height:22px;flex:0 0 22px;margin:2px 0 0" /> <span>Llamé o envié mensaje al cliente y no respondió</span></label>
         <button type="button" class="btn block" id="retryLater" style="white-space:normal;height:auto;line-height:1.3;padding:10px 12px;flex-direction:column"><b>🔁 Reintentar más tarde hoy</b><small class="muted">La parada pasa al final de tu ruta</small></button>
         <small class="muted">Para registrarlo como ausente debes estar en el domicilio y tomar la foto de la fachada.</small></div>` : `
+      ${needId ? `<div class="card stack" id="idBox" style="padding:10px 12px;border:2px solid var(--brand,#1d5a96)"><b>🪪 Confirma que es el cliente</b>
+        ${hasTel ? `<label class="f">Pregúntale los <b>últimos 4 dígitos de su número Telnor</b> <b class="req">*</b><input id="idTel" inputmode="numeric" maxlength="10" autocomplete="off" placeholder="Ej. 4821" style="font-size:22px;letter-spacing:4px;text-align:center" /></label><small id="idTxt" class="muted">Si coinciden, queda confirmada la entrega.</small>`
+          : `<label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer"><input type="checkbox" id="idOk" style="width:22px;height:22px;flex:0 0 22px;margin:2px 0 0" /> <span>Confirmé que quien recibe es <b>${esc(o.customer_name)}</b> o alguien de su domicilio</span></label>`}</div>` : ''}
       <div class="grid g3"><label class="f">Nombre de quien recibe <b class="req">*</b><input id="rname" value="${esc(o.customer_name)}" autocomplete="off" /></label>
       <label class="f">Relación<select id="rrel"><option>Titular</option><option>Familiar</option><option>Vecino</option><option>Recepción / vigilancia</option><option>Otro</option></select></label>
       <label class="f">Identificación<input id="rdoc" placeholder="INE, gafete… (opcional)" autocomplete="off" /></label></div>`}
@@ -6656,6 +6663,8 @@ async function viewDeliver(v, id, mode) {
   let pos = GPS.last && Date.now() - GPS.at < 60000 ? GPS.last : null;
   const showPos = () => $('#gpsTxt') && ($('#gpsTxt').textContent = pos ? `📍 Ubicación capturada (±${Math.round(pos.accuracy || pos.acc || 0)} m)` : '📍 Sin GPS: activa la ubicación');
   if (pos) showPos(); else getPosition().then((p) => { pos = p; showPos(); });
+  const telOk = () => { const d = ($('#idTel')?.value || '').replace(/\D/g, ''); return d.length >= 4 && telD.endsWith(d.slice(-10)); };
+  $('#idTel')?.addEventListener('input', () => { const d = $('#idTel').value.replace(/\D/g, ''); $('#idTxt').innerHTML = d.length < 4 ? 'Si coinciden, queda confirmada la entrega.' : telOk() ? '<b style="color:var(--ok,#1f8a4c)">✅ Cliente confirmado</b>' : '<b style="color:var(--bad,#c0392b)">✕ No coincide: pídele que lo repita</b>'; });
   const sig = isFail ? null : signaturePad($('#sig'));
   const getComp = isFail ? () => ({}) : wireCompliance(v, o);
   // motivo: reprogramar (con fecha) o ausente (llamar, reintentar más tarde o registrar con foto en el domicilio)
@@ -6772,8 +6781,21 @@ async function viewDeliver(v, id, mode) {
       if (needPhoto && !body.photo) return toast('Toma la fotografía de la entrega', 'bad');
       if (needSig && !body.signature) return toast('Falta la firma de quien recibe', 'bad');
       if (!body.photo && !body.signature) return toast('Toma una foto o captura la firma', 'bad');
+      if (needId && hasTel) {
+        if (!telOk()) return toast('Confirma con el cliente los últimos 4 dígitos de su número Telnor', 'bad');
+        body.telnor_confirm = $('#idTel').value.replace(/\D/g, '').slice(-10);
+      } else if (needId) {
+        if (!$('#idOk').checked) return toast('Confirma que quien recibe es el cliente', 'bad');
+        body.id_confirmed = true;
+      }
+      // GPS: un último intento rápido; si no hay señal, la entrega confirmada se registra igual
+      if (body.lat == null) {
+        const p = await getPosition(6000);
+        if (p) { pos = p; showPos(); Object.assign(body, { lat: p.lat, lng: p.lng, acc: Math.round(p.acc ?? p.accuracy ?? 0) || null }); }
+      }
     }
-    if (!verified && !(await confirmDlg('No escaneaste el paquete. ¿Registrar de todos modos?'))) return;
+    // con el cliente confirmado no hace falta haber escaneado el paquete
+    if (!verified && !(needId && (body.telnor_confirm || body.id_confirmed)) && !(await confirmDlg('No escaneaste el paquete. ¿Registrar de todos modos?'))) return;
     btn.disabled = true;
     try {
       const r = await withSerials(() => postOrQueue(`/api/orders/${o.id}/${isFail ? 'fail' : 'deliver'}`, body, o.tracking_code), o.tracking_code);
