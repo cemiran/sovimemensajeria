@@ -4780,7 +4780,7 @@ app.post('/api/my/orders/:id/decline', auth('repartidor'), wrap((req, res) => {
   audit(req, 'servicio.rechazo', `${o.tracking_code} rechazado por el prestador${why ? ': ' + why : ''}`);
   res.json({ ok: true });
 }));
-function assignOrdersTo(req, drv, ids, date) {
+function assignOrdersTo(req, drv, ids, date, opts = {}) {
   {
     const susp = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(drv.id)?.suspended_reason;
     if (susp) throw new HttpError(409, `${drv.name} no puede recibir servicios: ${susp}`);
@@ -4790,7 +4790,7 @@ function assignOrdersTo(req, drv, ids, date) {
     const mine = new Set(officeOrders(req, ids));
     for (const o of rows) {
       if (!mine.has(o.id)) skipped.push({ tracking_code: o.tracking_code, reason: 'es de otra oficina' });
-      else if (!['pendiente', 'asignado', 'fallido'].includes(o.status) && !(o.status === 'cargado' && o.scheduled_date < today())) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
+      else if (!['pendiente', 'asignado', 'fallido'].includes(o.status) && !(o.status === 'cargado' && (o.scheduled_date < today() || opts.allowLoaded))) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
       else if (o.driver_id === drv.id && o.route_id && o.scheduled_date === date) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
       else take.push(o);
     }
@@ -4926,6 +4926,23 @@ app.post('/api/routes/:id/date', auth(...STAFF), wrap((req, res) => {
   if (!ids.length) throw new HttpError(400, 'La ruta no tiene pedidos');
   const out = assignOrdersTo(req, { id: r.driver_id, name: r.dname }, ids, date);
   audit(req, 'rutas.fecha', `${r.name || 'Ruta ' + r.id}: ${r.date} → ${date} (${out.assigned} pedidos)`);
+  res.json(out);
+}));
+// Mover lo NO entregado de una ruta a otro día (mismo repartidor): pendientes y en vehículo y/o los no entregados
+app.post('/api/routes/:id/move-open', auth(...STAFF), wrap((req, res) => {
+  const r = db.prepare('SELECT r.*, u.name dname FROM routes r LEFT JOIN users u ON u.id = r.driver_id WHERE r.id=?').get(req.params.id);
+  if (!r) throw new HttpError(404, 'No encontrada');
+  officeRoute(req, r);
+  if (!r.driver_id) throw new HttpError(409, 'La ruta no tiene repartidor');
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date || '') ? req.body.date : null;
+  if (!date) throw new HttpError(400, 'Elige la fecha');
+  if (date < today()) throw new HttpError(400, 'Elige hoy o una fecha futura');
+  const sts = [...(req.body?.include_open === false ? [] : ['asignado', 'cargado']), ...(req.body?.include_failed ? ['fallido'] : [])];
+  if (!sts.length) throw new HttpError(400, 'Elige qué mover');
+  const ids = db.prepare(`SELECT id FROM orders WHERE route_id=? AND status IN (${sts.map(() => '?').join(',')})`).all(r.id, ...sts).map((x) => x.id);
+  if (!ids.length) throw new HttpError(400, 'La ruta no tiene pedidos sin entregar');
+  const out = assignOrdersTo(req, { id: r.driver_id, name: r.dname }, ids, date, { allowLoaded: true });
+  audit(req, 'rutas.mover_pendientes', `${r.name || 'Ruta ' + r.id}: ${out.assigned} pedido(s) sin entregar → ${date}`);
   res.json(out);
 }));
 // Pedidos cuya fecha ya pasó sin entregarse: se sueltan de su ruta y repartidor.

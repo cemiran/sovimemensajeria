@@ -1992,7 +1992,7 @@ async function routeDetail(id) {
           <div class="kpi"><div class="label">Duración est.</div><div class="value" style="font-size:1.3rem">${fmtN(r.est_minutes / 60, 1)} h</div><div class="sub">${r.stops.length} paradas</div></div>
           <div class="kpi"><div class="label">Fuera de ventana</div><div class="value" style="font-size:1.3rem;color:${late ? 'var(--bad)' : 'var(--ok)'}">${late}</div><div class="sub">paradas</div></div>
         </div>
-        <div class="row" style="margin-top:10px;gap:6px;align-items:flex-end"><label class="f grow" style="margin:0">Fecha de la ruta<input type="date" id="rdate2" value="${esc(r.date)}" /></label><button class="btn" id="rdateGo" title="Mueve la ruta completa a otra fecha (si aún no tiene entregas)">📅 Cambiar fecha</button></div>
+        <div class="row" style="margin-top:10px;gap:6px;align-items:flex-end"><label class="f grow" style="margin:0">Fecha de la ruta<input type="date" id="rdate2" value="${esc(r.date)}" /></label><button class="btn" id="rdateGo" title="Mueve la ruta completa a otra fecha (si aún no tiene entregas)">📅 Cambiar fecha</button><button class="btn" id="rmoveOpen" title="Mueve a otro día solo lo que no se ha entregado, con el mismo repartidor">📦 Mover no entregados</button></div>
         <label class="f" style="margin-top:10px">Reasignar repartidor<select id="rdrv">${drivers.map((d) => `<option value="${d.id}" ${d.id === r.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}</select></label>
       </div>
       <div><div class="row" id="rmBar" style="gap:6px;margin-bottom:6px;flex-wrap:wrap;position:sticky;top:0;z-index:2;background:var(--card,#fff);padding:6px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)" hidden><b id="rmN"></b><button class="btn sm bad" id="rmGo">${icon('x')} Quitar de la ruta</button>
@@ -2018,6 +2018,31 @@ async function routeDetail(id) {
     if (!(await confirmDlg(`¿Mover la ruta completa al ${new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}? Si el repartidor ya tiene ruta ese día, se juntan y se reordena.`))) return;
     try { const o = await POST(`/api/routes/${r.id}/date`, { date: d }); toast(`Ruta movida al ${d}: ${o.assigned} pedido(s)`, 'ok'); m.close(); render(); }
     catch (er) { toast(er.message, 'bad'); }
+  };
+  // mover a otro día solo lo que no se ha entregado (mismo repartidor)
+  $('#rmoveOpen', m.el).onclick = () => {
+    const open = r.stops.filter((x) => ['asignado', 'cargado'].includes(x.status)).length;
+    const fail = r.stops.filter((x) => x.status === 'fallido').length;
+    if (!open && !fail) return toast('Esta ruta no tiene pedidos sin entregar', 'bad');
+    const tom = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return d.toLocaleDateString('en-CA'); })();
+    const d0 = $('#rdate2', m.el).value && $('#rdate2', m.el).value !== r.date && $('#rdate2', m.el).value >= today() ? $('#rdate2', m.el).value : tom;
+    const mm = modal('Mover lo no entregado a otro día', `<div class="stack"><p style="margin:0">Pasan a la ruta de <b>${esc(r.driver_name || 'el repartidor')}</b> del día que elijas (si ya tiene ruta ese día, se juntan y se reordena). Lo entregado se queda en esta ruta.</p>
+      <label class="f">Nuevo día<input type="date" id="moD" value="${d0}" min="${today()}" /></label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="moO" ${open ? 'checked' : 'disabled'} /> Pendientes y en vehículo <b>(${open})</b></label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="moF" ${fail ? '' : 'disabled'} /> También los no entregados (visitados sin entrega) <b>(${fail})</b></label></div>`,
+      { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="moGo">Mover</button>' });
+    $('#moGo', mm.el).onclick = async (e) => {
+      const btn = e.currentTarget;
+      const d = $('#moD', mm.el).value;
+      if (!d || d < today()) return toast('Elige hoy o una fecha futura', 'bad');
+      if (!$('#moO', mm.el).checked && !$('#moF', mm.el).checked) return toast('Elige qué mover', 'bad');
+      btn.disabled = true;
+      try {
+        const o = await POST(`/api/routes/${r.id}/move-open`, { date: d, include_open: $('#moO', mm.el).checked, include_failed: $('#moF', mm.el).checked });
+        toast(`${o.assigned} pedido(s) movidos al ${d}${o.skipped?.length ? ` · ${o.skipped.length} no se movieron` : ''}`, o.skipped?.length ? '' : 'ok');
+        mm.close(); m.close(); render();
+      } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    };
   };
   $('#rdrv', m.el).onchange = async (e) => { await PUT('/api/routes/' + r.id, { driver_id: Number(e.target.value) }); toast('Repartidor reasignado', 'ok'); };
   $('#rxls', m.el).onclick = () => exportAssignedExcel(r.date, r.driver_id);
