@@ -5474,7 +5474,7 @@ async function viewLive(v) {
 }
 
 // ================= Configuración =================
-const TPL_VARS = ['{cliente}', '{guia}', '{empresa}', '{fecha}', '{eta}', '{repartidor}', '{minutos}', '{recibio}', '{fecha_entrega}', '{motivo}', '{link}'];
+const TPL_VARS = ['{cliente}', '{guia}', '{serie}', '{telnor}', '{empresa}', '{fecha}', '{eta}', '{repartidor}', '{minutos}', '{recibio}', '{fecha_entrega}', '{motivo}', '{link}'];
 
 async function viewSettings(v) {
   const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'general';

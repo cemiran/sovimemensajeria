@@ -65,6 +65,9 @@ function orderVars(orderId, extra = {}) {
       cliente: String(o.cname || '').split(/\s+/)[0],
       cliente_completo: o.cname,
       guia: o.tracking_code,
+      // número de serie (Telmex S/N) del módem entregado; si el pedido no lo tiene, la guía
+      serie: db.prepare("SELECT GROUP_CONCAT(serial, ', ') sn FROM serials WHERE order_id=?").get(orderId)?.sn || o.tracking_code,
+      telnor: o.ctelnor || '',
       empresa: s.company_name || 'Sovime Mensajería',
       fecha: fmtDate(o.scheduled_date),
       eta: o.eta || '',
