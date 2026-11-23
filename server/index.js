@@ -443,6 +443,7 @@ app.delete(
       tx(() => {
         db.prepare("UPDATE routes SET status='completada', finished_at=COALESCE(finished_at, datetime('now')) WHERE driver_id=? AND status IN ('planificada','en_curso')").run(u.id);
         db.prepare('UPDATE warehouses SET supervisor_id=NULL WHERE supervisor_id=?').run(u.id);
+        db.prepare('UPDATE users SET reports_to=NULL WHERE reports_to=?').run(u.id); // su equipo queda sin célula
         // el correo queda libre para volver a usarse; ya no puede entrar
         db.prepare("UPDATE users SET active=0, can_deliver=0, deleted_at=datetime('now'), token_version=token_version+1, email=? WHERE id=?").run(`eliminado-${u.id}-${u.email}`, u.id);
         db.prepare('DELETE FROM driver_locations WHERE driver_id=?').run(u.id);
@@ -453,6 +454,7 @@ app.delete(
     tx(() => {
       db.prepare('DELETE FROM driver_locations WHERE driver_id=?').run(u.id);
       db.prepare('UPDATE audit_log SET user_id=NULL WHERE user_id=?').run(u.id);
+      db.prepare('UPDATE users SET reports_to=NULL WHERE reports_to=?').run(u.id); // su equipo queda sin célula
       db.prepare('DELETE FROM users WHERE id=?').run(u.id);
     });
     audit(req, 'usuario.baja', u.email);
