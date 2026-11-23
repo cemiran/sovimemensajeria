@@ -15,7 +15,7 @@ const STATUS = {
   planificada: 'Planificada', en_curso: 'En curso', completada: 'Completada',
 };
 const badge = (s) => `<span class="badge b-${s}">${STATUS[s] || esc(s)}</span>`;
-const FAIL_REASONS = ['Cliente ausente', 'Dirección incorrecta', 'Rechazado por cliente', 'Zona de riesgo / sin acceso', 'Paquete dañado', 'Reprogramado por cliente', 'Otro'];
+const FAIL_REASONS = ['Cliente ausente', 'Dirección incorrecta', 'Rechazado por cliente', 'No es cliente Telnor', 'Zona de riesgo / sin acceso', 'Paquete dañado', 'Reprogramado por cliente', 'Otro'];
 const PIN_COLORS = { pendiente: '#7b8a85', asignado: '#2364aa', cargado: '#c27c0e', entregado: '#1f8a4c', fallido: '#c0392b' };
 const ROUTE_COLORS = ['#1d5a96', '#e5612a', '#b34ad1', '#d9822b', '#c0392b', '#2a9d8f', '#6d597a', '#e76f51'];
 
@@ -6509,7 +6509,7 @@ const fmtDist = (m) => (m == null ? '—' : m >= 1000 ? `${fmtN(m / 1000, 1)} km
 
 // No entregado rápido (hoja inferior): motivo de un toque; "Cliente ausente" pide haber llamado y la foto de la fachada
 function quickFail(s) {
-  const ICON = { 'Cliente ausente': '🚪', 'Dirección incorrecta': '📍', 'Rechazado por cliente': '✋', 'Zona de riesgo / sin acceso': '⚠️', 'Paquete dañado': '📦', 'Reprogramado por cliente': '📅', 'Otro': '…' };
+  const ICON = { 'Cliente ausente': '🚪', 'Dirección incorrecta': '📍', 'Rechazado por cliente': '✋', 'No es cliente Telnor': '🚫', 'Zona de riesgo / sin acceso': '⚠️', 'Paquete dañado': '📦', 'Reprogramado por cliente': '📅', 'Otro': '…' };
   const m = modal('No entregado', `<div class="stack" id="qfBody">
     <small class="muted">${esc(s.customer_name)} · ${esc(s.tracking_code)}</small>
     <div class="grid g2" style="gap:8px">${FAIL_REASONS.map((r) => `<button type="button" class="btn lg" data-qr="${esc(r)}" style="height:auto;min-height:56px;white-space:normal;justify-content:flex-start;text-align:left">${ICON[r] || ''} ${esc(r === 'Reprogramado por cliente' ? 'Pidió otro día u hora' : r)}</button>`).join('')}</div>

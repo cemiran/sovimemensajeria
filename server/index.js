@@ -4332,7 +4332,7 @@ app.post(
 
 // Para registrar "Cliente ausente", "Rechazado", "Dirección incorrecta" u "Otro" el repartidor debe estar en el domicilio
 // (o cerca, si el pin es aproximado). Así el intento es real y no un cierre a distancia.
-const PRESENCE_REASONS = ['Cliente ausente', 'Rechazado por cliente', 'Dirección incorrecta', 'Otro'];
+const PRESENCE_REASONS = ['Cliente ausente', 'Rechazado por cliente', 'No es cliente Telnor', 'Dirección incorrecta', 'Otro'];
 function presenceCheck(o, b, reason) {
   if (reason === 'Reprogramado por cliente') throw new HttpError(400, 'Si el cliente pidió otra fecha, usa "Reprogramar" e indica el día: no cuenta como entrega fallida');
   if (!PRESENCE_REASONS.includes(reason)) return;
