@@ -214,7 +214,7 @@ app.get(
       args.push(Number(active));
     }
     where.push('u.deleted_at IS NULL');
-    if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
+    if (req.user.office && !req.user.team?.length) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
     if (req.user.team?.length) where.push(`u.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})`);
     if (q) {
       where.push('(u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)');
@@ -3953,7 +3953,8 @@ const cityIn = (req, alias = 'c') => { const l = scopeCities(req); return l ? (l
 // ¿el cliente queda fuera de lo que puede ver este usuario? (otra oficina u otra ciudad)
 const outOfScope = (req, customerId) => (req.user.office && customerOffice(customerId) !== req.user.office) || (scopeCities(req) && !db.prepare(`SELECT 1 FROM customers c WHERE c.id = ? ${cityIn(req, 'c')}`).get(Number(customerId)));
 const teamIn = (req, alias) => (req.user?.team?.length && req.user.role !== 'repartidor' ? ` AND ${alias}.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})` : '');
-const inOffice = (req, alias, kind = 'c') => (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '') + (/^c/.test(alias) ? cityIn(req, alias) : /^u/.test(alias) ? teamIn(req, alias) : '');
+// personal (alias u…): si el coordinador tiene equipo, su equipo manda sobre la oficina (alguien puede tener otra oficina en su ficha)
+const inOffice = (req, alias, kind = 'c') => (/^u/.test(alias) && teamIn(req, alias) ? teamIn(req, alias) : (req.user.office ? ` AND ${OFFICE_OF(alias)} = ${Number(req.user.office)}` : '') + (/^c/.test(alias) ? cityIn(req, alias) : /^u/.test(alias) ? teamIn(req, alias) : ''));
 const canManageOffice = (req, officeId) => req.user.role === 'admin' || req.user.supervises.includes(Number(officeId));
 
 app.get(
@@ -5275,7 +5276,7 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
 // Organización de cada persona: ciudad (la principal de su oficina), oficina y célula operativa (su coordinador, o la suya si coordina)
 app.get('/api/org', auth(...STAFF), wrap((req, res) => {
   const where = ['u.deleted_at IS NULL'];
-  if (req.user.office) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
+  if (req.user.office && !req.user.team?.length) where.push(`${OFFICE_OF('u')} = ${Number(req.user.office)}`);
   if (req.user.team?.length) where.push(`u.id IN (${[...req.user.team, req.user.id].map(Number).join(',')})`);
   const rows = db.prepare(`SELECT u.id, u.name, u.reports_to, w.name office, w.city office_cities,
       (SELECT COUNT(*) FROM users t WHERE t.reports_to = u.id AND t.deleted_at IS NULL) team
