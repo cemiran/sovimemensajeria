@@ -2406,6 +2406,21 @@ app.post('/api/my/orders/:id/reactivate', auth('repartidor'), wrap((req, res) =>
   audit(req, 'pedidos.reactivar', `${o.tracking_code}: ${before} → entrega inmediata por ${me.name}`);
   res.json({ id: o.id, tracking_code: o.tracking_code });
 }));
+// Pedidos del mismo número Telnor (el número Telnor es la referencia del pedido): abierto y/o ya entregado
+function telnorOrders(customerId) {
+  const c = db.prepare('SELECT id, external_id FROM customers WHERE id=?').get(Number(customerId));
+  if (!c) return { open: null, delivered: null, telnor: '' };
+  const ids = c.external_id ? db.prepare('SELECT id FROM customers WHERE external_id=?').all(c.external_id).map((x) => x.id) : [c.id];
+  const q = (st) => db.prepare(`SELECT id, tracking_code, status, scheduled_date FROM orders WHERE customer_id IN (${ids.join(',')}) AND status IN (${st}) ORDER BY id DESC LIMIT 1`).get();
+  return { open: q("'pendiente','asignado','cargado','fallido'"), delivered: q("'entregado'"), telnor: c.external_id || '' };
+}
+function telnorGuard(customerId, { allowSecond = false } = {}) {
+  const t = telnorOrders(customerId);
+  const tel = t.telnor ? ` (Telnor ${t.telnor})` : '';
+  if (t.open) { const e = new HttpError(409, `Este cliente${tel} ya tiene el pedido ${t.open.tracking_code} (${t.open.status}): usa ese pedido en lugar de crear otro`); e.data = { code: 'telnor_open', order_id: t.open.id, tracking_code: t.open.tracking_code }; throw e; }
+  if (t.delivered && !allowSecond) { const e = new HttpError(409, `A este cliente${tel} ya se le entregó el pedido ${t.delivered.tracking_code}. Si de verdad lleva un segundo equipo, el administrador debe confirmarlo`); e.data = { code: 'telnor_delivered', order_id: t.delivered.id, tracking_code: t.delivered.tracking_code }; throw e; }
+  return t;
+}
 // El repartidor arma una entrega en campo: elige cliente y productos de lo que él trae (S/N o cantidad).
 // Se crea el pedido ya cargado en su unidad y se agrega a su ruta del día, listo para registrar la entrega.
 app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
@@ -2416,6 +2431,7 @@ app.post('/api/my/orders', auth('repartidor'), wrap((req, res) => {
   const serials = [...new Set((Array.isArray(b.serials) ? b.serials : []).map(normSerial).filter(Boolean))];
   const items = (Array.isArray(b.items) ? b.items : []).map((it) => ({ product_id: Number(it.product_id), qty: Math.trunc(Number(it.qty)) })).filter((it) => it.product_id && it.qty > 0);
   if (!serials.length && !items.length) throw new HttpError(400, 'Elige al menos un producto de tu inventario');
+  telnorGuard(c.id);
   const out = tx(() => {
     const code = genTracking();
     const oid = Number(db.prepare(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
@@ -3411,8 +3427,9 @@ app.post(
             else if (impOffice) P('UPDATE customers SET office_id=? WHERE id=?').run(impOffice, cid);
             out.customer_id = cid;
             if (makeOrders) {
-              const open = P("SELECT tracking_code FROM orders WHERE customer_id=? AND scheduled_date=? AND status IN ('pendiente','asignado','cargado')").get(cid, date);
-              if (open && skipDupOrders) out.order = `ya tiene ${open.tracking_code}`;
+              const tt = telnorOrders(cid);
+              if (tt.open && skipDupOrders) out.order = `ya tiene ${tt.open.tracking_code}`;
+              else if (tt.delivered && skipDupOrders) out.order = `ya entregado ${tt.delivered.tracking_code}`;
               else {
                 const code = genTracking();
                 const oid = Number(P(`INSERT INTO orders (tracking_code, customer_id, scheduled_date, priority, notes, created_by, public_token, shipment_type)
@@ -4225,6 +4242,7 @@ app.post(
     const tmin = tnum(req.body.temp_min), tmax = tnum(req.body.temp_max);
     if (tmin != null && tmax != null && tmin > tmax) throw new HttpError(400, 'La temperatura mínima no puede ser mayor que la máxima');
     if (!customer_id) throw new HttpError(400, 'Selecciona un cliente');
+    const t2 = telnorGuard(customer_id, { allowSecond: req.user.role === 'admin' && req.body.second_unit === true });
     const noStock = [];
     const id = tx(() => {
       const code = (tracking_code || '').trim() || genTracking();
@@ -4234,6 +4252,7 @@ app.post(
           crypto.randomBytes(12).toString('hex'), stype, tmin, tmax, req.body.requires_seal ? 1 : 0, req.body.seal_number ? String(req.body.seal_number).trim().slice(0, 40) : null);
       const oid = Number(r.lastInsertRowid);
       if (req.body.account_id && db.prepare('SELECT 1 FROM accounts WHERE id=?').get(Number(req.body.account_id))) db.prepare('UPDATE orders SET account_id=? WHERE id=?').run(Number(req.body.account_id), oid);
+      if (t2.delivered) { db.prepare("UPDATE orders SET notes=TRIM(COALESCE(notes,'') || ' · Segundo equipo autorizado (ya se entregó ' || ? || ')') WHERE id=?").run(t2.delivered.tracking_code, oid); audit(req, 'pedido.segundo_equipo', `${t2.delivered.tracking_code} → nuevo pedido`); }
       for (const it of items) {
         const qty = Math.abs(Math.trunc(Number(it.qty))) || 1;
         db.prepare('INSERT INTO order_items (order_id, product_id, qty) VALUES (?,?,?)').run(oid, it.product_id, qty);

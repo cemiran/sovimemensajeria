@@ -1463,9 +1463,13 @@ async function orderForm(done) {
     if (!customer) return toast('Selecciona o registra el cliente', 'bad');
     try {
       const o = await POST('/api/orders', { account_id: $('#oacc', m.el).value || null, customer_id: customer.id, items: items.map(({ product_id, qty }) => ({ product_id, qty })), scheduled_date: $('#odate', m.el).value, priority: $('#oprio', m.el).value, cod_amount: $('#ocod', m.el).value, notes: $('#onotes', m.el).value, tracking_code: $('#ocode', m.el).value,
-        shipment_type: $('#oship', m.el).value, temp_min: tempRange()[0], temp_max: tempRange()[1], requires_seal: $('#oreqseal', m.el).checked, seal_number: $('#oseal', m.el).value });
+        shipment_type: $('#oship', m.el).value, temp_min: tempRange()[0], temp_max: tempRange()[1], requires_seal: $('#oreqseal', m.el).checked, seal_number: $('#oseal', m.el).value, second_unit: window.__secondUnit === true });
       toast(`Pedido ${o.tracking_code} creado${o.without_stock?.length ? ` sin existencia de ${o.without_stock.join(', ')}: se entrega cuando haya inventario en su ciudad` : ''}`, 'ok'); m.close(); done?.(o); orderDetail(o.id);
-    } catch (e) { toast(e.message, 'bad'); }
+    } catch (e) {
+      if (e.data?.code === 'telnor_open') { if (await confirmDlg(`${e.message}. ¿Abrir el pedido ${e.data.tracking_code}?`)) { m.close(); orderDetail(e.data.order_id); } return; }
+      if (e.data?.code === 'telnor_delivered' && store.user.role === 'admin' && (await confirmDlg(`${e.message}. ¿Es un segundo equipo para el mismo cliente? Se creará otro pedido.`))) { window.__secondUnit = true; $('#saveOrder', m.el).click(); return; }
+      toast(e.message, 'bad');
+    } finally { window.__secondUnit = false; }
   };
 }
 
