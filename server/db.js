@@ -457,6 +457,30 @@ CREATE TABLE IF NOT EXISTS accounts (
 addCols('orders', [['account_id', 'INTEGER REFERENCES accounts(id)']]);
 addCols('orders', [['appointment_time', 'TEXT']]); // hora de entrega acordada con el cliente (HH:MM)
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, scheduled_date)');
+// Estados de cuenta generados (cortes de facturación): cada pedido se factura una sola vez
+db.exec(`
+CREATE TABLE IF NOT EXISTS account_invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  folio TEXT NOT NULL,
+  period_from TEXT, period_to TEXT,
+  delivered INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+  subtotal REAL NOT NULL DEFAULT 0, iva REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
+  rate_delivery REAL, rate_failed REAL,
+  invoice_ref TEXT, notes TEXT, paid_at TEXT,
+  status TEXT NOT NULL DEFAULT 'generado',
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS account_invoice_items (
+  invoice_id INTEGER NOT NULL REFERENCES account_invoices(id) ON DELETE CASCADE,
+  order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id),
+  result TEXT NOT NULL,
+  done_at TEXT,
+  amount REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_inv_items ON account_invoice_items(invoice_id);
+`);
 // Si solo hay un mayorista activo (Telnor), todo pedido nuevo queda ligado a él para cobrarlo
 db.exec(`CREATE TRIGGER IF NOT EXISTS trg_orders_default_account AFTER INSERT ON orders
   WHEN NEW.account_id IS NULL AND (SELECT COUNT(*) FROM accounts WHERE active = 1) = 1

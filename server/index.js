@@ -1184,6 +1184,91 @@ app.get('/api/accounts/:id/statement', auth(...STAFF), wrap((req, res) => {
   res.json({ account: a, from, to, rows, totals });
 }));
 
+// ---- Facturación al mayorista: lo pendiente de facturar (entregado o fallido y aún en ningún estado de cuenta) y los cortes generados ----
+const BILL_COLS = `o.id order_id, o.tracking_code, o.scheduled_date, o.status, o.delivered_at, c.name customer, c.address, c.colonia, u.name driver,
+      COALESCE(o.delivered_at, (SELECT MAX(e.created_at) FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido')) done_at, c.external_id telnor_phone,
+      (SELECT receiver_name FROM evidences e WHERE e.order_id = o.id AND e.result = o.status ORDER BY e.id DESC LIMIT 1) receiver,
+      (SELECT reason FROM evidences e WHERE e.order_id = o.id AND e.result = 'fallido' ORDER BY e.id DESC LIMIT 1) reason,
+      (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials`;
+const billDate = (u) => (u ? new Date(String(u).replace(' ', 'T') + 'Z').toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' }) : '');
+const money2b = (n) => Math.round(n * 100) / 100;
+function billTotals(rows) {
+  const del = rows.filter((r) => r.status === 'entregado');
+  const sub = money2b(rows.reduce((a, r) => a + (r.amount || 0), 0));
+  const iva = money2b(sub * 0.16);
+  return { delivered: del.length, failed: rows.length - del.length, amount_delivered: money2b(del.reduce((a, r) => a + r.amount, 0)), amount_failed: money2b(sub - del.reduce((a, r) => a + r.amount, 0)), total: sub, iva, total_iva: money2b(sub + iva) };
+}
+function pendingBill(a, to) {
+  const [, ut] = utcRange(to, to);
+  const rows = db.prepare(`SELECT * FROM (SELECT ${BILL_COLS} FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id
+    WHERE o.account_id = ? AND o.status IN ('entregado','fallido') AND NOT EXISTS (SELECT 1 FROM account_invoice_items i WHERE i.order_id = o.id))
+    WHERE done_at IS NOT NULL AND done_at < ? ORDER BY done_at, tracking_code`).all(a.id, ut);
+  for (const r of rows) { r.amount = r.status === 'entregado' ? a.rate_delivery : a.rate_failed; r.date = billDate(r.done_at); }
+  return rows;
+}
+app.get('/api/accounts/:id/billing', auth(...STAFF), wrap((req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today();
+  const rows = pendingBill(a, to);
+  const invoices = db.prepare("SELECT i.*, u.name created_by_name FROM account_invoices i LEFT JOIN users u ON u.id = i.created_by WHERE i.account_id = ? AND i.status <> 'cancelado' ORDER BY i.id DESC").all(a.id);
+  const billed = invoices.reduce((x, i) => ({ n: x.n + i.delivered + i.failed, total: money2b(x.total + i.total), paid: money2b(x.paid + (i.paid_at ? i.total : 0)) }), { n: 0, total: 0, paid: 0 });
+  res.json({ account: a, to, rows, totals: billTotals(rows), invoices, billed });
+}));
+app.post('/api/accounts/:id/invoices', auth('admin'), wrap((req, res) => {
+  const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) throw new HttpError(404, 'No encontrado');
+  const ids = new Set((Array.isArray(req.body?.order_ids) ? req.body.order_ids : []).map(Number).filter(Boolean));
+  if (!ids.size) throw new HttpError(400, 'Marca lo que vas a facturar');
+  const rows = pendingBill(a, today()).filter((r) => ids.has(r.order_id));
+  if (!rows.length) throw new HttpError(409, 'Esos pedidos ya están en otro estado de cuenta o no están entregados/fallidos');
+  const t = billTotals(rows);
+  const n = db.prepare('SELECT COUNT(*) n FROM account_invoices WHERE account_id=?').get(a.id).n + 1;
+  const folio = `EC-${String(a.id).padStart(2, '0')}-${String(n).padStart(4, '0')}`;
+  const id = tx(() => {
+    const r = db.prepare(`INSERT INTO account_invoices (account_id, folio, period_from, period_to, delivered, failed, subtotal, iva, total, rate_delivery, rate_failed, notes, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(a.id, folio, rows[0].date, rows[rows.length - 1].date, t.delivered, t.failed, t.total, t.iva, t.total_iva, a.rate_delivery, a.rate_failed,
+      String(req.body?.notes || '').trim().slice(0, 300) || null, req.user.id);
+    const iid = Number(r.lastInsertRowid);
+    const ins = db.prepare('INSERT INTO account_invoice_items (invoice_id, order_id, result, done_at, amount) VALUES (?,?,?,?,?)');
+    for (const x of rows) ins.run(iid, x.order_id, x.status, x.done_at, x.amount);
+    return iid;
+  });
+  audit(req, 'mayorista.estado_cuenta', `${a.name} ${folio}: ${rows.length} pedidos, ${t.total_iva.toFixed(2)} con IVA`);
+  res.status(201).json({ id, folio, totals: t });
+}));
+app.get('/api/accounts/:id/invoices/:inv', auth(...STAFF), wrap((req, res) => {
+  const i = db.prepare('SELECT i.*, a.name account_name, a.legal_name, a.rfc FROM account_invoices i JOIN accounts a ON a.id = i.account_id WHERE i.id=? AND i.account_id=?').get(req.params.inv, req.params.id);
+  if (!i) throw new HttpError(404, 'No encontrado');
+  const rows = db.prepare(`SELECT ${BILL_COLS}, it.result, it.amount, it.done_at billed_done FROM account_invoice_items it JOIN orders o ON o.id = it.order_id JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id
+    WHERE it.invoice_id = ? ORDER BY it.done_at, o.tracking_code`).all(i.id);
+  for (const r of rows) { r.status = r.result; r.date = billDate(r.billed_done); }
+  res.json({ invoice: i, rows });
+}));
+app.put('/api/accounts/:id/invoices/:inv', auth('admin'), wrap((req, res) => {
+  const i = db.prepare('SELECT * FROM account_invoices WHERE id=? AND account_id=?').get(req.params.inv, req.params.id);
+  if (!i) throw new HttpError(404, 'No encontrado');
+  const b = req.body || {};
+  db.prepare('UPDATE account_invoices SET invoice_ref=?, notes=?, paid_at=? WHERE id=?').run(
+    b.invoice_ref !== undefined ? String(b.invoice_ref || '').trim().slice(0, 80) || null : i.invoice_ref,
+    b.notes !== undefined ? String(b.notes || '').trim().slice(0, 300) || null : i.notes,
+    b.paid !== undefined ? (b.paid ? i.paid_at || today() : null) : i.paid_at, i.id);
+  audit(req, 'mayorista.estado_cuenta', `${i.folio}: ${b.paid !== undefined ? (b.paid ? 'pagado' : 'sin pagar') : 'datos de factura'}`);
+  res.json({ ok: true });
+}));
+// cancelar un estado de cuenta: sus pedidos vuelven a quedar por facturar
+app.delete('/api/accounts/:id/invoices/:inv', auth('admin'), wrap((req, res) => {
+  const i = db.prepare("SELECT * FROM account_invoices WHERE id=? AND account_id=? AND status <> 'cancelado'").get(req.params.inv, req.params.id);
+  if (!i) throw new HttpError(404, 'No encontrado');
+  if (i.paid_at) throw new HttpError(409, 'Está marcado como pagado: quita la marca de pagado antes de cancelarlo');
+  tx(() => {
+    db.prepare('DELETE FROM account_invoice_items WHERE invoice_id=?').run(i.id);
+    db.prepare("UPDATE account_invoices SET status='cancelado' WHERE id=?").run(i.id);
+  });
+  audit(req, 'mayorista.estado_cuenta', `${i.folio} cancelado: sus pedidos vuelven a quedar por facturar`);
+  res.json({ ok: true });
+}));
+
 // ---------- Expediente del personal ----------
 const PROFILE_TXT = ['hire_type', 'hire_date', 'end_date', 'birth_date', 'address', 'emergency_name', 'emergency_phone', 'rfc', 'curp', 'nss',
   'bank_name', 'clabe', 'account_number', 'account_holder', 'pay_period', 'notes',

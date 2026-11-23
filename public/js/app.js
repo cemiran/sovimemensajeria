@@ -3786,6 +3786,87 @@ function accountForm(a) {
   };
 }
 
+// Excel de un estado de cuenta (renglones + totales)
+async function billingExcel(a, title, rows, t, file, extra = []) {
+  const X = await loadXLSX();
+  const head = ['Guía', 'Fecha de entrega', 'Resultado', 'Fecha programada', 'Cliente', 'Teléfono Telnor', 'Domicilio', 'Colonia', 'Repartidor', 'Recibió', 'Motivo', 'S/N', 'Importe'];
+  const aoa = [[title], [a.legal_name || a.name, a.rfc ? 'RFC ' + a.rfc : ''], ...extra, [], head,
+    ...rows.map((r) => [r.tracking_code, r.date, r.status === 'entregado' ? 'Entregado' : 'No entregado', r.scheduled_date || '', r.customer, r.telnor_phone || '', r.address || '', r.colonia || '', r.driver || '', r.receiver || '', r.reason || '', r.serials || '', Number(r.amount)]),
+    [], ['Entregados', t.delivered, '', '', '', '', '', '', '', '', '', '', t.amount_delivered], ['No entregados (visita)', t.failed, '', '', '', '', '', '', '', '', '', '', t.amount_failed],
+    ['Subtotal', '', '', '', '', '', '', '', '', '', '', '', t.total ?? t.subtotal], ['IVA 16%', '', '', '', '', '', '', '', '', '', '', '', t.iva], ['TOTAL a facturar', '', '', '', '', '', '', '', '', '', '', '', t.total_iva ?? t.total]];
+  const ws = X.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [16, 12, 13, 12, 28, 14, 34, 18, 22, 22, 22, 18, 11].map((w) => ({ wch: w }));
+  const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Estado de cuenta');
+  X.writeFile(wb, file);
+}
+// Facturación al mayorista: marcar lo que se va a facturar y generar el estado de cuenta (folio); lo facturado ya no sale como pendiente
+async function accountBilling(a, root, admin) {
+  const out = $('#blOut', root), invBox = $('#blInv', root);
+  let data, picked = new Set();
+  const sum = () => {
+    const rows = data.rows.filter((r) => picked.has(r.order_id));
+    const sub = rows.reduce((x, r) => x + r.amount, 0), iva = Math.round(sub * 16) / 100;
+    $('#blSel', root).innerHTML = `<b>${rows.length}</b> marcados (${rows.filter((r) => r.status === 'entregado').length} entregados, ${rows.filter((r) => r.status !== 'entregado').length} no entregados) · Subtotal ${mxn(sub)} + IVA ${mxn(iva)} = <b style="font-size:17px">${mxn(sub + iva)}</b>`;
+    const g = $('#blGen', root); if (g) g.disabled = !rows.length;
+  };
+  const load = async () => {
+    data = await GET(`/api/accounts/${a.id}/billing?to=${$('#blTo', root)?.value || today()}`);
+    picked = new Set(data.rows.map((r) => r.order_id));
+    const t = data.totals;
+    out.innerHTML = `<div class="grid g3">
+        <div class="card kpi" style="padding:10px"><div class="label">Por facturar al ${esc(data.to)}</div><div class="value" style="color:var(--warn)">${mxn(t.total_iva)}</div><div class="sub">${t.delivered} entregados + ${t.failed} no entregados (con IVA)</div></div>
+        <div class="card kpi" style="padding:10px"><div class="label">Facturado (estados de cuenta)</div><div class="value">${mxn(data.billed.total)}</div><div class="sub">${fmtN(data.billed.n)} pedidos en ${data.invoices.length} estado(s)</div></div>
+        <div class="card kpi" style="padding:10px"><div class="label">Cobrado</div><div class="value" style="color:var(--ok)">${mxn(data.billed.paid)}</div><div class="sub">por cobrar ${mxn(data.billed.total - data.billed.paid)}</div></div></div>
+      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap"><label class="f" style="margin:0">Hasta el día<input type="date" id="blTo" value="${esc(data.to)}" max="${today()}" /></label>
+        <input id="blQ" placeholder="Buscar guía, cliente, S/N…" autocomplete="off" class="grow" style="min-width:160px" />
+        <select id="blRes" style="width:auto"><option value="">Todos</option><option value="entregado">Solo entregados</option><option value="fallido">Solo no entregados</option></select></div>
+      <div class="row between" style="margin-top:8px;gap:8px;flex-wrap:wrap"><span id="blSel"></span>
+        <span class="row" style="gap:6px"><button class="btn sm" id="blXls">${icon('download')} Excel de lo marcado</button>${admin ? '<button class="btn primary" id="blGen">Generar estado de cuenta</button>' : ''}</span></div>
+      ${data.rows.length ? `<div class="table-wrap" style="max-height:340px;margin-top:8px"><table><thead><tr><th style="width:30px"><input type="checkbox" id="blAll" checked /></th><th>Guía</th><th>Fecha</th><th>Cliente</th><th>Teléfono Telnor</th><th>Resultado</th><th class="r">Importe</th></tr></thead><tbody>
+        ${data.rows.map((x) => `<tr data-blr="${x.order_id}" data-res="${x.status}" data-q="${esc([x.tracking_code, x.customer, x.serials, x.telnor_phone, x.colonia].join(' ').toLowerCase())}"><td><input type="checkbox" data-bl="${x.order_id}" checked /></td><td class="mono">${esc(x.tracking_code)}</td><td class="num">${esc(x.date)}</td><td>${esc(x.customer)}${x.serials ? `<br><small class="muted mono">${esc(x.serials)}</small>` : ''}</td><td class="mono">${esc(x.telnor_phone || '')}</td><td>${badge(x.status)}${x.reason ? `<br><small class="muted">${esc(x.reason)}</small>` : ''}</td><td class="r num">${mxn(x.amount)}</td></tr>`).join('')}</tbody></table></div>`
+        : '<p class="muted">Todo lo entregado ya está en un estado de cuenta. 🎉</p>'}`;
+    $('#blTo', root).onchange = () => load().catch((e) => toast(e.message, 'bad'));
+    const rowsEls = $$('[data-blr]', root);
+    const filt = () => { const q = $('#blQ', root).value.trim().toLowerCase(), r = $('#blRes', root).value; rowsEls.forEach((tr) => (tr.hidden = (q && !tr.dataset.q.includes(q)) || (r && tr.dataset.res !== r))); };
+    $('#blQ', root).oninput = filt; $('#blRes', root).onchange = filt;
+    $$('[data-bl]', root).forEach((c) => (c.onchange = () => { c.checked ? picked.add(Number(c.dataset.bl)) : picked.delete(Number(c.dataset.bl)); sum(); }));
+    // marcar/desmarcar todo lo que se ve (respeta búsqueda y filtro)
+    $('#blAll', root)?.addEventListener('change', (e) => { rowsEls.filter((tr) => !tr.hidden).forEach((tr) => { const c = $('[data-bl]', tr); c.checked = e.target.checked; c.checked ? picked.add(Number(c.dataset.bl)) : picked.delete(Number(c.dataset.bl)); }); sum(); });
+    $('#blXls', root).onclick = () => { const rows = data.rows.filter((r) => picked.has(r.order_id)); if (!rows.length) return toast('Marca lo que quieres en el Excel', 'bad');
+      const sub = rows.reduce((x, r) => x + r.amount, 0), del = rows.filter((r) => r.status === 'entregado'), iva = Math.round(sub * 16) / 100;
+      billingExcel(a, `Estado de cuenta (borrador) · ${a.name} · al ${data.to}`, rows, { delivered: del.length, failed: rows.length - del.length, amount_delivered: del.reduce((x, r) => x + r.amount, 0), amount_failed: sub - del.reduce((x, r) => x + r.amount, 0), total: sub, iva, total_iva: sub + iva }, `por-facturar-${a.name.replace(/\W+/g, '_')}-${data.to}.xlsx`); };
+    $('#blGen', root)?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget; const ids = [...picked]; if (!ids.length) return toast('Marca lo que vas a facturar', 'bad');
+      const note = await new Promise((ok) => { const md = modal('Generar estado de cuenta', `<p>Se genera con <b>${ids.length}</b> pedidos marcados. Ya no volverán a aparecer como pendientes de facturar.</p><label class="f">Nota (opcional)<input id="blNote" placeholder="Ej. Semana 47, factura A-123" /></label>`, { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="blOk">Generar</button>', onClose: () => ok(null) }); $('#blOk', md.el).onclick = () => { const v = $('#blNote', md.el).value; md.el.remove(); ok(v); }; });
+      if (note === null) return;
+      btn.disabled = true;
+      try { const r = await POST(`/api/accounts/${a.id}/invoices`, { order_ids: ids, notes: note }); toast(`Estado de cuenta ${r.folio} generado: ${mxn(r.totals.total_iva)}`, 'ok'); await load(); await loadInv(); openInv(r.id); }
+      catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+    });
+    sum();
+  };
+  const openInv = async (iid) => {
+    const d = await GET(`/api/accounts/${a.id}/invoices/${iid}`);
+    const i = d.invoice;
+    billingExcel(a, `Estado de cuenta ${i.folio} · ${a.name}`, d.rows, { delivered: i.delivered, failed: i.failed, amount_delivered: i.delivered * (i.rate_delivery || 0), amount_failed: i.failed * (i.rate_failed || 0), total: i.subtotal, iva: i.iva, total_iva: i.total },
+      `estado-de-cuenta-${i.folio}.xlsx`, [[`Folio ${i.folio}`, `Generado ${fmtDT(i.created_at)}`, `Periodo ${i.period_from || ''} a ${i.period_to || ''}`], ...(i.invoice_ref ? [[`Factura ${i.invoice_ref}`]] : [])]);
+  };
+  const loadInv = async () => {
+    const list = data?.invoices || (await GET(`/api/accounts/${a.id}/billing`)).invoices;
+    invBox.innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Folio</th><th>Generado</th><th>Periodo</th><th class="r">Pedidos</th><th class="r">Total con IVA</th><th>Factura</th><th>Pagado</th><th></th></tr></thead><tbody>
+      ${list.map((i) => `<tr><td class="mono"><b>${esc(i.folio)}</b>${i.notes ? `<br><small class="muted">${esc(i.notes)}</small>` : ''}</td><td>${fmtDT(i.created_at)}<br><small class="muted">${esc(i.created_by_name || '')}</small></td><td class="num">${esc(i.period_from || '')} – ${esc(i.period_to || '')}</td><td class="r num">${i.delivered + i.failed}<br><small class="muted">${i.delivered} ent. · ${i.failed} no ent.</small></td><td class="r num"><b>${mxn(i.total)}</b></td>
+        <td>${admin ? `<input data-iref="${i.id}" value="${esc(i.invoice_ref || '')}" placeholder="Folio / UUID" style="width:130px" />` : esc(i.invoice_ref || '')}</td>
+        <td>${admin ? `<label class="row" style="gap:4px"><input type="checkbox" data-ipaid="${i.id}" ${i.paid_at ? 'checked' : ''} /> ${i.paid_at ? esc(i.paid_at) : ''}</label>` : i.paid_at ? '✅ ' + esc(i.paid_at) : '—'}</td>
+        <td class="r"><button class="btn sm" data-ixls="${i.id}">${icon('download')} Excel</button>${admin && !i.paid_at ? ` <button class="btn sm bad" data-icancel="${i.id}" title="Sus pedidos vuelven a quedar por facturar">Cancelar</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted">Aún no hay estados de cuenta generados. Márcalos en <b>Por facturar</b> y toca <b>Generar estado de cuenta</b>.</p>';
+    $$('[data-ixls]', invBox).forEach((b) => (b.onclick = () => openInv(b.dataset.ixls).catch((e) => toast(e.message, 'bad'))));
+    $$('[data-iref]', invBox).forEach((x) => (x.onchange = () => PUT(`/api/accounts/${a.id}/invoices/${x.dataset.iref}`, { invoice_ref: x.value }).then(() => toast('Factura guardada', 'ok')).catch((e) => toast(e.message, 'bad'))));
+    $$('[data-ipaid]', invBox).forEach((x) => (x.onchange = async () => { try { await PUT(`/api/accounts/${a.id}/invoices/${x.dataset.ipaid}`, { paid: x.checked }); await load(); await loadInv(); } catch (e) { toast(e.message, 'bad'); } }));
+    $$('[data-icancel]', invBox).forEach((b) => (b.onclick = async () => { if (!(await confirmDlg('¿Cancelar este estado de cuenta? Sus pedidos vuelven a quedar por facturar.'))) return; try { await api('DELETE', `/api/accounts/${a.id}/invoices/${b.dataset.icancel}`); toast('Estado de cuenta cancelado', 'ok'); await load(); await loadInv(); } catch (e) { toast(e.message, 'bad'); } }));
+  };
+  try { await load(); await loadInv(); } catch (e) { out.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+}
+
 async function accountDetail(id) {
   const a = await GET('/api/accounts/' + id);
   const admin = store.user.role === 'admin';
@@ -3801,9 +3882,12 @@ async function accountDetail(id) {
     ${a.by_day.length ? `<div><h3>Por día</h3><div class="table-wrap" style="max-height:200px"><table><thead><tr><th>Fecha</th><th class="r">Pedidos</th><th class="r">Entregados</th><th class="r">Fallidos</th></tr></thead><tbody>
       ${a.by_day.map((d) => `<tr><td class="num">${esc(d.day)}</td><td class="r num">${d.total}</td><td class="r num">${d.delivered || 0}</td><td class="r num">${d.failed || 0}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
     <div class="card" style="padding:12px"><h3 style="margin-top:0">${icon('chart')} Estado de cuenta</h3>
-      <div class="row"><label class="f">Desde<input type="date" id="stFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="stTo" value="${today()}" /></label>
+      <div class="pill-tabs" id="blTabs"><button class="on" data-bt="pend">Por facturar</button><button data-bt="inv">Estados de cuenta generados</button><button data-bt="per">Por periodo</button></div>
+      <div data-bp="pend" style="margin-top:10px"><div id="blOut"><p class="muted">Cargando…</p></div></div>
+      <div data-bp="inv" hidden style="margin-top:10px"><div id="blInv"></div></div>
+      <div data-bp="per" hidden style="margin-top:10px"><div class="row"><label class="f">Desde<input type="date" id="stFrom" value="${first}" /></label><label class="f">Hasta<input type="date" id="stTo" value="${today()}" /></label>
         <button class="btn" id="stGo">Calcular</button><button class="btn" id="stCsv">${icon('download')} Excel (CSV)</button></div>
-      <div id="stOut" style="margin-top:8px"></div></div>
+      <div id="stOut" style="margin-top:8px"></div></div></div>
     ${a.notes ? `<p class="muted">${esc(a.notes)}</p>` : ''}</div>`, { wide: true, footer: '<button class="btn primary" data-close>Cerrar</button>' });
   $('#adEdit', m.el)?.addEventListener('click', () => { m.close(); accountForm(a); });
   const stmt = async () => {
@@ -3830,7 +3914,8 @@ async function accountDetail(id) {
       setTimeout(() => URL.revokeObjectURL(link.href), 5000);
     } catch (e) { toast(e.message, 'bad'); }
   };
-  stmt().catch(() => {});
+  $$('#blTabs button', m.el).forEach((b) => (b.onclick = () => { $$('#blTabs button', m.el).forEach((x) => x.classList.toggle('on', x === b)); $$('[data-bp]', m.el).forEach((p) => (p.hidden = p.dataset.bp !== b.dataset.bt)); if (b.dataset.bt === 'per') stmt().catch((e) => toast(e.message, 'bad')); }));
+  accountBilling(a, m.el, admin);
   $('#adLink', m.el).onclick = async () => {
     const { unassigned } = await GET('/api/accounts');
     const m2 = modal(`Ligar pedidos a ${a.name}`, `<div class="stack">
@@ -4947,12 +5032,14 @@ async function viewUsers(v) {
   const me = store.user;
   const isAdmin = me.role === 'admin';
   const cnt = (f) => users.filter(f).length;
+  let lastList = users;
   const draw = () => {
     const q = uState.q.toLowerCase();
     const list = users.filter((u) =>
       (!uState.role || roleOf(u) === uState.role) &&
       (uState.status === '' || String(u.active) === uState.status) &&
       (!q || `${u.name} ${u.email} ${u.phone || ''} ${u.vehicle || ''}`.toLowerCase().includes(q)));
+    lastList = list;
     const pages = Math.max(1, Math.ceil(list.length / PAGE));
     uState.page = Math.min(uState.page, pages - 1);
     const rows = list.slice(uState.page * PAGE, uState.page * PAGE + PAGE);
@@ -4973,7 +5060,7 @@ async function viewUsers(v) {
     orgApply($('#uList tbody'), om, (tr) => tr.dataset.id);
     orgWire(v, () => { uState.page = 0; render(); });
   };
-  v.innerHTML = topbar('Usuarios', isAdmin ? `<button class="btn" id="impU">${icon('upload')} Importar</button><button class="btn primary" id="newU">${icon('plus')} Nuevo usuario</button>` : '',
+  v.innerHTML = topbar('Usuarios', `<button class="btn" id="xlsU" title="Descarga la lista con los filtros que tengas puestos">${icon('download')} Excel</button>` + (isAdmin ? `<button class="btn" id="impU">${icon('upload')} Importar</button><button class="btn primary" id="newU">${icon('plus')} Nuevo usuario</button>` : ''),
     'Da de alta a tu equipo, asigna roles y controla el acceso.') + `
   <div class="grid g4">
     <button class="card kpi kpi-btn" data-f="role:"><div class="label">Total</div><div class="value">${users.length}</div><div class="sub">${cnt((u) => u.active)} activos</div></button>
@@ -4996,6 +5083,20 @@ async function viewUsers(v) {
     ${PERMS.map(([l, ...p]) => `<tr><td>${l}</td>${p.map((x) => `<td class="c">${x ? `<span class="yes">${icon('check')}</span>` : '<span class="no">—</span>'}</td>`).join('')}</tr>`).join('')}
     </tbody></table></div></details>`;
   $('#uSt').value = uState.status;
+  // Excel: la lista que se ve (búsqueda, rol, estado, ciudad y célula)
+  $('#xlsU').onclick = async () => {
+    try {
+      const X = await loadXLSX();
+      const head = ['Nombre', 'Correo', 'Teléfono', 'Rol', 'Oficina', 'Ciudad', 'Célula (coordinador)', 'Vehículo', 'Capacidad', 'Estado', 'Entregas', 'Último acceso', 'Alta'];
+      const rows = lastList.map((u) => { const o = orgOf(om, u.id); return [u.name, u.email, u.phone || '', ROLE[roleOf(u)] || u.role, o.office || '', o.city || '', o.cell_id ? (o.cell_id === u.id ? 'Coordina su célula' : o.cell_name) : '', u.vehicle || '', u.role === 'repartidor' ? Number(u.capacity) || '' : '', u.active ? (u.must_change_password ? 'Invitado (sin primer acceso)' : 'Activo') : 'Inactivo', u.role === 'repartidor' ? Number(u.delivered) || 0 : '', u.last_login ? fmtDT(u.last_login) : 'Nunca', u.created_at ? fmtDT(u.created_at).split(',')[0] : '']; });
+      const ws = X.utils.aoa_to_sheet([head, ...rows]);
+      ws['!cols'] = [28, 30, 14, 14, 18, 18, 26, 18, 10, 22, 10, 18, 12].map((w) => ({ wch: w }));
+      ws['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: head.length - 1 } }) };
+      const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, 'Usuarios');
+      X.writeFile(wb, `usuarios-${today()}.xlsx`);
+      toast(`Excel con ${rows.length} usuario(s)`, 'ok');
+    } catch (e) { toast(e.message, 'bad'); }
+  };
   let t;
   $('#uq').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { uState.q = e.target.value; uState.page = 0; draw(); }, 150); };
   $$('#uRole button').forEach((b) => (b.onclick = () => { uState.role = b.dataset.r; uState.page = 0; $$('#uRole button').forEach((x) => x.classList.toggle('on', x === b)); draw(); }));
