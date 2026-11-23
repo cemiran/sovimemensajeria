@@ -1,7 +1,7 @@
 // Notificaciones al cliente final (SMS, WhatsApp, correo) y registro de entregas en Google Sheets.
 // Todo pasa por una cola en la base de datos: si un proveedor falla, se reintenta sin bloquear la operación.
 // Sin credenciales configuradas, cada canal trabaja en "simulación": el mensaje se guarda pero no sale.
-const { db, getSettings } = require('./db');
+const { db, getSettings, UPLOAD_DIR } = require('./db');
 
 const EVENTS = {
   registrado: 'Pedido registrado',
@@ -76,6 +76,7 @@ function orderVars(orderId, extra = {}) {
       motivo: ev?.reason || '',
       fecha_entrega: fmtDate(o.delivered_at),
       link: trackLink(s, o.public_token),
+      pdf: s.delivery_pdf ? `${baseUrl(s)}/uploads/${s.delivery_pdf}` : '',
       ...extra,
     },
   };
@@ -103,7 +104,9 @@ function queueEvent(event, orderId, extra = {}, { force = false, channels = null
     // "Repartidor cerca" solo una vez por pedido
     if (event === 'proximo' && !force && db.prepare("SELECT 1 FROM messages WHERE order_id=? AND event='proximo' LIMIT 1").get(o.id)) return 0;
     const mx = matrix(s)[event] || {};
-    const body = render(s['tpl_' + event], vars);
+    let body = render(s['tpl_' + event], vars);
+    // aviso de entrega: si hay PDF y el texto no lo menciona con {pdf}, se agrega el enlace al final
+    if (event === 'entregado' && vars.pdf && !String(s.tpl_entregado || '').includes('{pdf}')) body += `\n${s.delivery_pdf_name || 'Documento'}: ${vars.pdf}`;
     const ins = db.prepare(
       'INSERT INTO messages (order_id, customer_id, event, channel, recipient, subject, body) VALUES (?,?,?,?,?,?,?)'
     );
@@ -252,7 +255,7 @@ function emailHtml(s, subject, body) {
   <tr><td style="padding:14px 24px 20px;border-top:1px solid #eef2f7;font-size:12px;color:#5f6b7a" align="center">${esc(s.company_name || 'Sovime Mensajería')} · Mensaje automático sobre tu envío</td></tr>
   </table></td></tr></table></body></html>`;
 }
-async function sendEmail(s, to, subject, body) {
+async function sendEmail(s, to, subject, body, attachments) {
   if (s.email_provider !== 'smtp') return { simulated: true };
   if (!s.smtp_host || !s.smtp_from) throw new Error('Faltan servidor SMTP o remitente');
   const key = [s.smtp_host, s.smtp_port, s.smtp_secure, s.smtp_user, s.smtp_pass].join('|');
@@ -269,7 +272,7 @@ async function sendEmail(s, to, subject, body) {
   }
   // remitente con nombre de la empresa: "Sovime Mensajería <telnor@…>" (Gmail desconfía menos que de una dirección sola)
   const from = s.smtp_from.includes('<') ? s.smtp_from : { name: s.company_name || 'Sovime Mensajería', address: s.smtp_from };
-  const info = await mailer.sendMail({ from, replyTo: s.company_email || undefined, to, subject, text: body, html: emailHtml(s, subject, body) });
+  const info = await mailer.sendMail({ from, replyTo: s.company_email || undefined, to, subject, text: body, html: emailHtml(s, subject, body), attachments });
   return { ref: info.messageId };
 }
 async function deliver(s, m, { direct = false } = {}) {
@@ -284,7 +287,12 @@ ${m.body}` };
   }
   if (m.channel === 'sms') return sendSMS(s, m.recipient, m.body, m.device, m.acc);
   if (m.channel === 'whatsapp') return sendWhatsApp(s, m.recipient, m.body);
-  return sendEmail(s, m.recipient, m.subject || s.company_name, m.body);
+  // aviso de entrega por correo: el PDF va como archivo adjunto
+  let att;
+  if (m.event === 'entregado' && s.delivery_pdf && /^pdf_[\w]+\.pdf$/.test(s.delivery_pdf)) {
+    try { att = [{ filename: `${String(s.delivery_pdf_name || 'Documento').replace(/[\\/:*?"<>|]/g, '')}.pdf`, content: require('fs').readFileSync(require('path').join(UPLOAD_DIR, s.delivery_pdf)), contentType: 'application/pdf' }]; } catch {}
+  }
+  return sendEmail(s, m.recipient, m.subject || s.company_name, m.body, att);
 }
 
 // ---------- Google Sheets (Apps Script Web App) ----------

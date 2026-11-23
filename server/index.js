@@ -29,6 +29,34 @@ app.disable('x-powered-by');
 // Detrás de un proxy (Traefik / Nginx con https) para que la IP real y el https se detecten bien
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? true : Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
 app.use(compression());
+// versión de los datos: cualquier cambio guardado (no GET) la sube y vacía el caché de listas; la ubicación GPS no cuenta
+let dataVer = 0;
+const LIST_CACHE = new Map();
+const bumpData = () => { dataVer++; LIST_CACHE.clear(); };
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.path.startsWith('/api/') && req.path !== '/api/my/location') res.on('finish', () => { if (res.statusCode < 400) bumpData(); });
+  next();
+});
+// listas grandes: misma consulta del mismo usuario sin cambios en medio (máx. 30 s) → se responde al instante
+function cachedList(req, res) {
+  const c = LIST_CACHE.get(`${req.user.id}|${req.user.role}|${req.originalUrl}`);
+  if (c && c.ver === dataVer && Date.now() - c.at < 30000) { res.type('application/json').send(c.body); return true; }
+  return false;
+}
+function sendList(req, res, obj) {
+  const body = JSON.stringify(obj);
+  if (body.length > 100000) {
+    LIST_CACHE.set(`${req.user.id}|${req.user.role}|${req.originalUrl}`, { ver: dataVer, at: Date.now(), body });
+    while (LIST_CACHE.size > 16) LIST_CACHE.delete(LIST_CACHE.keys().next().value);
+  }
+  res.type('application/json').send(body);
+}
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next();
+  const t = process.hrtime.bigint();
+  res.on('finish', () => { const ms = Number(process.hrtime.bigint() - t) / 1e6; if (ms > 1500) console.warn(`[lento] ${req.method} ${req.path} ${Math.round(ms)} ms`); });
+  next();
+});
 app.use(express.json({ limit: '40mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -2737,6 +2765,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { q } = req.query;
+    if (cachedList(req, res)) return;
     const { limit, offset } = paging(req, 200000);
     const args = [];
     let w = '';
@@ -2759,16 +2788,17 @@ app.get(
     const total = db.prepare(`SELECT COUNT(*) c FROM customers c ${w}`).get(...args).c;
     const rows = db
       .prepare(
-        `SELECT c.*, ${matchCol}, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) orders_count,
-           (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado')) open_orders,
-           (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status IN ('pendiente','asignado','cargado','fallido')) active_orders,
+        `SELECT c.*, ${matchCol}, COALESCE(ag.n, 0) orders_count, COALESCE(ag.open_n, 0) open_orders, COALESCE(ag.act_n, 0) active_orders,
            (SELECT o.status FROM orders o WHERE o.customer_id = c.id ORDER BY o.scheduled_date DESC, o.id DESC LIMIT 1) last_status,
-           (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) driver_name
-, (SELECT name FROM warehouses WHERE id = ${OFFICE_OF('c')}) office_name
-         FROM customers c ${w} ORDER BY c.name LIMIT ? OFFSET ?`
+           CASE WHEN ag.drv_n > 0 THEN (SELECT u.name FROM orders o JOIN users u ON u.id = o.driver_id WHERE o.customer_id = c.id AND o.status IN ('asignado','cargado') ORDER BY o.id DESC LIMIT 1) END driver_name,
+           wo.name office_name
+         FROM customers c
+         LEFT JOIN (SELECT customer_id, COUNT(*) n, SUM(status IN ('pendiente','asignado')) open_n, SUM(status IN ('pendiente','asignado','cargado','fallido')) act_n, SUM(status IN ('asignado','cargado')) drv_n FROM orders GROUP BY customer_id) ag ON ag.customer_id = c.id
+         LEFT JOIN warehouses wo ON wo.id = ${OFFICE_OF('c')}
+         ${w} ORDER BY c.name LIMIT ? OFFSET ?`
       )
       .all(...margs, ...args, limit, offset);
-    res.json({ total, rows });
+    sendList(req, res, { total, rows });
   })
 );
 const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'colonia', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
@@ -3981,6 +4011,7 @@ app.get(
   auth(),
   wrap((req, res) => {
     const { status, date, driver_id, q, route_id, unrouted, account_id } = req.query;
+    if (cachedList(req, res)) return;
     const { limit, offset } = paging(req, 200000);
     const where = [];
     const args = [];
@@ -4009,7 +4040,7 @@ app.get(
       where.push('o.route_id = ?');
       args.push(route_id);
     }
-    if (unrouted === '1') where.push('o.route_id IS NULL');
+    if (unrouted === '1') where.push('o.route_id IS NULL', FOLLOW_OPEN);
     if (req.query.backorder === '1') where.push(`o.status IN ${OPEN_ST} AND EXISTS (SELECT 1 FROM order_items i WHERE i.order_id = o.id AND i.filled < i.qty)`);
     const offO = (req.user.role !== 'repartidor' && req.user.office) || req.query.office_id;
     if (offO) { where.push(`${OFFICE_OF('c')} = ?`); args.push(Number(offO)); }
@@ -4033,9 +4064,12 @@ app.get(
     const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
     const total = db.prepare(`SELECT COUNT(*) c FROM orders o JOIN customers c ON c.id = o.customer_id ${w}`).get(...args).c;
     const rows = db.prepare(`${ORDER_SELECT} ${w} ORDER BY o.scheduled_date DESC, o.route_id, o.stop_seq, o.id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
-    const snq = db.prepare("SELECT GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id = ?");
-    for (const r of rows) r.sn_list = snq.get(r.id).l;
-    res.json({ total, rows: req.query.sort === 'geo' ? geoSort(rows) : req.query.sort === 'cp' ? geoSort(rows, 'cp') : rows });
+    // S/N de todos los pedidos de la lista en una sola consulta (antes era una por pedido)
+    const snMap = new Map();
+    if (rows.length > 300) for (const x of db.prepare("SELECT order_id, GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id IS NOT NULL GROUP BY order_id").all()) snMap.set(x.order_id, x.l);
+    else if (rows.length) for (const x of db.prepare(`SELECT order_id, GROUP_CONCAT(serial, ', ') l FROM serials WHERE order_id IN (${rows.map(() => '?').join(',')}) GROUP BY order_id`).all(...rows.map((r) => r.id))) snMap.set(x.order_id, x.l);
+    for (const r of rows) { r.sn_list = snMap.get(r.id) ?? null; delete r.public_token; }
+    sendList(req, res, { total, rows: req.query.sort === 'geo' ? geoSort(rows) : req.query.sort === 'cp' ? geoSort(rows, 'cp') : rows });
   })
 );
 app.get('/api/orders/zips', auth(...STAFF), wrap((req, res) => {
@@ -4312,6 +4346,75 @@ function presenceCheck(o, b, reason) {
   const d = haversine({ lat, lng }, c) * 1000;
   if (d > lim) throw new HttpError(400, `Estás a ${d >= 1000 ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m'} del domicilio. Para registrar "${reason}" debes llegar al domicilio (máx. ${lim} m). Si el cliente pidió otro día, usa "Reprogramar".`);
 }
+// Seguimiento: visitas sin entregar (no cuenta "Reprogramado por cliente"); al llegar a N pasa a la cola de la oficina
+const FOLLOW_OPEN = '(o.followup_at IS NULL OR o.followup_done_at IS NOT NULL)'; // fuera de la cola: se puede planificar
+const failVisits = (id) => db.prepare("SELECT COUNT(*) n FROM evidences WHERE order_id=? AND result='fallido' AND COALESCE(reason,'') <> 'Reprogramado por cliente'").get(id).n;
+function checkFollowup(orderId) {
+  const n = Number(getSettings().followup_visits) || 0;
+  if (n < 1) return false;
+  const o = db.prepare('SELECT id, status, followup_at, followup_done_at, followup_base FROM orders WHERE id=?').get(orderId);
+  if (!o || ['entregado', 'cancelado'].includes(o.status)) return false;
+  if (o.followup_at && !o.followup_done_at) return false; // ya está en la cola
+  const v = failVisits(orderId);
+  if (v - (o.followup_done_at ? o.followup_base : 0) < n) return false;
+  db.prepare("UPDATE orders SET followup_at=datetime('now'), followup_done_at=NULL, followup_by=NULL, followup_note=NULL WHERE id=?").run(orderId);
+  return true;
+}
+app.get('/api/followup', auth(...STAFF), wrap((req, res) => {
+  const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.scheduled_date, o.followup_at, o.notes, c.id customer_id, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt,
+      c.external_id telnor_phone, c.address, c.colonia customer_colonia, c.city customer_city, c.reference address_reference, c.lat, c.lng, c.geo_quality, u.name driver_name,
+      (SELECT COUNT(*) FROM evidences e WHERE e.order_id=o.id AND e.result='fallido' AND COALESCE(e.reason,'') <> 'Reprogramado por cliente') visits,
+      (SELECT GROUP_CONCAT(serial, ', ') FROM serials WHERE order_id=o.id) sn_list
+    FROM orders o JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=o.driver_id
+    WHERE o.followup_at IS NOT NULL AND o.followup_done_at IS NULL AND o.status NOT IN ('entregado','cancelado') ${inOffice(req, 'c')} ORDER BY o.followup_at`).all();
+  const ev = db.prepare("SELECT e.created_at, e.reason, e.notes, e.photo_path, e.distance_to_customer_m dist, u.name driver FROM evidences e LEFT JOIN users u ON u.id=e.driver_id WHERE e.order_id=? AND e.result='fallido' ORDER BY e.id DESC LIMIT 6");
+  for (const r of rows) r.visits_list = ev.all(r.id);
+  res.json(rows);
+}));
+app.get('/api/followup/count', auth(...STAFF), wrap((req, res) => {
+  res.json({ n: db.prepare(`SELECT COUNT(*) n FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.followup_at IS NOT NULL AND o.followup_done_at IS NULL AND o.status NOT IN ('entregado','cancelado') ${inOffice(req, 'c')}`).get().n });
+}));
+// la oficina verificó cliente y datos: vuelve a planificación (cuenta N visitas más antes de volver a la cola)
+app.post('/api/followup/:id/verify', auth(...STAFF), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!o) throw new HttpError(404, 'No encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+  const note = String(req.body?.note || '').trim().slice(0, 300);
+  if (!note) throw new HttpError(400, 'Escribe qué verificaste (p. ej. "Se confirmó domicilio y teléfono con el cliente")');
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date || '') ? req.body.date : null;
+  tx(() => {
+    db.prepare("UPDATE orders SET followup_done_at=datetime('now'), followup_by=?, followup_note=?, followup_base=? WHERE id=?").run(req.user.id, note, failVisits(o.id), o.id);
+    // regresa a pendiente sin ruta para planificarlo (si ya no está en una ruta activa)
+    if (o.status === 'fallido') db.prepare("UPDATE orders SET status='pendiente', route_id=NULL, driver_id=NULL, stop_seq=NULL, eta=NULL, leg_km=NULL, scheduled_date=COALESCE(?, scheduled_date) WHERE id=?").run(date, o.id);
+    else if (date) db.prepare('UPDATE orders SET scheduled_date=? WHERE id=? AND route_id IS NULL').run(date, o.id);
+  });
+  audit(req, 'seguimiento.verificado', `${o.tracking_code}: ${note}`);
+  res.json({ ok: true });
+}));
+// PDF que se anexa al aviso de entrega (guía de uso, garantía…): uno para toda la empresa
+app.post('/api/settings/delivery-pdf', auth('admin'), wrap((req, res) => {
+  const m = /^data:application\/pdf;base64,(.+)$/.exec(String(req.body?.pdf || ''));
+  if (!m) throw new HttpError(400, 'Elige un archivo PDF');
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.subarray(0, 5).toString() !== '%PDF-') throw new HttpError(400, 'El archivo no es un PDF válido');
+  if (buf.length > 8 * 1024 * 1024) throw new HttpError(413, 'El PDF pasa de 8 MB: redúcelo antes de subirlo');
+  const name = `pdf_${Date.now()}_${crypto.randomBytes(12).toString('hex')}.pdf`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), buf);
+  const old = getSettings().delivery_pdf;
+  const label = String(req.body?.name || '').replace(/\.pdf$/i, '').trim().slice(0, 60) || 'Documento';
+  const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+  up.run('delivery_pdf', name); up.run('delivery_pdf_name', label);
+  if (old && /^pdf_[\w]+\.pdf$/.test(old)) fs.rm(path.join(UPLOAD_DIR, old), () => {});
+  audit(req, 'configuracion', `PDF del aviso de entrega: ${label}`);
+  res.json({ delivery_pdf: name, delivery_pdf_name: label });
+}));
+app.delete('/api/settings/delivery-pdf', auth('admin'), wrap((req, res) => {
+  const old = getSettings().delivery_pdf;
+  db.prepare("UPDATE settings SET value='' WHERE key IN ('delivery_pdf','delivery_pdf_name')").run();
+  if (old && /^pdf_[\w]+\.pdf$/.test(old)) fs.rm(path.join(UPLOAD_DIR, old), () => {});
+  audit(req, 'configuracion', 'PDF del aviso de entrega quitado');
+  res.json({ ok: true });
+}));
 function registerEvidence(req, result) {
   const o = db.prepare(`SELECT o.*, c.lat clat, c.lng clng FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?`).get(req.params.id);
   if (!o) throw new HttpError(404, 'No encontrado');
@@ -4382,6 +4485,7 @@ function registerEvidence(req, result) {
     if ((cq.lat == null || APPROX_GEO.includes(cq.geo_quality)) && (dist == null || dist <= far) && (!acc || acc <= 100))
       db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='gps_entrega' WHERE id=?").run(lat, lng, o.customer_id);
   }
+  const toFollow = result === 'fallido' && !counter && checkFollowup(o.id);
   notify.queueSheet(evId, o.id);
   notify.queueEvent(result, o.id);
   // Aviso "tu repartidor está cerca" para la siguiente parada de la ruta
@@ -4392,7 +4496,7 @@ function registerEvidence(req, result) {
       notify.queueEvent('proximo', nx.id, { minutos: mins });
     }
   }
-  return { ok: true, distance_to_customer_m: dist, order: loadOrder(o.id) };
+  return { ok: true, distance_to_customer_m: dist, followup: toFollow || undefined, order: loadOrder(o.id) };
 }
 // La oficina agrega (o cambia) la foto de una evidencia: p. ej. la foto que mandó el repartidor por WhatsApp
 app.post('/api/evidences/:id/photo', auth(...STAFF), wrap((req, res) => {
@@ -4816,12 +4920,13 @@ function assignOrdersTo(req, drv, ids, date, opts = {}) {
   {
     const susp = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(drv.id)?.suspended_reason;
     if (susp) throw new HttpError(409, `${drv.name} no puede recibir servicios: ${susp}`);
-    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, u.name dname, ${FOLLOW_OPEN} free_follow FROM orders o LEFT JOIN users u ON u.id = o.driver_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids);
     const skipped = [];
     const take = [];
     const mine = new Set(officeOrders(req, ids));
     for (const o of rows) {
       if (!mine.has(o.id)) skipped.push({ tracking_code: o.tracking_code, reason: 'es de otra oficina' });
+      else if (!o.free_follow) skipped.push({ tracking_code: o.tracking_code, reason: 'está en seguimiento: la oficina debe verificar cliente y datos' });
       else if (!['pendiente', 'asignado', 'fallido'].includes(o.status) && !(o.status === 'cargado' && (o.scheduled_date < today() || opts.allowLoaded))) skipped.push({ tracking_code: o.tracking_code, reason: o.status === 'cargado' ? `ya está cargado en la unidad de ${o.dname || 'otro repartidor'}` : `está ${o.status}` });
       else if (o.driver_id === drv.id && o.route_id && o.scheduled_date === date) skipped.push({ tracking_code: o.tracking_code, reason: `${drv.name} ya lo tiene` });
       else take.push(o);
@@ -5094,7 +5199,7 @@ app.post(
     const pend = db
       .prepare(
         `SELECT o.id, o.priority, c.lat, c.lng, c.city customer_city, ${OFFICE_OF('c')} off FROM orders o JOIN customers c ON c.id=o.customer_id
-         WHERE ${only ? `o.id IN (${only.join(',') || 0}) AND o.status IN ('pendiente','fallido','asignado')` : "o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?"} ${inOffice(req, 'c')}`
+         WHERE ${only ? `o.id IN (${only.join(',') || 0}) AND o.status IN ('pendiente','fallido','asignado')` : "o.status='pendiente' AND o.route_id IS NULL AND o.scheduled_date <= ?"} AND ${FOLLOW_OPEN} ${inOffice(req, 'c')}`
       )
       .all(...(only ? [] : [date]));
     if (!pend.length) throw new HttpError(400, 'No hay pedidos pendientes por rutear');

@@ -328,6 +328,8 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_orders_cust_date ON orders(customer_id, 
 addCols('orders', [['shipment_type', "TEXT NOT NULL DEFAULT 'general'"], ['temp_min', 'REAL'], ['temp_max', 'REAL'], ['requires_seal', 'INTEGER NOT NULL DEFAULT 0'], ['seal_number', 'TEXT']]);
 addCols('evidences', [['compliance_json', 'TEXT']]);
 addCols('orders', [['retry_at', 'TEXT']]);
+// seguimiento administrativo: entra al llegar a N visitas sin entregar; sale cuando la oficina verifica cliente y datos
+addCols('orders', [['followup_at', 'TEXT'], ['followup_base', 'INTEGER NOT NULL DEFAULT 0'], ['followup_done_at', 'TEXT'], ['followup_by', 'INTEGER'], ['followup_note', 'TEXT']]);
 addCols('users', [['route_mode', "TEXT NOT NULL DEFAULT 'continua'"]]);
 
 const moreDefaults = {
@@ -336,6 +338,9 @@ const moreDefaults = {
   require_photo: '1',
   require_signature: '1',
   require_client_confirm: '1',
+  followup_visits: '3',
+  delivery_pdf: '',
+  delivery_pdf_name: '',
   fail_geofence_m: '300',
   workday_minutes: '540',
   osrm_url: 'https://routing.openstreetmap.de/routed-car',

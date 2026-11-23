@@ -367,6 +367,9 @@ function openNav(s, app) {
 }
 // app con la que navega este teléfono (se recuerda por dispositivo): google (recomendado), waze, apple o app
 const navPref = () => { try { return localStorage.getItem('navApp') || 'google'; } catch { return 'google'; } };
+const NAV_NAME = { google: 'Google Maps', waze: 'Waze', apple: 'Apple Maps', app: 'el mapa de la app' };
+// app externa con la que se abre el cliente (si eligió el mapa de la app, Google Maps)
+const navExt = () => { const a = navPref(); return a === 'apple' && !IS_IOS ? 'google' : a === 'app' ? 'google' : a; };
 function gmapsUrl(stops) {
   const pts = stops.filter((s) => s.lat != null || s.address);
   if (!pts.length) return '#';
@@ -879,7 +882,7 @@ function viewForcePassword() {
 
 // ================= Shell =================
 const NAV_GROUPS = [
-  ['Operación', [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['live', 'Mapa en vivo', 'live'], ['receipts', 'Recepciones', 'sign'], ['messages', 'Mensajes', 'chat']]],
+  ['Operación', [['dashboard', 'Tablero', 'dash'], ['orders', 'Pedidos', 'box'], ['routes', 'Rutas', 'route'], ['live', 'Mapa en vivo', 'live'], ['receipts', 'Recepciones', 'sign'], ['followup', 'Seguimiento', 'phone'], ['messages', 'Mensajes', 'chat']]],
   ['Catálogos', [['offices', 'Oficinas', 'building'], ['inventory', 'Inventario', 'inv'], ['serials', 'Números de serie', 'tag'], ['accounts', 'Mayoristas', 'building'], ['customers', 'Clientes', 'person']]],
   ['Calidad', [['compliance', 'Cumplimiento', 'shield']]],
   ['Reportes', [['analytics', 'Análisis', 'chart']]],
@@ -2116,8 +2119,7 @@ async function routeDetail(id) {
     $('#selPin', m.el).classList.toggle('primary', selMode === 'pin');
     $('#selDraw', m.el).classList.toggle('primary', selMode === 'draw');
     $('#selHint', m.el).textContent = selMode === 'pin' ? 'Toca los pines para marcarlos' : selMode === 'draw' ? 'Dibuja alrededor de los pines que quieras marcar' : '';
-    if (selMode === 'draw') { map.dragging.disable(); map.getContainer().style.touchAction = 'none'; map.getContainer().style.cursor = 'crosshair'; }
-    else { map.dragging.enable(); map.getContainer().style.touchAction = ''; map.getContainer().style.cursor = ''; }
+    lassoMode(map, selMode === 'draw');
   };
   $('#selPin', m.el).onclick = () => setMode('pin');
   $('#selDraw', m.el).onclick = () => setMode('draw');
@@ -2132,8 +2134,8 @@ async function routeDetail(id) {
   const mc = map.getContainer();
   const toLL = (ev) => map.mouseEventToLatLng(ev);
   mc.addEventListener('pointerdown', (ev) => {
-    if (selMode !== 'draw') return;
-    ev.preventDefault(); ev.stopPropagation(); mc.setPointerCapture?.(ev.pointerId);
+    if (selMode !== 'draw' || !ev.isPrimary) return;
+    ev.preventDefault(); ev.stopPropagation(); try { mc.setPointerCapture?.(ev.pointerId); } catch {}
     lassoPts = [toLL(ev)];
     lasso?.remove(); lasso = L.polyline(lassoPts, { color: '#ef7d2d', weight: 3, dashArray: '4 4' }).addTo(map);
   }, true);
@@ -2969,6 +2971,21 @@ function bulkStatus(status, kind, ids, onDone) {
 
 // ================= Selección de entregas en el mapa (lazo o toque) =================
 // Solo se pueden mover las que aún no salen: pendientes o asignadas (no cargadas, entregadas ni fallidas).
+// Modo dibujo en el mapa: en el teléfono el dedo dibuja en lugar de mover el mapa o la página (Android y iPhone)
+function lassoMode(map, on) {
+  const c = map.getContainer();
+  c.classList.toggle('lasso-on', on);
+  c.style.touchAction = on ? 'none' : '';
+  for (const h of ['dragging', 'touchZoom', 'doubleClickZoom', 'boxZoom', 'tap']) map[h] && (on ? map[h].disable() : map[h].enable());
+  if (on) map.closePopup();
+  if (!c.__lassoTouch) {
+    // iPhone: hay que cancelar el gesto táctil (no pasivo) para que no desplace la página
+    const stop = (e) => { if (c.classList.contains('lasso-on') && e.touches.length === 1) e.preventDefault(); };
+    c.addEventListener('touchstart', stop, { passive: false });
+    c.addEventListener('touchmove', stop, { passive: false });
+    c.__lassoTouch = true;
+  }
+}
 function mapSelection(v, map, pins, drivers, date, routes = []) {
   const movable = pins.filter((p) => ['pendiente', 'asignado'].includes(p.s.status) || (p.s.status === 'fallido' && !p.s.route_id));
   const sel = new Set();
@@ -3033,8 +3050,7 @@ function mapSelection(v, map, pins, drivers, date, routes = []) {
     mode = mode === m ? null : m;
     $('#selLasso', v).classList.toggle('primary', mode === 'lasso');
     $('#selTap', v).classList.toggle('primary', mode === 'tap');
-    box.classList.toggle('lasso-on', mode === 'lasso');
-    if (mode === 'lasso') { map.dragging.disable(); map.closePopup(); } else map.dragging.enable();
+    lassoMode(map, mode === 'lasso');
     $('#selHint', v).textContent = mode === 'lasso' ? 'Encierra con el dedo o el ratón las entregas que quieras (puedes dibujar varias zonas).'
       : mode === 'tap' ? 'Toca cada pin para agregarlo o quitarlo.' : 'Selecciona entregas en el mapa para asignarlas y optimizar su ruta.';
   };
@@ -3060,16 +3076,18 @@ function mapSelection(v, map, pins, drivers, date, routes = []) {
   };
   let path = null, line = null;
   box.addEventListener('pointerdown', (e) => {
-    if (mode !== 'lasso' || e.button > 0) return;
+    if (mode !== 'lasso' || e.button > 0 || !e.isPrimary) return;
     e.preventDefault(); e.stopPropagation();
-    box.setPointerCapture?.(e.pointerId);
+    try { box.setPointerCapture?.(e.pointerId); } catch {}
     path = [map.mouseEventToLatLng(e)];
     line = L.polyline(path, { color: '#ef7d2d', weight: 3, dashArray: '6 6' }).addTo(map);
   }, true);
   box.addEventListener('pointermove', (e) => {
-    if (!path) return;
+    if (!path || !e.isPrimary) return;
     e.preventDefault();
-    path.push(map.mouseEventToLatLng(e));
+    const ll = map.mouseEventToLatLng(e), last = path[path.length - 1];
+    if (last && map.latLngToContainerPoint(last).distanceTo(map.latLngToContainerPoint(ll)) < 3) return;
+    path.push(ll);
     line.setLatLngs(path);
   }, true);
   const finish = () => {
@@ -5516,7 +5534,7 @@ async function viewLive(v) {
 }
 
 // ================= Configuración =================
-const TPL_VARS = ['{cliente}', '{guia}', '{serie}', '{telnor}', '{empresa}', '{fecha}', '{eta}', '{repartidor}', '{minutos}', '{recibio}', '{fecha_entrega}', '{motivo}', '{link}'];
+const TPL_VARS = ['{cliente}', '{guia}', '{serie}', '{telnor}', '{empresa}', '{fecha}', '{eta}', '{repartidor}', '{minutos}', '{recibio}', '{fecha_entrega}', '{motivo}', '{link}', '{pdf}'];
 
 async function viewSettings(v) {
   const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'general';
@@ -5557,6 +5575,7 @@ async function viewSettings(v) {
       <label class="switch"><input type="checkbox" name="require_client_confirm" ${s.require_client_confirm !== '0' ? 'checked' : ''} /><span></span><div><b>Confirmar cliente con su número Telnor</b><br><small class="muted">Al entregar, el repartidor escribe los últimos 4 dígitos del número Telnor que le dice el cliente. Si coinciden, la entrega se registra aunque no haya GPS o el pin esté lejos.</small></div></label>
       <h2 style="margin-top:8px">Intentos y jornada</h2>
       <div class="grid g2"><label class="f">Distancia máxima al domicilio para registrar un fallo (m)<input type="number" name="fail_geofence_m" min="50" max="5000" value="${esc(s.fail_geofence_m || '300')}" /><small class="muted">"Cliente ausente", "Rechazado" u "Otro" solo se registran en el domicilio. Con pin aproximado se permiten hasta 2 km.</small></label>
+      <label class="f">Visitas sin entregar para pasar a Seguimiento<input type="number" name="followup_visits" min="0" max="10" value="${esc(s.followup_visits || '3')}" /><small class="muted">Al llegar a este número de visitas el pedido sale de planificación hasta que la oficina verifique cliente y datos. 0 = desactivado.</small></label>
       <label class="f">Tiempo máximo sugerido por ruta (horas)<input type="number" name="workday_h" min="4" max="14" step="0.5" value="${(Number(s.workday_minutes) || 540) / 60}" /><small class="muted">Las rutas que pasen de esto se marcan en rojo al asignar.</small></label></div>
       <h2 style="margin-top:8px">Navegación del repartidor</h2>
       <label class="f">Servidor de rutas (OSRM)<input name="osrm_url" value="${esc(s.osrm_url)}" placeholder="https://router.project-osrm.org" />
@@ -5565,7 +5584,7 @@ async function viewSettings(v) {
     $('#ef').onsubmit = async (e) => {
       e.preventDefault();
       const f = e.target;
-      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', require_client_confirm: f.require_client_confirm.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim(), fail_geofence_m: f.fail_geofence_m.value, workday_minutes: String(Math.round(Number(f.workday_h.value || 9) * 60)) });
+      SETTINGS = await PUT('/api/settings', { require_signature: f.require_signature.checked ? '1' : '0', require_photo: f.require_photo.checked ? '1' : '0', require_client_confirm: f.require_client_confirm.checked ? '1' : '0', osrm_url: f.osrm_url.value.trim(), fail_geofence_m: f.fail_geofence_m.value, followup_visits: String(Math.max(0, Number(f.followup_visits.value) || 0)), workday_minutes: String(Math.round(Number(f.workday_h.value || 9) * 60)) });
       toast('Guardado', 'ok');
     };
   }
@@ -5574,6 +5593,21 @@ async function viewSettings(v) {
     let mx = {};
     try { mx = JSON.parse(it.notif_matrix || '{}'); } catch {}
     const prov = (k) => it[k] || 'simulacion';
+    const pdfDraw = () => {
+      const b = $('#pdfBox'); if (!b) return;
+      b.innerHTML = `<small class="muted">Al registrar una entrega, el cliente lo recibe: por correo como archivo adjunto y por SMS o WhatsApp como enlace (usa <code>{pdf}</code> en el texto para ponerlo donde quieras; si no, va al final).</small>
+        <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">${SETTINGS.delivery_pdf ? `<a class="btn sm" target="_blank" rel="noopener" href="/uploads/${esc(SETTINGS.delivery_pdf)}">📄 ${esc(SETTINGS.delivery_pdf_name || 'Documento')}.pdf</a><button type="button" class="btn sm bad" id="pdfDel">Quitar</button>` : '<small class="muted">Sin PDF anexo.</small>'}
+        <label class="btn sm primary">${SETTINGS.delivery_pdf ? 'Cambiar PDF' : 'Subir PDF'}<input type="file" accept="application/pdf,.pdf" id="pdfFile" hidden /></label></div>`;
+      $('#pdfFile', b).onchange = async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        if (f.size > 8 * 1024 * 1024) return toast('El PDF pasa de 8 MB', 'bad');
+        const data = await new Promise((ok, ko) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = ko; r.readAsDataURL(f); });
+        try { const r = await POST('/api/settings/delivery-pdf', { pdf: String(data).replace(/^data:[^;]*;/, 'data:application/pdf;'), name: f.name }); Object.assign(SETTINGS, r); toast('PDF guardado: se anexará a los avisos de entrega', 'ok'); pdfDraw(); }
+        catch (er) { toast(er.message, 'bad'); }
+      };
+      $('#pdfDel', b)?.addEventListener('click', async () => { if (!(await confirmDlg('¿Quitar el PDF de los avisos de entrega?'))) return; try { await api('DELETE', '/api/settings/delivery-pdf'); SETTINGS.delivery_pdf = ''; SETTINGS.delivery_pdf_name = ''; toast('PDF quitado', 'ok'); pdfDraw(); } catch (er) { toast(er.message, 'bad'); } });
+    };
+    setTimeout(pdfDraw, 0);
     box.innerHTML = `<form id="nf" class="stack">
       <div class="card stack">
         <label class="switch"><input type="checkbox" name="notif_enabled" ${it.notif_enabled === '1' ? 'checked' : ''} /><span></span><div><b>Avisos automáticos activados</b><br><small class="muted">Se envían al registrar el pedido, al cargarlo en la camioneta, cuando el repartidor va en camino, al entregar y si no se pudo entregar.</small></div></label>
@@ -5592,6 +5626,7 @@ async function viewSettings(v) {
       <div class="card stack"><h2>Textos de los mensajes</h2>
         <small class="muted">Variables: ${TPL_VARS.map((x) => `<code>${x}</code>`).join(' ')}</small>
         ${Object.entries(EVENT_LABEL).map(([ev, l]) => `<label class="f">${l}<textarea name="tpl_${ev}" rows="2">${esc(it['tpl_' + ev])}</textarea><small class="muted" data-len="tpl_${ev}"></small></label>`).join('')}
+        <fieldset><legend>${icon('download')} PDF anexo al aviso de entrega</legend><div id="pdfBox"></div></fieldset>
       </div>
       <div class="grid g3 prov">
         <div class="card stack"><h2>${icon('phone')} SMS</h2>
@@ -5882,7 +5917,7 @@ function notifyFromPhone(s, kind, extra = '') {
   if (!driverPhoneDay() || !phone) return Promise.resolve();
   const who = `Hola ${firstName(s.customer_name || '')}, soy ${firstName(store.user.name)} de ${SETTINGS.company_name || 'Sovime Mensajería'}.`;
   const text = kind === 'arriving' ? arrivingText(s)
-    : kind === 'delivered' ? `${who} Su Modem Telnor ${s.tracking_code} quedó entregado. ¡Gracias!${s.public_link ? ' Su comprobante: ' + s.public_link : ''}`
+    : kind === 'delivered' ? `${who} Su Modem Telnor ${s.tracking_code} quedó entregado. ¡Gracias!${s.public_link ? ' Su comprobante: ' + s.public_link : ''}${SETTINGS.delivery_pdf ? ` ${SETTINGS.delivery_pdf_name || 'Documento'}: ${location.origin}/uploads/${SETTINGS.delivery_pdf}` : ''}`
     : `${who} Pasamos a entregar su Modem Telnor ${s.tracking_code} y no fue posible${extra ? ' (' + extra + ')' : ''}. Responda este mensaje para reprogramar la entrega.`;
   return new Promise((done) => {
     const m = modal(kind === 'arriving' ? 'Avisa al cliente que vas llegando' : kind === 'delivered' ? 'Avisa al cliente que ya se entregó' : 'Avisa al cliente que no se pudo entregar', `
@@ -6353,7 +6388,7 @@ async function viewMyRoute(v) {
     <div class="tels">${phonesLine(next)}</div>
     ${geoChk(next.geo_quality) ? `<div style="margin-top:6px">${geoWarn(next.geo_quality)}<br><small class="muted">Al llegar al domicilio toca <b>📍 Estoy aquí</b> para dejar la ubicación correcta.</small> <button class="btn sm" data-here="${next.id}">📍 Estoy aquí</button></div>` : ''}
     ${next.cod_amount ? `<div class="offline-bar" style="margin:8px 0 0">Cobrar ${money(next.cod_amount)}</div>` : ''}
-    <div class="row" style="margin-top:12px"><a class="btn primary lg grow" data-nav="${next.id}" href="#/nav/${next.id}">${icon('nav')} Navegar</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
+    <div class="row" style="margin-top:12px"><a class="btn primary lg grow" data-nav="${next.id}" href="#/nav/${next.id}">${icon('nav')} Navegar${navPref() !== 'app' ? ' · ' + NAV_NAME[navPref()] : ''}</a><a class="btn ok lg" href="#/deliver/${next.id}">${icon('check')} Entregar</a></div>
     ${next.customer_phone ? `<div class="row" style="margin-top:8px;gap:6px"><a class="btn grow" href="tel:${esc(next.customer_phone)}">${icon('phone')} Llamar</a>${smsBtn(next, 'grow')}<a class="btn grow" target="_blank" rel="noopener" href="${esc(waLink(next.customer_phone, arrivingText(next)))}">${icon('chat')} WhatsApp</a></div>` : ''}
   </div>` : `<div class="card empty">${icon('check')}<p><b>¡Ruta terminada!</b><br>No quedan paradas por visitar.</p></div>`}
   <div class="card" style="margin:12px 0">
@@ -6404,7 +6439,7 @@ async function viewMyRoute(v) {
   // Navegar: abre Google Maps (o Waze) directo; "Mapa de la app" usa el navegador interno
   $('#topbar-nav-pref')?.remove();
   $('.topbar .actions', v)?.insertAdjacentHTML('afterbegin', `<label class="row" id="topbar-nav-pref" style="gap:4px" title="Con qué app navegar en este teléfono"><small class="muted">Navegar con</small><select id="navSel" style="width:auto"><option value="google">Google Maps</option><option value="waze">Waze</option>${IS_IOS ? '<option value="apple">Apple Maps</option>' : ''}<option value="app">Mapa de la app</option></select></label>`);
-  if ($('#navSel')) { $('#navSel').value = navPref(); $('#navSel').onchange = (e) => { try { localStorage.setItem('navApp', e.target.value); } catch {} toast(`Navegarás con ${e.target.selectedOptions[0].text}`, 'ok'); }; }
+  if ($('#navSel')) { $('#navSel').value = navPref(); $('#navSel').onchange = (e) => { try { localStorage.setItem('navApp', e.target.value); } catch {} toast(`Navegarás con ${e.target.selectedOptions[0].text}`, 'ok'); render(); }; }
   $$('[data-nav]', v).forEach((a) => (a.onclick = (e) => {
     const app = navPref();
     if (app === 'app') return; // navegador interno
@@ -6472,12 +6507,69 @@ function stepText(st) {
 const stepIcon = (st) => { const md = st.maneuver?.modifier || ''; return st.maneuver?.type === 'arrive' ? '🏁' : md.includes('left') ? '↰' : md.includes('right') ? '↱' : md === 'uturn' ? '⤺' : '↑'; };
 const fmtDist = (m) => (m == null ? '—' : m >= 1000 ? `${fmtN(m / 1000, 1)} km` : `${Math.max(10, Math.round(m / 10) * 10)} m`);
 
+// No entregado rápido (hoja inferior): motivo de un toque; "Cliente ausente" pide haber llamado y la foto de la fachada
+function quickFail(s) {
+  const ICON = { 'Cliente ausente': '🚪', 'Dirección incorrecta': '📍', 'Rechazado por cliente': '✋', 'Zona de riesgo / sin acceso': '⚠️', 'Paquete dañado': '📦', 'Reprogramado por cliente': '📅', 'Otro': '…' };
+  const m = modal('No entregado', `<div class="stack" id="qfBody">
+    <small class="muted">${esc(s.customer_name)} · ${esc(s.tracking_code)}</small>
+    <div class="grid g2" style="gap:8px">${FAIL_REASONS.map((r) => `<button type="button" class="btn lg" data-qr="${esc(r)}" style="height:auto;min-height:56px;white-space:normal;justify-content:flex-start;text-align:left">${ICON[r] || ''} ${esc(r === 'Reprogramado por cliente' ? 'Pidió otro día u hora' : r)}</button>`).join('')}</div>
+    <div id="qfStep" class="stack" hidden></div>
+    <a class="muted" href="#/fail/${s.id}" style="font-size:13px">Más opciones (formulario completo)</a></div>`, { sheet: true });
+  let photo = null, reason = '';
+  const pos = () => (GPS.last && Date.now() - GPS.at < 120000 ? GPS.last : null);
+  const step = $('#qfStep', m.el);
+  const pick = (r) => {
+    reason = r; photo = null;
+    $$('[data-qr]', m.el).forEach((b) => b.classList.toggle('primary', b.dataset.qr === r));
+    const aus = r === 'Cliente ausente', re = r === 'Reprogramado por cliente';
+    step.hidden = false;
+    step.innerHTML = re ? `<div class="grid g2"><label class="f">Nuevo día<input type="date" id="qfDate" min="${today()}" value="${today()}" /></label><label class="f">Hora acordada (opcional)<input type="time" id="qfTime" /></label></div>
+        <small class="muted">No cuenta como entrega fallida. Si es hoy, sigue en tu ruta con esa hora.</small>
+        <button class="btn primary lg block" id="qfGo">📅 Reprogramar</button>`
+      : `${aus ? `<div class="tels">${phonesLine(s)}</div><label style="display:flex;gap:10px;align-items:center;cursor:pointer"><input type="checkbox" id="qfCall" style="width:24px;height:24px" /> <b>Llamé o envié mensaje y no respondió</b></label>` : ''}
+        <label class="btn block ${aus ? 'primary' : ''}">${icon('camera')} ${aus ? 'Foto de la fachada *' : 'Foto (opcional)'}<input type="file" accept="image/*" capture="environment" id="qfPhoto" hidden /></label>
+        <img id="qfPrev" class="photo-prev" hidden alt="Foto" />
+        <input id="qfNotes" placeholder="Comentario (opcional)" autocomplete="off" />
+        <div class="row" style="gap:8px">${aus ? '<button class="btn grow" id="qfLater">🔁 Reintentar más tarde</button>' : ''}<button class="btn bad lg grow" id="qfGo">Registrar no entregado</button></div>`;
+    $('#qfPhoto', step)?.addEventListener('change', async (e) => { const f = e.target.files[0]; if (!f) return; photo = await compressImage(f); $('#qfPrev', step).src = photo; $('#qfPrev', step).hidden = false; });
+    $('#qfLater', step)?.addEventListener('click', async (e) => {
+      e.currentTarget.disabled = true;
+      try { await POST(`/api/orders/${s.id}/retry-later`, { lat: pos()?.lat ?? null, lng: pos()?.lng ?? null }); toast('La parada pasó al final de tu ruta', 'ok'); m.close(); location.hash = '#/my'; }
+      catch (er) { e.currentTarget.disabled = false; toast(er.message, 'bad'); }
+    });
+    $('#qfGo', step).onclick = async (e) => {
+      const btn = e.currentTarget;
+      if (re) {
+        const d = $('#qfDate', step).value; if (!d) return toast('Elige el día', 'bad');
+        btn.disabled = true;
+        try { const x = await POST(`/api/orders/${s.id}/client-reschedule`, { date: d, time: $('#qfTime', step).value }); toast(x.same_day ? 'Hora acordada guardada' : `Reprogramado para el ${d}`, 'ok'); m.close(); location.hash = '#/my'; }
+        catch (er) { btn.disabled = false; toast(er.message, 'bad'); }
+        return;
+      }
+      if (aus && !$('#qfCall', step).checked) return toast('Primero llama o envía mensaje al cliente', 'bad');
+      if (aus && !photo) return toast('Toma la foto de la fachada', 'bad');
+      btn.disabled = true; btn.textContent = 'Registrando…';
+      let p = pos(); if (!p) p = await getPosition(6000);
+      if (!p && !photo) { btn.disabled = false; btn.textContent = 'Registrar no entregado'; return toast('Sin GPS: toma una foto del domicilio para registrar el intento', 'bad'); }
+      const body = { reason, photo, notes: $('#qfNotes', step).value, lat: p?.lat ?? null, lng: p?.lng ?? null, acc: Math.round(p?.acc ?? p?.accuracy ?? 0) || null, contacted: aus || undefined, barcode_verified: false, captured_at: new Date().toISOString() };
+      try {
+        const x = await postOrQueue(`/api/orders/${s.id}/fail`, body, s.tracking_code);
+        m.close();
+        if (!x.queued) { toast('No entregado registrado', 'ok'); await notifyFromPhone(s, 'failed', reason).catch(() => {}); }
+        location.hash = '#/my';
+      } catch (er) { btn.disabled = false; btn.textContent = 'Registrar no entregado'; toast(er.message, 'bad'); }
+    };
+    step.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  $$('[data-qr]', m.el).forEach((b) => (b.onclick = () => pick(b.dataset.qr)));
+}
+
 async function viewNavigate(v, id) {
   const r = await GET('/api/my/route');
   const stops = r?.stops || [];
   const open = stops.filter((s) => ['asignado', 'cargado'].includes(s.status));
   const s = stops.find((x) => String(x.id) === String(id)) || open[0];
-  if (!s || s.lat == null) { v.innerHTML = topbar('Navegación', '<a href="#/my" class="btn sm">Volver</a>') + `<div class="card empty">${s ? `Este cliente no tiene ubicación en el mapa.<br><br><a class="btn primary" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}">${icon('nav')} Ir con Google Maps por dirección</a> <a class="btn" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>` : 'No hay paradas pendientes.'}</div>`; return; }
+  if (!s || s.lat == null) { v.innerHTML = topbar('Navegación', '<a href="#/my" class="btn sm">Volver</a>') + `<div class="card empty">${s ? `Este cliente no tiene ubicación en el mapa.<br><br><button class="btn primary" id="navAddrGo">${icon('nav')} Ir por dirección con ${NAV_NAME[navExt()]}</button> <a class="btn" target="_blank" rel="noopener" href="${esc(navUrl(s, navExt() === 'waze' ? 'google' : 'waze'))}">${navExt() === 'waze' ? 'Google Maps' : 'Waze'}</a>` : 'No hay paradas pendientes.'}</div>`; $('#navAddrGo')?.addEventListener('click', () => openNav(s, navExt())); return; }
   const after = open[open.indexOf(s) + 1];
   const dest = { lat: s.lat, lng: s.lng };
   v.innerHTML = `<div class="nav-wrap">
@@ -6497,9 +6589,9 @@ async function viewNavigate(v, id) {
         ${s.customer_phone_alt ? `<a class="btn lg" href="tel:${esc(s.customer_phone_alt)}" aria-label="Llamar al teléfono adicional" title="Teléfono adicional: ${esc(s.customer_phone_alt)}">${icon('phone')} 2</a>` : ''}
       </div>
       <div class="row" style="margin-top:8px">
-        <a class="btn sm grow primary" data-open-nav="google" target="_blank" rel="noopener" href="${esc(navUrl(s, 'google'))}" title="Con tráfico en tiempo real">${icon('nav')} Google Maps</a>
-        <a class="btn sm grow" data-open-nav="waze" target="_blank" rel="noopener" href="${esc(navUrl(s, 'waze'))}">Waze</a>${IS_IOS ? '<a class="btn sm grow" data-open-nav="apple" href="#">Apple Maps</a>' : ''}
-        <a class="btn sm bad" href="#/fail/${s.id}">No entregado</a>${s.status === 'asignado' ? `<button class="btn sm ghost" data-decline="${s.id}" title="Puedes rechazar un servicio sin ninguna penalización">No tomar este servicio</button>` : ''}</div>
+        ${(() => { const pref = navExt(); const apps = ['google', 'waze', ...(IS_IOS ? ['apple'] : [])].sort((a, b) => (b === pref) - (a === pref));
+          return apps.map((a, i) => `<a class="btn ${i ? 'sm' : 'primary'} grow" data-open-nav="${a}" href="${a === 'apple' ? '#' : esc(navUrl(s, a))}"${a === 'apple' ? '' : ' target="_blank" rel="noopener"'}>${i ? '' : icon('nav') + ' Abrir en '}${NAV_NAME[a]}</a>`).join(''); })()}
+        <button type="button" class="btn sm bad" id="qFail">✕ No entregado</button>${s.status === 'asignado' ? `<button class="btn sm ghost" data-decline="${s.id}" title="Puedes rechazar un servicio sin ninguna penalización">No tomar este servicio</button>` : ''}</div>
       <details class="nav-steps"><summary>Indicaciones paso a paso</summary><ol id="nSteps"><li class="muted">Calculando…</li></ol></details>
       ${after ? `<small class="muted">Después: ${esc(after.customer_name)} · ${esc(after.address)}</small>` : ''}
     </div></div>`;
@@ -6518,6 +6610,7 @@ async function viewNavigate(v, id) {
   let arrived = false;
   let notified = false;
   $$('[data-open-nav]', v).forEach((a) => (a.onclick = (e) => { e.preventDefault(); openNav(s, a.dataset.openNav); }));
+  $('#qFail', v).onclick = () => quickFail(s);
   map.on('dragstart', () => (follow = false));
   $('#recenter').onclick = () => { follow = true; if (me) map.setView([me.lat, me.lng], Math.max(map.getZoom(), 16)); };
   const osrm = (/router\.project-osrm\.org/.test(SETTINGS.osrm_url || '') || !SETTINGS.osrm_url ? 'https://routing.openstreetmap.de/routed-car' : SETTINGS.osrm_url).replace(/\/+$/, '');
@@ -6991,6 +7084,38 @@ function viewNewCustomer(v) {
   }
 }
 
+// Seguimiento: pedidos con varias visitas sin entregar; la oficina verifica cliente y datos y los regresa a planificación
+async function viewFollowup(v) {
+  const rows = await GET('/api/followup');
+  const n = Number(SETTINGS.followup_visits) || 3;
+  v.innerHTML = topbar('Seguimiento', '', `Pedidos con ${n} o más visitas sin entregar. Verifica con el cliente su domicilio y teléfonos, corrige los datos y regrésalo a planificación (o cancélalo). Mientras está aquí no se planifica ni se asigna.`) +
+    (rows.length ? rows.map((o) => `<div class="card" style="margin-bottom:12px" data-fu="${o.id}">
+      <div class="row between" style="align-items:flex-start;gap:10px;flex-wrap:wrap"><div class="grow" style="min-width:220px">
+        <div class="row" style="gap:6px;flex-wrap:wrap"><b style="font-size:17px">${esc(o.customer_name)}</b><span class="chip warn">${o.visits} visitas sin entregar</span>${badge(o.status)}</div>
+        <small class="muted"><span class="mono">${esc(o.tracking_code)}</span>${o.sn_list ? ' · S/N ' + esc(o.sn_list) : ''} · en seguimiento desde ${fmtDT(o.followup_at)}</small>
+        <div style="margin-top:4px">${esc(o.address || '')}${o.customer_colonia ? ', ' + esc(o.customer_colonia) : ''}${o.customer_city ? ', ' + esc(o.customer_city) : ''}</div>
+        ${o.address_reference ? `<small class="muted">${esc(o.address_reference)}</small>` : ''}${geoWarn(o.geo_quality)}
+        <div class="tels">${phonesLine(o)}</div></div>
+        <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-fucust="${o.customer_id}">${icon('edit')} Corregir datos</button><button class="btn sm" data-fuord="${o.id}">Ver pedido</button><button class="btn sm bad" data-fucancel="${o.id}">Cancelar pedido</button><button class="btn sm primary" data-fuok="${o.id}">${icon('check')} Verificado</button></div></div>
+      <div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>Visita</th><th>Repartidor</th><th>Motivo</th><th>Comentario</th><th class="r">Distancia</th><th></th></tr></thead><tbody>
+        ${o.visits_list.map((e) => `<tr><td>${fmtDT(e.created_at)}</td><td>${esc(e.driver || '')}</td><td>${esc(e.reason || '')}</td><td>${esc(e.notes || '')}</td><td class="r">${e.dist != null ? (e.dist >= 1000 ? fmtN(e.dist / 1000, 1) + ' km' : e.dist + ' m') : '—'}</td><td>${e.photo_path ? `<a href="/uploads/${esc(e.photo_path)}" target="_blank" rel="noopener">Foto</a>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('')
+    : '<div class="card empty">No hay pedidos en seguimiento. Aquí llegan los que suman varias visitas sin entregar.</div>');
+  $$('[data-fucust]', v).forEach((b) => (b.onclick = async () => customerForm(await GET('/api/customers/' + b.dataset.fucust), () => render())));
+  $$('[data-fuord]', v).forEach((b) => (b.onclick = () => orderDetail(b.dataset.fuord)));
+  $$('[data-fucancel]', v).forEach((b) => (b.onclick = () => bulkStatus('cancelado', 'orders', [Number(b.dataset.fucancel)], () => render())));
+  $$('[data-fuok]', v).forEach((b) => (b.onclick = () => {
+    const o = rows.find((x) => x.id === Number(b.dataset.fuok));
+    const m = modal(`Verificado · ${o.customer_name}`, `<div class="stack"><label class="f">¿Qué verificaste? *<textarea id="fuNote" placeholder="Ej. Se confirmó domicilio y horario con el cliente; corregí la colonia"></textarea></label>
+      <label class="f">Volver a programar para<input type="date" id="fuDate" value="${today()}" min="${today()}" /></label><small class="muted">Regresa a Rutas como pendiente para asignarlo.</small></div>`,
+      { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="fuGo">Regresar a planificación</button>' });
+    $('#fuGo', m.el).onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try { await POST(`/api/followup/${o.id}/verify`, { note: $('#fuNote', m.el).value, date: $('#fuDate', m.el).value }); toast('Listo: regresó a planificación', 'ok'); m.close(); render(); }
+      catch (er) { toast(er.message, 'bad'); e.currentTarget.disabled = false; }
+    };
+  }));
+}
+
 // ================= Router =================
 // aviso de privacidad, términos o tarifario publicados que la persona aún no acepta: se muestran al entrar
 let legalAsked = 0;
@@ -7025,7 +7150,7 @@ async function render() {
   const driver = driverMode();
   const routes = driver
     ? { profile: viewProfile, check: viewCheck, my: viewMyRoute, nav: (v) => viewNavigate(v, param), load: viewLoad, stock: viewMyStock, scan: viewScan, deliver: (v) => viewDeliver(v, param, 'deliver'), fail: (v) => viewDeliver(v, param, 'fail'), history: viewHistory, liq: viewMySettlement, 'new-customer': viewNewCustomer, receipts: viewReceipts }
-    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settle: viewSettlements, settings: viewSettings };
+    : { profile: viewProfile, guide: viewGuide, activity: viewActivity, compliance: viewCompliance, serials: viewSerials, accounts: viewAccounts, receipts: viewReceipts, followup: viewFollowup, messages: viewMessages, dashboard: viewDashboard, orders: viewOrders, routes: viewRoutes, live: viewLive, offices: (v) => (param ? viewOffice(v, Number(param)) : viewOffices(v)), inventory: viewInventory, customers: viewCustomers, analytics: viewAnalytics, users: viewUsers, hr: viewHR, settle: viewSettlements, settings: viewSettings };
   if (store.user.role !== 'admin') pendingLegal();
   const key = routes[view] ? view : driver ? 'my' : 'dashboard';
   const navKey = ['deliver', 'fail', 'nav', 'check'].includes(key) ? 'my' : key;
