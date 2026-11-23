@@ -4992,7 +4992,7 @@ function roleCards(sel) {
 // ciudades de las oficinas (para el supervisor)
 let OFFICE_CITIES = null;
 async function officeCities() {
-  if (!OFFICE_CITIES) OFFICE_CITIES = (await GET('/api/offices').catch(() => [])).filter((w) => w.active).map((w) => ({ office: w.name, cities: String(w.city || '').split(/[,;/]/).map((c) => c.trim()).filter(Boolean) }));
+  if (!OFFICE_CITIES) OFFICE_CITIES = (await GET('/api/offices').catch(() => [])).filter((w) => w.active).map((w) => ({ id: w.id, is_default: w.is_default, office: w.name, cities: String(w.city || '').split(/[,;/]/).map((c) => c.trim()).filter(Boolean) }));
   return OFFICE_CITIES;
 }
 function supFields(u, offs) {
@@ -5017,7 +5017,8 @@ function userFields(u, offs = [], people = []) {
     ${teamFields(u, people)}
     <div class="grid g2"><label class="f">Nombre completo<input name="name" required value="${esc(u.name)}" autocomplete="off" /></label>
     <label class="f">Correo (usuario para entrar)<input name="email" type="email" required value="${esc(u.email)}" autocomplete="off" /></label></div>
-    <div class="grid g2"><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label><span></span></div>
+    <div class="grid g2"><label class="f">Teléfono<input name="phone" type="tel" value="${esc(u.phone)}" /></label>
+      ${offs.length ? `<label class="f nosup-only">Oficina<select name="office_id">${offs.map((o) => `<option value="${o.id}" ${(u.office_id ? u.office_id === o.id : o.is_default) ? 'selected' : ''}>${esc(o.office)}${o.cities.length ? ' · ' + esc(o.cities.join(', ')) : ''}</option>`).join('')}</select><small class="muted">Ve el inventario, clientes y pedidos de esta oficina.</small></label>` : '<span></span>'}</div>
     <label class="row staff-only" style="gap:8px"><input type="checkbox" name="can_deliver" ${u.can_deliver ? 'checked' : ''} /> <span><b>También reparte</b><br><small class="muted">Supervisor o despachador que además entrega: aparece en las listas de repartidores y puede cambiar a modo repartidor en la app.</small></span></label>
     <fieldset class="driver-only"><legend>${icon('truck')} Datos del vehículo</legend><div class="grid g2">
       <label class="f">Vehículo / placas<input name="vehicle" value="${esc(u.vehicle)}" placeholder="Moto · ABC-123" /></label>
@@ -5033,6 +5034,7 @@ function wireRole(f) {
   const upd = () => {
     const isDrv = f.role.value === 'repartidor';
     $$('.sup-only', f).forEach((x) => (x.hidden = f.role.value !== 'supervisor'));
+    $$('.nosup-only', f).forEach((x) => (x.hidden = f.role.value === 'supervisor'));
     $$('.boss-only', f).forEach((x) => (x.hidden = !['repartidor', 'despachador'].includes(f.role.value)));
     if ($('#teamQ', f)) $('#teamQ', f).oninput = (e) => { const q = e.target.value.toLowerCase(); $$('#teamL [data-tn]', f).forEach((l) => (l.hidden = q && !l.dataset.tn.includes(q))); };
     const d = isDrv || !!f.can_deliver?.checked;

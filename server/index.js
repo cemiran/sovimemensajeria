@@ -252,6 +252,13 @@ app.get(
 );
 
 // Rol "supervisor": despachador limitado a sus ciudades; todas deben ser de la misma oficina
+// oficina elegida al dar de alta o editar (para el supervisor la definen sus ciudades)
+function pickOffice(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const w = db.prepare('SELECT id FROM warehouses WHERE id = ? AND active = 1').get(Number(v));
+  if (!w) throw new HttpError(400, 'Esa oficina no existe o está inactiva');
+  return w.id;
+}
 function supCities(b) {
   if (b.role !== 'supervisor') return undefined;
   const list = [...new Set([].concat(b.cities || []).flatMap((x) => String(x).split(',')).map((x) => canonCity(x.trim())).filter(Boolean))];
@@ -296,6 +303,7 @@ function activeAdmins(exceptId) {
 }
 function createUser(b) {
   const sup = supCities(b);
+  const off = sup ? undefined : pickOffice(b.office_id);
   validateUser(b, true);
   const pwd = b.password || tempPassword();
   try {
@@ -312,6 +320,7 @@ function createUser(b) {
     if (cd) db.prepare('UPDATE users SET can_deliver=1 WHERE id=?').run(Number(r.lastInsertRowid));
     if (b.route_mode === 'dia') db.prepare("UPDATE users SET route_mode='dia' WHERE id=?").run(Number(r.lastInsertRowid));
     if (sup) db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, Number(r.lastInsertRowid));
+    else if (off) db.prepare('UPDATE users SET office_id=? WHERE id=?').run(off, Number(r.lastInsertRowid));
     saveTeam(Number(r.lastInsertRowid), b, null);
     return { id: Number(r.lastInsertRowid), temp_password: b.password ? null : pwd };
   } catch (e) {
@@ -324,7 +333,7 @@ app.post(
   auth('admin'),
   wrap((req, res) => {
     const r = createUser(req.body || {});
-    audit(req, 'usuario.alta', `${req.body.email} (${req.body.cities ? 'supervisor de ' + [].concat(req.body.cities).join(', ') : req.body.role})`);
+    audit(req, 'usuario.alta', `${req.body.email} (${req.body.cities?.length ? 'supervisor de ' + [].concat(req.body.cities).join(', ') : req.body.role}${!req.body.cities?.length && req.body.office_id ? ' · ' + (db.prepare('SELECT name FROM warehouses WHERE id=?').get(Number(req.body.office_id))?.name || '') : ''})`);
     res.status(201).json(r);
   })
 );
@@ -375,6 +384,12 @@ app.put(
         db.prepare('UPDATE users SET cities=?, office_id=? WHERE id=?').run(sup.cities, sup.office, u.id);
         audit(req, 'usuario.supervisor', `${u.name}: supervisor de ${sup.cities}`);
       } else if (!sup && req.body.role && u.cities) db.prepare('UPDATE users SET cities=NULL WHERE id=?').run(u.id);
+      const off = sup ? undefined : pickOffice(req.body.office_id);
+      if (off && off !== u.office_id) {
+        db.prepare('UPDATE users SET office_id=? WHERE id=?').run(off, u.id);
+        db.prepare('UPDATE warehouses SET supervisor_id=NULL WHERE supervisor_id=? AND id<>?').run(u.id, off);
+        audit(req, 'oficina.personal', `${u.name} → ${db.prepare('SELECT name FROM warehouses WHERE id=?').get(off).name}`);
+      }
       saveTeam(u.id, { reports_to: req.body.reports_to, team: sup ? req.body.team : u.cities && req.body.role ? [] : undefined }, req);
       if (req.body.can_deliver !== undefined || b.role === 'repartidor')
         db.prepare('UPDATE users SET can_deliver=? WHERE id=?').run(b.role !== 'repartidor' && [true, 1, '1', 'on', 'true'].includes(req.body.can_deliver) ? 1 : 0, u.id);
