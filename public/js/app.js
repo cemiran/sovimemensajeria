@@ -3313,11 +3313,17 @@ async function viewOffice(v, id) {
   }
 
   if (tab === 'per') {
-    body.innerHTML = `<div class="card"><div class="row between"><h2>Personal de la oficina</h2>${admin ? `<button class="btn primary" id="ofAddP">${icon('plus')} Asignar personal</button>` : ''}</div>
-      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Puesto</th><th>Teléfono</th><th>Vehículo</th><th class="r">Trae (unidades)</th></tr></thead><tbody>
-      ${o.staff.map((u) => `<tr><td><b>${esc(u.name)}</b>${u.id === o.supervisor_id ? ' <span class="chip ok">Supervisor operativo</span>' : ''}${u.office_id ? '' : ' <small class="muted">(sin oficina: principal)</small>'}</td><td>${esc(ROLE[u.role] || u.role)}</td><td>${esc(u.phone || '')}</td><td>${esc(u.vehicle || '')}</td><td class="r num">${u.holding || ''}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Sin personal asignado.</td></tr>'}
+    body.innerHTML = `<div class="card"><div class="row between"><h2>Personal de la oficina</h2>${admin ? `<span class="row" style="gap:6px">${others.length ? `<button class="btn" id="ofDelP" disabled>${icon('x')} Quitar seleccionados</button>` : ''}<button class="btn primary" id="ofAddP">${icon('plus')} Asignar personal</button></span>` : ''}</div>
+      <div class="table-wrap"><table><thead><tr>${admin && others.length ? '<th style="width:30px"><input type="checkbox" id="ofPAll" /></th>' : ''}<th>Nombre</th><th>Puesto</th><th>Teléfono</th><th>Vehículo</th><th class="r">Trae (unidades)</th>${admin && others.length ? '<th></th>' : ''}</tr></thead><tbody>
+      ${o.staff.map((u) => `<tr>${admin && others.length ? `<td><input type="checkbox" data-qp="${u.id}" /></td>` : ''}<td><b>${esc(u.name)}</b>${u.id === o.supervisor_id ? ' <span class="chip ok">Supervisor operativo</span>' : ''}${u.office_id ? '' : ' <small class="muted">(sin oficina: principal)</small>'}</td><td>${esc(ROLE[u.role] || u.role)}</td><td>${esc(u.phone || '')}</td><td>${esc(u.vehicle || '')}</td><td class="r num">${u.holding || ''}</td>${admin && others.length ? `<td class="r"><button class="btn sm" data-qp1="${u.id}">Quitar</button></td>` : ''}</tr>`).join('') || '<tr><td colspan="7" class="muted">Sin personal asignado.</td></tr>'}
       </tbody></table></div></div>`;
     $('#ofAddP')?.addEventListener('click', () => officeAssignStaff(o));
+    const qSel = () => $$('[data-qp]:checked', body).map((c) => Number(c.dataset.qp));
+    const qUpd = () => { const n = qSel().length; const b = $('#ofDelP', body); if (b) { b.disabled = !n; b.innerHTML = `${icon('x')} Quitar ${n ? n + ' ' : ''}seleccionados`; } };
+    $$('[data-qp]', body).forEach((c) => (c.onchange = qUpd));
+    $('#ofPAll', body)?.addEventListener('change', (e) => { $$('[data-qp]', body).forEach((c) => (c.checked = e.target.checked)); qUpd(); });
+    $('#ofDelP', body)?.addEventListener('click', () => officeRemoveStaff(o, others, qSel()));
+    $$('[data-qp1]', body).forEach((b) => (b.onclick = () => officeRemoveStaff(o, others, [Number(b.dataset.qp1)])));
   }
 }
 
@@ -3359,6 +3365,31 @@ function officeMoveCustomers(o) {
     btn.disabled = true;
     try { const r = await POST(`/api/offices/${o.id}/customers`, { ids: [...picked] }); toast(`${r.moved} clientes pasados a ${o.name}`, 'ok'); m.close(); render(); }
     catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
+  };
+}
+
+// Quitar personal de la oficina: pasa a otra oficina (nadie queda sin oficina)
+function officeRemoveStaff(o, others, ids) {
+  if (!ids.length) return toast('Marca al personal', 'bad');
+  const ppl = o.staff.filter((u) => ids.includes(u.id));
+  const sup = ppl.find((u) => u.id === o.supervisor_id);
+  const held = ppl.filter((u) => Number(u.holding) > 0);
+  const def = others.find((w) => w.is_default) || others[0];
+  const m = modal(ppl.length === 1 ? `Quitar a ${ppl[0].name} de ${o.name}` : `Quitar ${ppl.length} personas de ${o.name}`, `<div class="stack">
+    ${ppl.length > 1 ? `<small class="muted">${ppl.map((u) => esc(u.name)).join(', ')}</small>` : ''}
+    <label class="f">¿A qué oficina pasa${ppl.length > 1 ? 'n' : ''}?<select id="qpTo">${others.map((w) => `<option value="${w.id}" ${w.id === def.id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></label>
+    ${sup ? `<div class="offline-bar" style="margin:0">${esc(sup.name)} es el supervisor operativo de esta oficina: dejará de serlo.</div>` : ''}
+    ${held.length ? `<div class="offline-bar" style="margin:0">${held.map((u) => `${esc(u.name)} trae ${u.holding} unidad(es)`).join('; ')}: el inventario que trae pasa con él/ella a la otra oficina. Si debe quedarse aquí, regrésalo al almacén antes.</div>` : ''}
+    <small class="muted">Su usuario, su equipo (célula) y su historial no cambian.</small></div>`,
+    { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="qpGo">Quitar de esta oficina</button>' });
+  $('#qpGo', m.el).onclick = async (e) => {
+    const btn = e.currentTarget; btn.disabled = true;
+    const to = Number($('#qpTo', m.el).value);
+    try {
+      if (sup) await PUT(`/api/offices/${o.id}/supervisor`, { user_id: null });
+      const r = await POST(`/api/offices/${to}/staff`, { ids, from: o.id });
+      toast(`${r.moved} persona(s) pasaron a ${others.find((w) => w.id === to)?.name || 'otra oficina'}`, 'ok'); m.close(); render();
+    } catch (er) { toast(er.message, 'bad'); btn.disabled = false; }
   };
 }
 

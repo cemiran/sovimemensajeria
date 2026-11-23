@@ -3134,8 +3134,10 @@ app.post('/api/offices/:id/staff', auth(...STAFF), wrap((req, res) => {
   if (!ids.length) throw new HttpError(400, 'Elige al personal');
   const up = db.prepare('UPDATE users SET office_id = ? WHERE id = ?');
   let n = 0;
-  tx(() => { for (const id of ids) n += Number(up.run(w.id, id).changes); });
-  audit(req, 'oficina.personal', `${n} personas → ${w.name}`);
+  // quien supervisaba otra oficina deja de hacerlo al cambiarse
+  const unsup = db.prepare('UPDATE warehouses SET supervisor_id = NULL WHERE supervisor_id = ? AND id <> ?');
+  tx(() => { for (const id of ids) { n += Number(up.run(w.id, id).changes); unsup.run(id, w.id); } });
+  audit(req, 'oficina.personal', `${n} personas → ${w.name}${req.body?.from ? ' (quitadas de ' + (db.prepare('SELECT name FROM warehouses WHERE id=?').get(Number(req.body.from))?.name || '') + ')' : ''}`);
   res.json({ moved: n });
 }));
 app.post(
