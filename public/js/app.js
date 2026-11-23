@@ -3682,8 +3682,17 @@ async function exportAssignedExcel(date, driverId) {
       const ws = X.utils.aoa_to_sheet(rows);
       ws['!cols'] = [{ wch: 26 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 13 }, { wch: 18 }];
       X.utils.book_append_sheet(wb, ws, 'Resumen');
+      // todas las paradas de todos los repartidores en una sola tabla (con filtros)
+      const head = ['Repartidor', 'Vehículo', '#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas'];
+      const all = [head];
+      for (const d of list) d.orders.forEach((o, i) => all.push([d.name, d.vehicle || '', o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.telnor || '', o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
+        o.appointment_time ? `${o.appointment_time} (acordada)` : o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '']));
+      const wl = X.utils.aoa_to_sheet(all);
+      wl['!cols'] = [{ wch: 26 }, { wch: 14 }, { wch: 5 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }];
+      wl['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: all.length - 1, c: head.length - 1 } }) };
+      X.utils.book_append_sheet(wb, wl, 'Listado completo');
     }
-    const used = new Set(['Resumen']);
+    const used = new Set(['Resumen', 'Listado completo']);
     for (const d of list) {
       const rows = [[`${company} · Hoja de ruta y carga`], [`Repartidor: ${d.name}`, '', `Vehículo: ${d.vehicle || '—'}`], [`Fecha: ${fecha}`, '', `Pedidos: ${d.orders.length}`], [],
         ['#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
