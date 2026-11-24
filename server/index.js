@@ -5300,6 +5300,30 @@ app.post(
   })
 );
 // Planificación automática: reparte todos los pendientes del día entre los repartidores elegidos
+// Tablero de repartidores para asignar: oficina, carga del día y productividad de los últimos 14 días
+app.get('/api/drivers/board', auth(...STAFF), wrap((req, res) => {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
+  const from = new Date(Date.now() - 13 * 864e5).toLocaleDateString('en-CA');
+  const [uf, ut] = utcRange(from, today());
+  const rows = db.prepare(`SELECT u.id, u.name, u.vehicle, u.capacity, u.home_lat IS NOT NULL has_home, u.role, w.id office_id, w.name office_name,
+      (SELECT name FROM users b WHERE b.id = u.reports_to) cell_name,
+      (SELECT COUNT(*) FROM orders o JOIN routes r ON r.id = o.route_id WHERE r.driver_id = u.id AND r.date = ? AND o.status IN ('asignado','cargado')) load,
+      (SELECT COUNT(*) FROM evidences e WHERE e.driver_id = u.id AND e.result = 'entregado' AND e.created_at >= ? AND e.created_at < ?) delivered,
+      (SELECT COUNT(*) FROM evidences e WHERE e.driver_id = u.id AND e.result = 'fallido' AND e.created_at >= ? AND e.created_at < ?) failed,
+      (SELECT COUNT(DISTINCT date(e.created_at, 'localtime')) FROM evidences e WHERE e.driver_id = u.id AND e.result = 'entregado' AND e.created_at >= ? AND e.created_at < ?) days,
+      (SELECT COUNT(*) FROM evidences e WHERE e.driver_id = u.id AND e.result = 'entregado' AND date(e.created_at, 'localtime') = ?) today_delivered
+    FROM users u LEFT JOIN warehouses w ON w.id = ${OFFICE_OF('u')}
+    WHERE (u.role = 'repartidor' OR u.can_deliver = 1) AND u.active = 1 AND u.deleted_at IS NULL AND u.suspended_reason IS NULL ${inOffice(req, 'u')}
+    ORDER BY u.name`).all(date, uf, ut, uf, ut, uf, ut, today());
+  for (const d of rows) {
+    d.capacity = Number(d.capacity) || 30;
+    d.success = d.delivered + d.failed ? Math.round((d.delivered / (d.delivered + d.failed)) * 100) : null;
+    d.per_day = d.days ? Math.round((d.delivered / d.days) * 10) / 10 : 0;
+    // puntaje: entregas por día trabajado, ajustado por efectividad (sin historial = neutral)
+    d.score = Math.round(d.per_day * ((d.success ?? 80) / 100) * 10) / 10;
+  }
+  res.json({ date, rows });
+}));
 app.post(
   '/api/routes/auto',
   auth(...STAFF),

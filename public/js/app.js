@@ -2721,6 +2721,54 @@ function geoPickWire(v, onPick) {
   });
 }
 
+// Selector visual de repartidor: filtro por oficina, carga del día contra su capacidad y productividad (14 días)
+async function driverPicker({ date = today(), need = 0, title = 'Elegir repartidor', multi = false, preselect = [] } = {}) {
+  const { rows } = await GET('/api/drivers/board?date=' + date);
+  const offices = [...new Map(rows.map((d) => [d.office_id, d.office_name || 'Sin oficina'])).entries()];
+  const st = (() => { try { return JSON.parse(localStorage.getItem('dpick') || '{}'); } catch { return {}; } })();
+  let off = st.off && offices.some(([id]) => String(id) === String(st.off)) ? st.off : '', sort = st.sort || 'score', q = '';
+  const sel = new Set(preselect.map(Number));
+  const maxScore = Math.max(1, ...rows.map((d) => d.score));
+  return new Promise((done) => {
+    const m = modal(title, `<div class="stack">
+      <div class="row" style="gap:6px;flex-wrap:wrap" id="dpOff"><button class="btn sm" data-off="">Todas (${rows.length})</button>${offices.map(([id, n]) => `<button class="btn sm" data-off="${id}">${esc(n)} (${rows.filter((d) => d.office_id === id).length})</button>`).join('')}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap"><input id="dpQ" class="grow" placeholder="Buscar repartidor…" autocomplete="off" style="min-width:160px" />
+        <select id="dpSort" style="width:auto"><option value="score">Más productivos</option><option value="free">Más espacio libre</option><option value="success">Mejor efectividad</option><option value="name">Nombre</option></select></div>
+      ${need ? `<small class="muted">Vas a asignar <b>${need}</b> pedido(s) para el <b>${esc(date)}</b>. La barra muestra su carga de ese día y cómo quedaría.</small>` : ''}
+      <div id="dpList" class="dp-grid"></div></div>`,
+      { wide: true, footer: multi ? '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="dpOk">Usar seleccionados</button>' : '<button class="btn" data-close>Cancelar</button>', onClose: () => done(null) });
+    const draw = () => {
+      $$('#dpOff [data-off]', m.el).forEach((b) => b.classList.toggle('primary', String(b.dataset.off) === String(off)));
+      let list = rows.filter((d) => (!off || String(d.office_id) === String(off)) && (!q || d.name.toLowerCase().includes(q)));
+      const free = (d) => d.capacity - d.load;
+      list.sort(sort === 'name' ? (a, b) => a.name.localeCompare(b.name) : sort === 'free' ? (a, b) => free(b) - free(a) : sort === 'success' ? (a, b) => (b.success ?? -1) - (a.success ?? -1) : (a, b) => b.score - a.score || free(b) - free(a));
+      $('#dpList', m.el).innerHTML = list.map((d) => {
+        const after = d.load + need, pctNow = Math.min(100, (d.load / d.capacity) * 100), pctAdd = Math.min(100 - pctNow, (need / d.capacity) * 100);
+        const over = after > d.capacity;
+        const sc = d.success == null ? 'muted' : d.success >= 90 ? 'ok' : d.success >= 75 ? 'warn' : 'bad';
+        return `<button type="button" class="dp-card${sel.has(d.id) ? ' on' : ''}" data-dp="${d.id}">
+          <div class="row between" style="gap:6px"><b class="grow" style="text-align:left">${multi ? `<input type="checkbox" ${sel.has(d.id) ? 'checked' : ''} tabindex="-1" /> ` : ''}${esc(d.name)}${d.has_home ? ' 🏠' : ''}</b><span class="chip">${esc(d.office_name || '')}</span></div>
+          <small class="muted" style="text-align:left">${esc(d.vehicle || '')}${d.cell_name ? ' · célula ' + esc(d.cell_name) : ''}</small>
+          <div class="dp-bar" title="Carga del día"><i style="width:${pctNow}%"></i><i class="add${over ? ' over' : ''}" style="width:${pctAdd}%"></i></div>
+          <div class="row between" style="font-size:12.5px"><span>${d.load}${need ? ` → <b style="color:var(--${over ? 'bad' : 'ok'})">${after}</b>` : ''} / ${d.capacity}${over ? ' <b style="color:var(--bad)">pasa su capacidad</b>' : ''}</span><span class="muted">hoy ${d.today_delivered} ✓</span></div>
+          <div class="dp-stats"><span title="Entregas por día trabajado (14 días)"><b>${fmtN(d.per_day, 1)}</b><small>por día</small></span><span title="Entregados / (entregados + no entregados), 14 días" class="${sc}"><b>${d.success == null ? '—' : d.success + '%'}</b><small>efectividad</small></span><span title="Entregas en 14 días"><b>${d.delivered}</b><small>14 días</small></span>
+            <span title="Productividad" style="flex:1.4"><span class="dp-score"><i style="width:${(d.score / maxScore) * 100}%"></i></span><small>productividad</small></span></div></button>`;
+      }).join('') || '<p class="muted">Sin repartidores con ese filtro.</p>';
+      $$('[data-dp]', m.el).forEach((b) => (b.onclick = () => {
+        const d = rows.find((x) => x.id === Number(b.dataset.dp));
+        if (!multi) { m.el.remove(); done(d); return; }
+        sel.has(d.id) ? sel.delete(d.id) : sel.add(d.id); draw();
+      }));
+      try { localStorage.setItem('dpick', JSON.stringify({ off, sort })); } catch {}
+    };
+    $$('#dpOff [data-off]', m.el).forEach((b) => (b.onclick = () => { off = b.dataset.off; draw(); }));
+    $('#dpSort', m.el).value = sort; $('#dpSort', m.el).onchange = (e) => { sort = e.target.value; draw(); };
+    $('#dpQ', m.el).oninput = (e) => { q = e.target.value.trim().toLowerCase(); draw(); };
+    $('#dpOk', m.el)?.addEventListener('click', () => { m.el.remove(); done(rows.filter((d) => sel.has(d.id))); });
+    draw();
+  });
+}
+
 async function bulkAssign(v, kind) {
   const boxes = () => $$(`[data-sel]`, v).filter((c) => !c.disabled);
   const picked = () => boxes().filter((c) => c.checked).map((c) => Number(c.dataset.sel));
@@ -2740,7 +2788,7 @@ async function bulkAssign(v, kind) {
     }
     const prev = { d: $('#bkDrv', bar)?.value, f: $('#bkDate', bar)?.value, multi: $('#bkMulti', bar)?.checked, t: $('#bkTo', bar)?.value, pd: $('#bkPer', bar)?.value, sun: $('#bkSun', bar)?.checked ?? true };
     bar.innerHTML = `<b>${ids.length} ${kind === 'customers' ? 'cliente' : 'pedido'}${ids.length === 1 ? '' : 's'}</b>
-      <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select>
+      <select id="bkDrv"><option value="">Asignar a…</option>${drivers.map((d) => `<option value="${d.id}">${esc(d.name)}${d.vehicle ? ' · ' + esc(d.vehicle) : ''}</option>`).join('')}</select><button type="button" class="btn" id="bkPick" title="Elegir por oficina, carga y productividad">${icon('users')} Elegir</button>
       <input type="date" id="bkDate" value="${prev.f || today()}" title="Fecha de la ruta (o inicio del rango)" />
       <label class="row" style="gap:4px" title="Reparte los pedidos en varios días, por zonas cercanas"><input type="checkbox" id="bkMulti" ${prev.multi ? 'checked' : ''} /> Varios días</label>
       <span id="bkRange" class="row" style="gap:6px" ${prev.multi ? '' : 'hidden'}><small>hasta</small><input type="date" id="bkTo" value="${prev.t || (() => { const d = new Date(); d.setDate(d.getDate() + 4); return d.toLocaleDateString('en-CA'); })()}" />
@@ -2754,6 +2802,7 @@ async function bulkAssign(v, kind) {
       <button class="btn" id="bkStGo">Aplicar</button>
       <button class="btn ghost" id="bkClr">Quitar selección</button>`;
     $('#bkStGo', bar).onclick = () => bulkStatus($('#bkSt', bar).value, kind, picked());
+    $('#bkPick', bar).onclick = async () => { const d = await driverPicker({ date: $('#bkDate', bar).value || today(), need: ids.length, title: `Asignar ${ids.length} pedido(s) a…` }); if (!d) return; const s2 = $('#bkDrv', bar); if (![...s2.options].some((o) => o.value === String(d.id))) s2.insertAdjacentHTML('beforeend', `<option value="${d.id}">${esc(d.name)}</option>`); s2.value = String(d.id); s2.dispatchEvent(new Event('change')); toast(`${d.name}: toca Asignar para confirmar`, ''); };
     // rutas abiertas de hoy (y futuras): agregar lo marcado a la ruta de ese repartidor
     if ($('#bkRoute', bar)) {
       const rsel = $('#bkRoute', bar);
@@ -3037,6 +3086,7 @@ function mapSelection(v, map, pins, drivers, date, routes = []) {
     const from = [...new Set(list.map((p) => p.s.driver_name || 'sin ruta'))];
     bar.innerHTML = `<b>${sel.size} entrega${sel.size === 1 ? '' : 's'}</b><small class="muted">${esc(from.join(', '))}</small>
       <select id="msDrv"><option value="">Asignar a…</option>${act.map((d) => { const l = load(d); const over = l.stops + sel.size > (d.capacity || 30) || l.min > work; return `<option value="${d.id}">${over ? '⚠ ' : ''}${esc(d.name)} · ${loadTxt(d)}</option>`; }).join('')}</select>
+      <button type="button" class="btn" id="msPick" title="Elegir por oficina, carga y productividad">${icon('users')} Elegir</button>
       <input type="date" id="msDate" value="${prev.f || date}" />
       <button class="btn primary" id="msGo">${icon('route')} Asignar y optimizar</button>
       <button class="btn" id="msSplit" title="Reparte lo marcado entre varios repartidores en zonas compactas y parejas">${icon('users')} Repartir entre varios</button>
@@ -3044,9 +3094,14 @@ function mapSelection(v, map, pins, drivers, date, routes = []) {
     if (prev.d) $('#msDrv', bar).value = prev.d;
     const warn = () => { const d = act.find((x) => String(x.id) === $('#msDrv', bar).value); if (!d) return ($('#msWarn', bar).textContent = ''); const l = load(d); const tot = l.stops + sel.size; $('#msWarn', bar).innerHTML = `${esc(d.name)} quedaría con <b>${tot}</b> de ${d.capacity || 30}${tot > (d.capacity || 30) ? ' <b style="color:var(--bad)">· pasa su capacidad</b>' : ''}`; };
     $('#msDrv', bar).onchange = warn; warn();
-    $('#msSplit', bar).onclick = () => {
+    $('#msPick', bar).onclick = async () => { const d = await driverPicker({ date: $('#msDate', bar).value || date, need: sel.size, title: `Asignar ${sel.size} entrega(s) a…` }); if (!d) return; const s2 = $('#msDrv', bar); if (![...s2.options].some((o) => o.value === String(d.id))) s2.insertAdjacentHTML('beforeend', `<option value="${d.id}">${esc(d.name)}</option>`); s2.value = String(d.id); warn(); };
+    $('#msSplit', bar).onclick = async () => {
+      // primero se eligen visualmente (oficina, carga, productividad); luego se confirma la fecha
+      const chosen = await driverPicker({ date: $('#msDate', bar).value || date, need: Math.ceil(sel.size / 2), title: `Repartir ${sel.size} entregas: elige repartidores`, multi: true });
+      if (!chosen) return;
+      const pre = new Set(chosen.map((d) => d.id));
       const m2 = modal(`Repartir ${sel.size} entregas entre varios`, `<p class="muted" style="margin-top:0">Se forman zonas compactas (pedidos cercanos entre sí), una por repartidor, en proporción a lo que le queda de capacidad. Cada ruta se optimiza sola.</p>
-        <div class="stack" style="max-height:50vh;overflow:auto">${act.map((d) => `<label class="row" style="gap:8px"><input type="checkbox" value="${d.id}" /> <span class="grow">${esc(d.name)}</span><small class="muted">${loadTxt(d)}</small></label>`).join('')}</div>
+        <div class="stack" style="max-height:50vh;overflow:auto">${act.map((d) => `<label class="row" style="gap:8px"><input type="checkbox" value="${d.id}" ${pre.has(d.id) ? 'checked' : ''} /> <span class="grow">${esc(d.name)}</span><small class="muted">${loadTxt(d)}</small></label>`).join('')}</div>
         <label class="f" style="margin-top:8px">Fecha<input type="date" id="spD" value="${$('#msDate', bar).value || date}" /></label>`,
         { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="spGo">Repartir y optimizar</button>' });
       $('#spGo', m2.el).onclick = async (e2) => {
