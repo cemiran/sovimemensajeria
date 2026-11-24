@@ -173,7 +173,7 @@ function tempPassword() {
 // Sesión de 30 días que se renueva sola mientras se usa (el repartidor no vuelve a entrar a media ruta).
 // Se cierra de inmediato si se desactiva el usuario o se cambia su contraseña (token_version).
 const signToken = (u) => jwt.sign({ sub: u.id, role: u.role, tv: u.token_version || 0 }, JWT_SECRET, { expiresIn: '30d' });
-const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, cities, last_login, must_change_password, created_at';
+const ME_FIELDS = 'id, name, email, role, phone, vehicle, capacity, can_deliver, cities, last_login, must_change_password, created_at, home_lat, home_lng, home_address';
 
 app.post(
   '/api/auth/login',
@@ -191,6 +191,20 @@ app.post(
   })
 );
 app.get('/api/me', auth(), (req, res) => res.json(db.prepare(`SELECT ${ME_FIELDS} FROM users WHERE id=?`).get(req.user.id)));
+// domicilio (punto de salida de sus rutas): lo guarda el propio repartidor con su GPS o la oficina en el mapa
+function saveHome(uid, b) {
+  if (b?.clear) { db.prepare('UPDATE users SET home_lat=NULL, home_lng=NULL, home_address=NULL WHERE id=?').run(uid); return; }
+  const lat = Number(b?.lat), lng = Number(b?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) throw new HttpError(400, 'Ubicación inválida');
+  db.prepare('UPDATE users SET home_lat=?, home_lng=?, home_address=COALESCE(?, home_address) WHERE id=?').run(lat, lng, b.address ? String(b.address).trim().slice(0, 200) : null, uid);
+}
+app.put('/api/me/home', auth(), wrap((req, res) => { saveHome(req.user.id, req.body); audit(req, 'usuario.domicilio', req.body?.clear ? 'quitado' : 'guardado con GPS'); res.json({ ok: true }); }));
+app.put('/api/users/:id/home', auth(...STAFF), wrap((req, res) => {
+  const u = db.prepare('SELECT id, name, office_id FROM users WHERE id=?').get(req.params.id);
+  if (!u) throw new HttpError(404, 'No encontrado');
+  if (req.user.role !== 'admin' && req.user.office && (u.office_id || db.prepare('SELECT id FROM warehouses WHERE is_default=1').get()?.id) !== req.user.office && !(req.user.team || []).includes(u.id)) throw new HttpError(403, 'Es de otra oficina');
+  saveHome(u.id, req.body); audit(req, 'usuario.domicilio', `${u.name}: ${req.body?.clear ? 'quitado' : 'guardado'}`); res.json({ ok: true });
+}));
 app.put(
   '/api/me',
   auth(),
@@ -223,7 +237,7 @@ app.post(
 // ---------- Usuarios (administración) ----------
 const USER_FIELDS = `u.id, u.name, u.email, u.role, u.phone, u.vehicle, u.capacity, u.can_deliver, u.active, u.notes, u.route_mode, u.cities, u.office_id, u.reports_to, u.suspended_reason,
   (SELECT s2.name FROM users s2 WHERE s2.id = u.reports_to) reports_to_name, (SELECT COUNT(*) FROM users t WHERE t.reports_to = u.id AND t.active = 1 AND t.deleted_at IS NULL) team_size,
-  u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at`;
+  u.last_lat, u.last_lng, u.last_seen, u.last_login, u.must_change_password, u.created_at, u.home_lat, u.home_lng, u.home_address`;
 
 app.get(
   '/api/users',
@@ -5047,7 +5061,8 @@ function assignOrdersTo(req, drv, ids, date, opts = {}) {
       const r = db.prepare("SELECT * FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(drv.id, date);
       const keep = r ? db.prepare("SELECT id FROM orders WHERE route_id=? AND status IN ('asignado','cargado')").all(r.id).map((x) => x.id) : [];
       const done = r ? db.prepare("SELECT COUNT(*) c FROM orders WHERE route_id=? AND status IN ('entregado','fallido')").get(r.id).c : 0;
-      const out = persistRoute({ routeId: r?.id, name: `Ruta ${drv.name} ${date}`, driverId: drv.id, date, depot: r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}, drv.id), orderIds: [...keep, ...take.map((o) => o.id)], settings: s });
+      const out = persistRoute({ routeId: r?.id, name: `Ruta ${drv.name} ${date}`, driverId: drv.id, date, depot: opts.depot || (r ? { lat: r.depot_lat, lng: r.depot_lng } : depotOf(s, {}, drv.id)), orderIds: [...keep, ...take.map((o) => o.id)], settings: s });
+      if (opts.depot) db.prepare('UPDATE routes SET depot_lat=?, depot_lng=? WHERE id=?').run(opts.depot.lat, opts.depot.lng, out.route_id);
       if (done) db.prepare('UPDATE orders SET stop_seq = stop_seq + ? WHERE route_id=? AND status IN (\'asignado\',\'cargado\') AND stop_seq < 999').run(done, out.route_id);
       // rutas de origen: se recalculan o se eliminan si quedaron vacías
       for (const rid of fromRoutes.filter((x) => x !== out.route_id)) {
@@ -5328,14 +5343,31 @@ app.post(
       const zones = balancedZones(located, caps);
       const placed = new Set(zones.flat().map((o) => o.id));
       let k = 0;
-      for (const [zi, d] of team.entries()) {
+      // salida: almacén de la ciudad (como siempre) o el domicilio de cada repartidor (si no lo tiene, su almacén)
+      const home = req.body.start === 'domicilio';
+      const startOf = (d) => { const h = home ? db.prepare('SELECT home_lat lat, home_lng lng FROM users WHERE id=? AND home_lat IS NOT NULL').get(d.id) : null; return h ? { ...h, home: true } : depotOf(s, {}, d.id); };
+      let order = team.map((d, i) => [d, i]);
+      if (home) {
+        // se empareja cada zona con el repartidor cuyo domicilio queda más cerca (sin pasar su cupo)
+        const cen = zones.map((z) => (z.length ? { lat: z.reduce((a, o) => a + o.lat, 0) / z.length, lng: z.reduce((a, o) => a + o.lng, 0) / z.length } : null));
+        const st = team.map(startOf);
+        const pairs = [];
+        for (let zi = 0; zi < zones.length; zi++) if (cen[zi]) for (let di = 0; di < team.length; di++) if (zones[zi].length <= caps0[di]) pairs.push([haversine(cen[zi], st[di]), zi, di]);
+        pairs.sort((a, b) => a[0] - b[0]);
+        const zUsed = new Set(), dUsed = new Set(); order = [];
+        for (const [, zi, di] of pairs) if (!zUsed.has(zi) && !dUsed.has(di)) { zUsed.add(zi); dUsed.add(di); order.push([team[di], zi]); }
+        // zonas sin pareja (más grandes que cualquier cupo libre): con quien quede, como antes
+        for (let zi = 0; zi < zones.length; zi++) if (cen[zi] && !zUsed.has(zi)) { const di = team.findIndex((_, i) => !dUsed.has(i)); if (di < 0) break; dUsed.add(di); order.push([team[di], zi]); }
+      }
+      for (const [d, zi] of order) {
         const chunk = zones[zi] || [];
         k += chunk.length;
         if (!chunk.length) continue;
-        const r = assignOrdersTo(req, d, chunk.map((o) => o.id), date);
+        const sp = home ? startOf(d) : null;
+        const r = assignOrdersTo(req, d, chunk.map((o) => o.id), date, sp?.home ? { depot: { lat: sp.lat, lng: sp.lng } } : {});
         if (!r.route_id) continue;
         const rt = db.prepare('SELECT distance_km, original_distance_km, est_minutes FROM routes WHERE id=?').get(r.route_id);
-        created.push({ driver: d.name, route_id: r.route_id, stops: r.assigned, ...rt });
+        created.push({ driver: d.name, route_id: r.route_id, stops: r.assigned, from_home: !!sp?.home, ...rt });
       }
       overflow.push(...located.filter((o) => !placed.has(o.id)));
       void k;

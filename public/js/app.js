@@ -1953,18 +1953,40 @@ async function viewRoutes(v) {
     if (!pending.length) return toast('No hay pedidos pendientes', 'bad');
     const m = modal('Auto-planificar rutas', `
       <p class="muted" style="margin-top:0">Se repartirán <b>${pending.length}</b> pedidos pendientes con la misma lógica de Pedidos: cada oficina con sus propios repartidores, por <b>ciudad y cercanía</b> desde la oficina (una zona compacta por repartidor, según su capacidad). Se agregan a la ruta del día de cada repartidor y se optimiza el camino (vecino más cercano + 2-opt, urgentes primero y ventanas horarias).</p>
+      <div class="grid g3" style="gap:10px"><label class="f">Planificar para el día<input type="date" id="apDate" value="${date < today() ? today() : date}" min="${today()}" /></label>
+        <label class="f">Días seguidos<input type="number" id="apDays" min="1" max="14" value="1" /><small class="muted">Lo que no quepa un día pasa al siguiente.</small></label>
+        <label class="row" style="gap:6px;align-self:center"><input type="checkbox" id="apSun" checked /> Sin domingos</label></div>
+      <fieldset style="margin-top:10px"><legend>Salida de cada ruta</legend>
+        <label class="radio"><input type="radio" name="apStart" value="almacen" checked /> <span><b>Almacén de la ciudad</b><br><small class="muted">Zonas en orden de cercanía desde la oficina.</small></span></label>
+        <label class="radio"><input type="radio" name="apStart" value="domicilio" /> <span><b>Domicilio de cada repartidor</b> 🏠<br><small class="muted">A cada uno le toca la zona más cercana a su casa y su ruta sale de ahí. Quien no tiene domicilio registrado sale del almacén.</small></span></label></fieldset>
       <h3 style="margin-top:14px">Repartidores disponibles</h3>
-      ${drivers.filter((d) => d.active).map((d) => `<label class="row" style="padding:6px 0"><input type="checkbox" value="${d.id}" checked /> <span class="grow">${esc(d.name)} <small class="muted">${esc(d.vehicle || '')}</small></span><small class="muted">cap. ${d.capacity}</small></label>`).join('')}`,
+      ${drivers.filter((d) => d.active).map((d) => `<label class="row" style="padding:6px 0"><input type="checkbox" value="${d.id}" checked /> <span class="grow">${esc(d.name)} <small class="muted">${esc(d.vehicle || '')}</small>${d.home_lat != null ? ' <span title="Tiene domicilio registrado">🏠</span>' : ''}</span><small class="muted">cap. ${d.capacity}</small></label>`).join('')}
+      <small class="muted">🏠 = domicilio registrado (se registra en Usuarios → el repartidor, o él mismo desde Mi perfil con su GPS).</small>`,
       { footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="go">Generar rutas</button>' });
     $('#go', m.el).onclick = async () => {
-      const ids = $$('input[type=checkbox]:checked', m.el).map((x) => Number(x.value));
+      const ids = $$('input[type=checkbox][value]:checked', m.el).map((x) => Number(x.value)).filter(Boolean);
       if (!ids.length) return toast('Elige al menos un repartidor', 'bad');
+      const start = $('input[name=apStart]:checked', m.el).value;
+      const nDays = Math.min(14, Math.max(1, Number($('#apDays', m.el).value) || 1));
+      // días a planificar (sin domingos si se pide)
+      const days = []; let dd = new Date(($('#apDate', m.el).value || today()) + 'T12:00:00');
+      while (days.length < nDays) { if (!($('#apSun', m.el).checked && dd.getDay() === 0)) days.push(dd.toLocaleDateString('en-CA')); dd.setDate(dd.getDate() + 1); }
+      const btn = $('#go', m.el); btn.disabled = true;
+      const res = [];
       try {
-        const r = await POST('/api/routes/auto', { date, driver_ids: ids });
-        const saved = r.created.reduce((a, x) => a + (x.original_distance_km - x.distance_km), 0);
-        toast(`${r.created.length} ruta(s) · ${r.created.reduce((a, x) => a + x.stops, 0)} pedidos asignados · ${fmtN(saved, 1)} km ahorrados${r.overflow.length ? ` · ${r.overflow.length} sin asignar (capacidad, sin ubicación o sin repartidor en su oficina)` : ''}`, 'ok');
-        m.close(); render();
-      } catch (e) { toast(e.message, 'bad'); }
+        for (const [i, d] of days.entries()) {
+          btn.textContent = `Planificando ${i + 1} de ${days.length}…`;
+          try { const r = await POST('/api/routes/auto', { date: d, driver_ids: ids, start }); res.push([d, r]); }
+          catch (e) { if (/No hay pedidos pendientes/.test(e.message)) break; throw e; }
+        }
+        const rutas = res.reduce((a, [, r]) => a + r.created.length, 0), peds = res.reduce((a, [, r]) => a + r.created.reduce((x, c) => x + c.stops, 0), 0);
+        const saved = res.reduce((a, [, r]) => a + r.created.reduce((x, c) => x + (c.original_distance_km - c.distance_km), 0), 0);
+        const last = res[res.length - 1]?.[1];
+        toast(res.length ? `${rutas} ruta(s) en ${res.length} día(s) (${res.map(([d]) => d.slice(5)).join(', ')}) · ${peds} pedidos · ${fmtN(saved, 1)} km ahorrados${last?.overflow.length ? ` · ${last.overflow.length} sin asignar (capacidad, sin ubicación o sin repartidor en su oficina)` : ''}` : 'No hay pedidos pendientes por rutear', res.length ? 'ok' : 'bad');
+        m.close();
+        if (res.length) { window.__routesDate = res[0][0]; location.hash = `#/routes?date=${res[0][0]}`; }
+        render();
+      } catch (e) { toast(e.message, 'bad'); btn.disabled = false; btn.textContent = 'Generar rutas'; }
     };
   };
   $('#manual').onclick = () => {
@@ -5205,6 +5227,21 @@ async function userForm() {
   };
 }
 
+// Marcar el domicilio de un repartidor: buscar la dirección y/o tocar el mapa
+function homePicker(u, done) {
+  const m = modal(`Domicilio de ${u.name}`, `<div class="stack"><div class="row"><input id="hpQ" class="grow" placeholder="Calle y número, colonia, ciudad" value="${esc(u.home_address || '')}" /><button class="btn" id="hpGo">${icon('search')} Buscar</button></div>
+    <div id="hpMap" style="height:320px;border-radius:10px"></div><small class="muted">Toca el mapa o arrastra el pin hasta su casa.</small></div>`,
+    { wide: true, footer: `${u.home_lat != null ? '<button class="btn ghost" id="hpDel">Quitar</button>' : ''}<button class="btn" data-close>Cancelar</button><button class="btn primary" id="hpSave">Guardar</button>` });
+  const has = u.home_lat != null;
+  const map = makeMap($('#hpMap', m.el), has ? [u.home_lat, u.home_lng] : depotLatLng(), has ? 16 : 12);
+  let mk = has ? L.marker([u.home_lat, u.home_lng], { draggable: true }).addTo(map) : null;
+  const put = (ll, zoom) => { if (mk) mk.setLatLng(ll); else mk = L.marker(ll, { draggable: true }).addTo(map); if (zoom) map.setView(ll, 16); };
+  map.on('click', (e) => put(e.latlng));
+  setTimeout(() => map.invalidateSize(), 200);
+  $('#hpGo', m.el).onclick = async () => { const q = $('#hpQ', m.el).value.trim(); if (!q) return; const r = await GET('/api/geocode?address=' + encodeURIComponent(q)).catch(() => ({})); if (r.lat) { put([r.lat, r.lng], true); toast(r.quality === 'exacta' ? 'Ubicado: revisa el pin' : 'Ubicación aproximada: mueve el pin a la casa', r.quality === 'exacta' ? 'ok' : ''); } else toast('No se encontró: toca el mapa', 'bad'); };
+  $('#hpSave', m.el).onclick = async () => { if (!mk) return toast('Toca el mapa en su casa', 'bad'); const ll = mk.getLatLng(); try { await PUT(`/api/users/${u.id}/home`, { lat: ll.lat, lng: ll.lng, address: $('#hpQ', m.el).value }); toast('Domicilio guardado', 'ok'); m.close(); done?.(); } catch (e) { toast(e.message, 'bad'); } };
+  $('#hpDel', m.el)?.addEventListener('click', async () => { try { await PUT(`/api/users/${u.id}/home`, { clear: true }); toast('Domicilio quitado', 'ok'); m.close(); done?.(); } catch (e) { toast(e.message, 'bad'); } });
+}
 async function userPanel(id) {
   const [u, offs, people] = await Promise.all([GET('/api/users/' + id), officeCities(), GET('/api/users').catch(() => [])]);
   const me = store.user;
@@ -5221,7 +5258,8 @@ async function userPanel(id) {
     </div>
     <div class="pill-tabs" id="uTabs"><button class="on" data-t="datos">Datos</button><button data-t="exp">Expediente y pago</button><button data-t="seg">Seguridad</button><button data-t="act">Actividad</button></div>
     <div data-pane="exp" hidden><div id="expBox" style="margin-top:14px"><p class="muted">Cargando…</p></div></div>
-    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u, offs, people)}</form></div>
+    <div data-pane="datos"><form id="uf" class="stack" style="margin-top:14px">${userFields(u, offs, people)}</form>
+      ${u.role === 'repartidor' || u.can_deliver ? `<div class="card" style="margin-top:12px;padding:12px"><div class="row between"><div><b>🏠 Domicilio (punto de salida)</b><br><small class="muted">${u.home_lat != null ? 'Registrado' + (u.home_address ? ': ' + esc(u.home_address) : '') : 'Sin registrar'}</small></div><button type="button" class="btn sm" id="uHome">${u.home_lat != null ? 'Cambiar' : 'Marcar en el mapa'}</button></div></div>` : ''}</div>
     <div data-pane="seg" hidden><div class="stack" style="margin-top:14px">
       <div class="sec-row"><div>${icon('key')}</div><div class="grow"><b>Restablecer contraseña</b><br><small class="muted">Genera una contraseña temporal y cierra sus sesiones abiertas.</small></div><button class="btn" id="rst">Restablecer</button></div>
       <div class="sec-row"><div>${icon('logout')}</div><div class="grow"><b>Cerrar todas sus sesiones</b><br><small class="muted">Útil si perdió el teléfono. Tendrá que volver a entrar.</small></div><button class="btn" id="kick" ${self ? 'disabled' : ''}>Cerrar sesiones</button></div>
@@ -5241,6 +5279,7 @@ async function userPanel(id) {
     if (b.dataset.t === 'exp' && !$('#pf2', m.el)) staffProfile($('#expBox', m.el), u);
   }));
   const reload = async () => { m.close(); await render(); userPanel(id); };
+  $('#uHome', m.el)?.addEventListener('click', () => homePicker(u, reload));
   $('#saveU', m.el).onclick = async () => {
     if (!f.reportValidity()) return;
     try { await PUT('/api/users/' + id, { ...formBody(f), can_deliver: !!f.can_deliver?.checked, active: u.active }); toast('Cambios guardados', 'ok'); m.close(); render(); }
@@ -5547,6 +5586,9 @@ async function viewProfile(v) {
         ${pwdField('current', 'Contraseña actual', { auto: 'current-password', min: 0 })}
         <div class="grid g2">${pwdField('password', 'Nueva contraseña', { meter: true })}${pwdField('confirm', 'Repite la nueva')}</div>
         <div><button class="btn primary">Actualizar contraseña</button></div></form>
+      ${u.role === 'repartidor' || u.can_deliver ? `<div class="card stack"><h2>🏠 Mi domicilio</h2><small class="muted">Si la oficina lo elige, tus rutas salen de tu casa y te tocan las entregas más cercanas a ella.</small>
+        <div>${u.home_lat != null ? `<span class="chip ok">Registrado</span>${u.home_address ? ' <small class="muted">' + esc(u.home_address) + '</small>' : ''}` : '<span class="chip warn">Sin registrar</span>'}</div>
+        <button type="button" class="btn" id="homeGps">📍 Estoy en mi casa: guardar esta ubicación</button>${u.home_lat != null ? '<button type="button" class="btn sm ghost" id="homeDel">Quitar</button>' : ''}</div>` : ''}
       ${u.role !== 'admin' ? '<div class="card stack" id="myDocs"><h2>Mis documentos</h2><p class="muted" style="margin:0">Cargando…</p></div>' : ''}
     </div>
     <div class="stack">
@@ -5562,6 +5604,14 @@ async function viewProfile(v) {
   </div>`;
   wirePwd(v);
   if ($('#myDocs')) myDocuments($('#myDocs'), u);
+  $('#homeGps')?.addEventListener('click', async (e) => {
+    const b = e.currentTarget; b.disabled = true; b.textContent = 'Obteniendo ubicación…';
+    const p = await getPosition(15000);
+    if (!p) { b.disabled = false; b.textContent = '📍 Estoy en mi casa: guardar esta ubicación'; return toast('No se obtuvo el GPS: activa la ubicación', 'bad'); }
+    if ((p.acc || p.accuracy || 0) > 150) toast(`Ubicación poco precisa (±${Math.round(p.acc || p.accuracy)} m); se guardó de todos modos`, '');
+    try { await PUT('/api/me/home', { lat: p.lat, lng: p.lng }); toast('Domicilio guardado', 'ok'); render(); } catch (er) { toast(er.message, 'bad'); b.disabled = false; }
+  });
+  $('#homeDel')?.addEventListener('click', async () => { if (!(await confirmDlg('¿Quitar tu domicilio?'))) return; await PUT('/api/me/home', { clear: true }).catch((e) => toast(e.message, 'bad')); render(); });
   $('#pf').onsubmit = async (e) => {
     e.preventDefault();
     try { const r = await PUT('/api/me', Object.fromEntries(new FormData(e.target))); store.user = { ...store.user, ...r }; toast('Datos guardados', 'ok'); render(); }

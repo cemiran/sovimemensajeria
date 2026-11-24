@@ -331,6 +331,8 @@ addCols('orders', [['retry_at', 'TEXT']]);
 // seguimiento administrativo: entra al llegar a N visitas sin entregar; sale cuando la oficina verifica cliente y datos
 addCols('orders', [['followup_at', 'TEXT'], ['followup_base', 'INTEGER NOT NULL DEFAULT 0'], ['followup_done_at', 'TEXT'], ['followup_by', 'INTEGER'], ['followup_note', 'TEXT']]);
 addCols('users', [['route_mode', "TEXT NOT NULL DEFAULT 'continua'"]]);
+// domicilio del repartidor: punto de salida opcional de sus rutas
+addCols('users', [['home_lat', 'REAL'], ['home_lng', 'REAL'], ['home_address', 'TEXT']]);
 
 const moreDefaults = {
   public_url: '',
