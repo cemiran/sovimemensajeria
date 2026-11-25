@@ -201,7 +201,7 @@ const depotIcon = () => L.divIcon({ className: '', html: '<div class="depot-pin"
 const truckIcon = () => L.divIcon({ className: '', html: '<div class="truck-pin">🚚</div>', iconSize: [34, 34], iconAnchor: [17, 17] });
 function depotLatLng() { return [Number(SETTINGS.depot_lat), Number(SETTINGS.depot_lng)]; }
 
-function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null, depotLL = null, into = null } = {}) {
+function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, onEdit = null, collect = null, depotLL = null, into = null, popupExtra = null } = {}) {
   const pts = [];
   const tgt = into || map;
   const dll = depotLL && depotLL[0] != null ? depotLL : depotLatLng();
@@ -212,7 +212,7 @@ function drawRoute(map, stops, color = '#1d5a96', { depot = true, fit = true, on
     pts.push(ll);
     const mk = L.marker(ll, { icon: pinIcon(s.stop_seq ?? '•', ['entregado', 'fallido'].includes(s.status) ? PIN_COLORS[s.status] : color, geoChk(s.geo_quality) && !['entregado', 'fallido'].includes(s.status)) })
       .addTo(tgt)
-      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${geoChk(s.geo_quality) ? '<br>' + geoWarn(s.geo_quality) : ''}${onEdit ? stopEditButtons() : ''}`);
+      .bindPopup(`<b>${esc(s.stop_seq ?? '')}. ${esc(s.customer_name)}</b><br>${esc(s.address)}<br>${esc(s.tracking_code)} · ${STATUS[s.status]}${s.eta ? '<br>ETA ' + esc(s.eta) : ''}${geoChk(s.geo_quality) ? '<br>' + geoWarn(s.geo_quality) : ''}${onEdit ? stopEditButtons() : ''}${popupExtra ? popupExtra(s) : ''}`);
     if (onEdit) wireStopEdit(map, mk, s, onEdit);
     collect?.push({ s, mk });
   }
@@ -6608,7 +6608,9 @@ async function viewMyRoute(v) {
     ${notLoaded && !preview ? `<a href="#/load" class="btn block" style="margin-top:10px;background:var(--warn-soft);color:var(--warn);border-color:transparent">${icon('truck')} Faltan ${notLoaded} paquetes por escanear al vehículo</a>` : ''}
     ${open.length > 1 ? `<div class="row" style="margin-top:10px"><a class="btn grow" target="_blank" rel="noopener" href="${gmapsUrl(open)}">${icon('route')} Ruta completa en Google Maps</a></div>` : ''}
   </div>
-  <div id="mymap" class="map sm" style="margin-bottom:12px"></div>
+  <div id="mymapBox" class="mymap-box"><div id="mymap" class="map sm"></div>
+    <button type="button" class="btn sm mymap-tgl" id="myMapFull" aria-label="Ampliar mapa">⛶ Ampliar mapa</button>
+    <div class="mymap-hint">Toca un pin: Navegar, Entregar o No entregado</div></div>
   <div class="card" style="padding:0">${r.stops.map((s) => {
     const q = queuedIds.has(s.id);
     const cls = s.status === 'entregado' || q ? 'done' : s.status === 'fallido' ? 'fail' : s === next ? 'next' : '';
@@ -6627,7 +6629,29 @@ async function viewMyRoute(v) {
   paintGps();
   bindDates();
   const map = makeMap($('#mymap'));
-  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null });
+  // en el mapa: cada parada abierta trae sus botones (navegar, entregar, no entregado) para atenderla en cualquier orden
+  const pinActs = (s) => (['asignado', 'cargado'].includes(s.status) && !queuedIds.has(s.id) && !preview
+    ? `<div class="tels" style="margin-top:6px">${phonesLine(s)}</div><div class="row pin-acts" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+      <button type="button" class="btn sm" data-pnav="${s.id}">${icon('nav')} Navegar</button>
+      <a class="btn sm ok" href="#/deliver/${s.id}">${icon('check')} Entregar</a>
+      <button type="button" class="btn sm bad" data-pfail="${s.id}">No entregado</button></div>` : '');
+  drawRoute(map, r.stops, undefined, { depotLL: r.depot_lat != null ? [r.depot_lat, r.depot_lng] : null, popupExtra: pinActs });
+  // ampliar el mapa a toda la pantalla (y volver)
+  const box = $('#mymapBox', v);
+  const setFull = (on) => {
+    box.classList.toggle('full', on);
+    document.body.classList.toggle('mymap-open', on);
+    $('#myMapFull', v).innerHTML = on ? '✕ Cerrar mapa' : '⛶ Ampliar mapa';
+    setTimeout(() => { map.invalidateSize(); if (map._lastFit) map.fitBounds(...map._lastFit); }, 60);
+  };
+  $('#myMapFull', v).onclick = () => setFull(!box.classList.contains('full'));
+  window.addEventListener('hashchange', () => document.body.classList.remove('mymap-open'), { once: true });
+  map.on('popupopen', (ev) => {
+    const el = ev.popup.getElement();
+    if (!el) return;
+    $$('[data-pnav]', el).forEach((b) => (b.onclick = () => { const a = $(`[data-nav="${b.dataset.pnav}"]`, v); setFull(false); if (a) a.click(); else location.hash = '#/nav/' + b.dataset.pnav; }));
+    $$('[data-pfail]', el).forEach((b) => (b.onclick = () => { const st = r.stops.find((x) => String(x.id) === b.dataset.pfail); map.closePopup(); quickFail(st); }));
+  });
   let meMk = null;
   const showMe = (p) => { if (!$('#mymap')) return gpsListeners.delete(showMe); if (meMk) meMk.setLatLng([p.lat, p.lng]); else meMk = L.marker([p.lat, p.lng], { icon: meIcon(), zIndexOffset: 1000 }).addTo(map); };
   if (GPS.last) showMe(GPS.last);

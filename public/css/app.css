@@ -831,3 +831,14 @@ label:has(> input[type="file"]) { position: relative; }
 .dp-stats .ok b { color: var(--ok, #1f8a4c); } .dp-stats .warn b { color: var(--warn, #b26d00); } .dp-stats .bad b { color: var(--bad, #c0392b); }
 .dp-score { display: block; height: 8px; border-radius: 6px; background: var(--surface-2); overflow: hidden; margin: 4px 0 3px; }
 .dp-score i { display: block; height: 100%; background: linear-gradient(90deg, #e5612a, #1f8a4c); }
+
+/* Mi ruta: mapa ampliable con botones de entrega en cada pin */
+.mymap-box { position: relative; margin-bottom: 12px; }
+.mymap-tgl { position: absolute; top: 10px; right: 10px; z-index: 500; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+.mymap-hint { display: none; }
+.mymap-box.full { position: fixed; inset: 0; z-index: 990; margin: 0; background: var(--bg, #fff); }
+.mymap-box.full .map { height: 100% !important; border-radius: 0; border: 0; }
+.mymap-box.full .mymap-tgl { top: max(12px, env(safe-area-inset-top, 0px)); font-size: 15px; padding: 10px 14px; }
+.mymap-box.full .mymap-hint { display: block; position: absolute; left: 10px; right: 10px; bottom: max(14px, env(safe-area-inset-bottom, 0px)); z-index: 500; text-align: center; font-size: 13px; padding: 8px 10px; border-radius: 10px; background: var(--surface, #fff); color: var(--text, #222); box-shadow: 0 2px 8px rgba(0,0,0,.2); pointer-events: none; }
+body.mymap-open { overflow: hidden; }
+.pin-acts .btn { flex: 1 1 auto; }
