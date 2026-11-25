@@ -3537,7 +3537,7 @@ const CITY_CENTERS = {
   tijuana: { lat: 32.5149, lng: -117.0382, r: 0.17 }, ensenada: { lat: 31.8667, lng: -116.5964, r: 0.15 },
   mexicali: { lat: 32.6245, lng: -115.4523, r: 0.17 }, 'playas de rosarito': { lat: 32.3661, lng: -117.0618, r: 0.12 },
   tecate: { lat: 32.5725, lng: -116.6264, r: 0.1 }, 'san luis rio colorado': { lat: 32.456, lng: -114.7717, r: 0.12 },
-  'san quintin': { lat: 30.56, lng: -115.938, r: 0.3 },
+  'san quintin': { lat: 30.56, lng: -115.938, r: 0.3 }, 'san felipe': { lat: 31.03, lng: -114.84, r: 0.12 },
 };
 async function cityCenter(city) {
   const fixed = CITY_CENTERS[normCity(osmCity(city))];
@@ -3726,6 +3726,121 @@ async function pinCheck({ dry = false } = {}) {
   pinJob.last = { at: new Date().toISOString(), ...res };
   return res;
 }
+// ---------- Localidad por código postal ----------
+// El archivo trae el municipio como ciudad ("Tijuana", "Ensenada", "Mexicali"), pero el CP dice la localidad real:
+// Tecate, San Quintín o San Felipe. Con la ciudad equivocada se mezclan en rutas de la ciudad y en otra oficina.
+const SATELLITES = [
+  { city: 'Tecate', key: 'tecate', parents: ['tijuana', 'playas de rosarito'] },
+  { city: 'San Quintín', key: 'san quintin', parents: ['ensenada'] },
+  { city: 'San Felipe', key: 'san felipe', parents: ['mexicali'] },
+];
+function localityOf(c) {
+  const own = normCity(osmCity(c.city));
+  const sats = SATELLITES.filter((s) => s.parents.includes(own));
+  if (!sats.length) return null;
+  const z = zipAreaOf(c.zip);
+  if (!z) return null;
+  for (const s of sats) {
+    const box = CITY_CENTERS[s.key];
+    // el centro de su CP cae en la localidad y su pin (si lo tiene) está cerca de su CP: no es un error de captura
+    if (inCityBox(z, box) && (c.lat == null || haversine(c, z) < 25)) return s;
+  }
+  return null;
+}
+const locJob = { running: false, last: null };
+function localityFix() {
+  if (locJob.running) return locJob.last;
+  locJob.running = true;
+  const out = { revisados: 0, corregidos: 0, por: {} };
+  try {
+    // San Felipe la atiende la oficina de Mexicali
+    const mxl = db.prepare("SELECT id, city FROM warehouses WHERE active = 1 AND lower(city) LIKE '%mexicali%' ORDER BY id LIMIT 1").get();
+    if (mxl && !officeCities(mxl).includes('san felipe')) db.prepare('UPDATE warehouses SET city = ? WHERE id = ?').run(mxl.city.replace(/\s*$/, '') + ', San Felipe', mxl.id);
+    const prev = [];
+    const up = db.prepare('UPDATE customers SET city = ?, office_id = ? WHERE id = ? AND city = ?');
+    for (const c of db.prepare("SELECT id, city, zip, lat, lng, office_id FROM customers WHERE TRIM(COALESCE(zip,'')) <> ''").all()) {
+      out.revisados++;
+      const s = localityOf(c);
+      if (!s) continue;
+      const off = officeForCity(s.city) ?? c.office_id;
+      if (up.run(s.city, off, c.id, c.city).changes) { out.corregidos++; out.por[s.city] = (out.por[s.city] || 0) + 1; prev.push({ id: c.id, city: c.city, office_id: c.office_id }); }
+    }
+    if (prev.length) {
+      fs.writeFileSync(path.join(DATA_DIR, `ciudad_prev_${Date.now()}.json`), JSON.stringify(prev));
+      db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ciudad', `Ciudad por código postal: ${out.corregidos} clientes (${Object.entries(out.por).map(([k, v]) => k + ': ' + v).join(', ')})`);
+    }
+  } catch (e) { console.error('localityFix', e.message); }
+  finally { locJob.running = false; locJob.last = { at: new Date().toISOString(), ...out }; }
+  return out;
+}
+// ---------- Pins apilados: varios clientes en el mismo punto (centro de su CP, colonia o calle) ----------
+// 1) un "exacta" que comparte el punto con 2 o más no es exacto: pasa a "calle" (el repartidor ve el aviso y "Estoy aquí")
+// 2) se vuelven a ubicar con Google, primero las paradas de hoy y mañana; se acepta el punto nuevo si es mejor
+//    o igual de bueno pero propio (no apilado). Los pins confirmados (entrega, repartidor, a mano) no se tocan.
+const STACK_SQL = `SELECT round(lat,5) la, round(lng,5) lo FROM customers WHERE lat IS NOT NULL AND geo_quality NOT IN ('manual','gps_entrega','repartidor') GROUP BY la, lo HAVING COUNT(*) >= 3`;
+function falseExactFix() {
+  const ids = db.prepare(`SELECT c.id, c.lat, c.lng FROM customers c JOIN (${STACK_SQL}) s ON round(c.lat,5) = s.la AND round(c.lng,5) = s.lo WHERE c.geo_quality = 'exacta'`).all();
+  if (!ids.length) return 0;
+  fs.writeFileSync(path.join(DATA_DIR, `exacta_prev_${Date.now()}.json`), JSON.stringify(ids.map((x) => x.id)));
+  const up = db.prepare("UPDATE customers SET geo_quality = 'calle' WHERE id = ? AND geo_quality = 'exacta'");
+  let n = 0;
+  for (const x of ids) n += up.run(x.id).changes;
+  if (n) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `${n} ubicaciones marcadas "exacta" compartían el punto con otros clientes: pasan a aproximadas (calle)`);
+  return n;
+}
+const stackJob = { running: false, done: 0, improved: 0, last: null };
+async function destackRefine() {
+  if (stackJob.running) return { busy: true };
+  stackJob.running = true;
+  const out = { revisados: 0, mejorados: 0, rutas: new Set() };
+  try {
+    falseExactFix();
+    const tom = new Date(Date.now() + 864e5).toLocaleDateString('en-CA');
+    const rows = db.prepare(`SELECT c.*, MIN(o.scheduled_date) d,
+        MAX(CASE WHEN o.route_id IS NOT NULL AND o.scheduled_date BETWEEN date('now','localtime') AND ? THEN 1 ELSE 0 END) hot,
+        MAX(CASE WHEN o.route_id IS NOT NULL AND o.scheduled_date BETWEEN date('now','localtime') AND ? THEN o.route_id END) rid
+      FROM customers c JOIN (${STACK_SQL}) s ON round(c.lat,5) = s.la AND round(c.lng,5) = s.lo
+      JOIN orders o ON o.customer_id = c.id AND o.status IN ('pendiente','asignado','cargado','fallido')
+      WHERE c.geo_quality IN ('calle','colonia','cp','ciudad') AND (c.geo_tried IS NULL OR c.geo_tried < datetime('now','-2 days'))
+      GROUP BY c.id ORDER BY hot DESC, d, c.id LIMIT 3000`).all(tom, tom);
+    const sharedAt = db.prepare("SELECT COUNT(*) n FROM customers WHERE round(lat,5) = round(?,5) AND round(lng,5) = round(?,5) AND id <> ?");
+    const tried = db.prepare("UPDATE customers SET geo_tried = datetime('now') WHERE id = ?");
+    const up = db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality=? WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad') AND lat=? AND lng=?");
+    const prev = [];
+    for (const c of rows) {
+      out.revisados++; stackJob.done++;
+      tried.run(c.id);
+      let hit = sameAddressPin(c);
+      if (hit) hit = { lat: hit.lat, lng: hit.lng, quality: 'exacta' };
+      else {
+        const colA = c.colonia || (String(c.address || '').match(/col(?:onia)?\.?\s*([^,]+)/i) || [])[1] || '';
+        hit = await geocodeAddress({ address: c.address, colonia: colA, city: c.city || 'Tijuana', zip: c.zip, id: c.id, bulk: !c.hot }).catch(() => null);
+      }
+      if (!hit) continue;
+      const better = GEO_RANK[hit.quality] > GEO_RANK[c.geo_quality];
+      const own = GEO_RANK[hit.quality] >= GEO_RANK[c.geo_quality] && haversine(c, hit) > 0.03 && sharedAt.get(hit.lat, hit.lng, c.id).n < 2;
+      if (!better && !own) continue;
+      if (up.run(hit.lat, hit.lng, hit.quality, c.id, c.lat, c.lng).changes) {
+        out.mejorados++; stackJob.improved++;
+        prev.push({ id: c.id, lat: c.lat, lng: c.lng, q: c.geo_quality });
+        if (c.rid) out.rutas.add(c.rid);
+      }
+      if (prev.length && prev.length % 100 === 0) fs.writeFileSync(path.join(DATA_DIR, `apilados_prev_${today()}.json`), JSON.stringify(prev));
+    }
+    if (prev.length) fs.writeFileSync(path.join(DATA_DIR, `apilados_prev_${today()}.json`), JSON.stringify(prev));
+    // rutas que aún no salen: se reordenan con los pins nuevos
+    for (const rid of out.rutas) googleRefine(rid);
+    if (out.mejorados) db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `Pins apilados: ${out.mejorados} de ${out.revisados} clientes reubicados en su propio punto`);
+  } catch (e) { console.error('destackRefine', e.message); }
+  finally { stackJob.running = false; stackJob.last = { at: new Date().toISOString(), revisados: out.revisados, mejorados: out.mejorados }; }
+  return stackJob.last;
+}
+app.get('/api/customers/geo-health', auth('admin'), wrap((req, res) => {
+  const open = "('pendiente','asignado','cargado','fallido')";
+  const q = Object.fromEntries(db.prepare(`SELECT COALESCE(c.geo_quality,'sin') q, COUNT(DISTINCT c.id) n FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.status IN ${open} GROUP BY q`).all().map((r) => [r.q, r.n]));
+  const st = db.prepare(`SELECT COUNT(DISTINCT c.id) n FROM customers c JOIN (${STACK_SQL}) s ON round(c.lat,5) = s.la AND round(c.lng,5) = s.lo JOIN orders o ON o.customer_id = c.id WHERE o.status IN ${open}`).get().n;
+  res.json({ quality_open: q, stacked_open: st, locality: locJob.last, destack: { ...stackJob } });
+}));
 // ---------- Vencimiento de documentos: aviso 15 días antes y suspensión al vencer (se levanta sola al aprobar el nuevo) ----------
 function liftDocSuspension(uid) {
   const u = db.prepare('SELECT suspended_reason FROM users WHERE id=?').get(uid);
@@ -6437,6 +6552,10 @@ if (require.main === module) {
   setInterval(neighborRefine, 6 * 3600000).unref();
   setTimeout(() => pinCheck(), 300000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
+  setTimeout(localityFix, 30000);
+  setInterval(localityFix, 6 * 3600000).unref();
+  setTimeout(() => destackRefine(), 150000);
+  setInterval(() => destackRefine(), 6 * 3600000).unref();
   setTimeout(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 240000);
   setTimeout(() => { try { settleJob(); } catch (e) { console.error('corte', e.message); } }, 180000);
   setInterval(() => { try { settleJob(); } catch (e) { console.error('corte', e.message); } }, 3600000).unref();
@@ -6458,4 +6577,5 @@ if (require.main === module) {
 })();
 app.releaseOverdue = releaseOverdue;
 app.internal = { telmexSerial, diarioRows, persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
+app.locals.geoJobs = { localityFix, falseExactFix, destackRefine, localityOf };
 module.exports = app;
