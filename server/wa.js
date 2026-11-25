@@ -87,6 +87,16 @@ function makeSession(slot) {
             wantRunning = false;
             return;
           }
+          // 403: WhatsApp rechaza este número/dispositivo. Reintentar sin parar puede agravar el bloqueo:
+          // se detiene (la sesión se conserva) hasta que alguien toque "Conectar" en Ajustes.
+          if (code === 403) {
+            state.status = 'desconectado';
+            state.qr = null;
+            state.error = `WhatsApp rechazó la conexión (código 403${detail ? ', ' + detail : ''}). Se dejó de reintentar para no agravar un bloqueo. Revisa el número en el teléfono y toca "Conectar" cuando esté listo.`;
+            wantRunning = false;
+            try { s.end?.(undefined); } catch {}
+            return;
+          }
           state.status = 'conectando';
           state.error = u.lastDisconnect?.error?.message || null;
           if (wantRunning) {
