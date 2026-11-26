@@ -3776,6 +3776,10 @@ async function staffProfile(box, u) {
 }
 
 // ================= Excel de lo asignado a cada repartidor =================
+// columnas de contacto pedidas por la oficina (TELEFONO = línea Telnor, CELULAR = móvil); teléfonos y CP como texto corrido
+const CONTACT_HEAD = ['TELEFONO', 'CODIGO POSTAL', 'CALLE', 'NUMERO EXTERIOR', 'CORREO MAIL', 'CELULAR', 'Teléfono adicional', 'Colonia', 'Ciudad', 'Dirección completa'];
+const CONTACT_COLS = [{ wch: 13 }, { wch: 9 }, { wch: 28 }, { wch: 9 }, { wch: 26 }, { wch: 13 }, { wch: 13 }, { wch: 18 }, { wch: 14 }, { wch: 34 }];
+const contactCells = (o) => [o.telnor || '', o.zip || '', o.street || '', o.ext_num || '', o.email || '', o.phone || '', o.phone_alt || '', o.colonia || '', o.city || '', o.address || ''];
 async function exportAssignedExcel(date, driverId) {
   toast('Preparando Excel…', '');
   try {
@@ -3796,20 +3800,20 @@ async function exportAssignedExcel(date, driverId) {
       ws['!cols'] = [{ wch: 26 }, { wch: 18 }, { wch: 10 }, { wch: 12 }, { wch: 10 }, { wch: 13 }, { wch: 18 }];
       X.utils.book_append_sheet(wb, ws, 'Resumen');
       // todas las paradas de todos los repartidores en una sola tabla (con filtros)
-      const head = ['Repartidor', 'Vehículo', '#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas'];
+      const head = ['Repartidor', 'Vehículo', '#', 'Guía', 'Cliente', ...CONTACT_HEAD, 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas'];
       const all = [head];
-      for (const d of list) d.orders.forEach((o, i) => all.push([d.name, d.vehicle || '', o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.telnor || '', o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
+      for (const d of list) d.orders.forEach((o, i) => all.push([d.name, d.vehicle || '', o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, ...contactCells(o), o.reference || '',
         o.appointment_time ? `${o.appointment_time} (acordada)` : o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '']));
       const wl = X.utils.aoa_to_sheet(all);
-      wl['!cols'] = [{ wch: 26 }, { wch: 14 }, { wch: 5 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }];
+      wl['!cols'] = [{ wch: 26 }, { wch: 14 }, { wch: 5 }, { wch: 16 }, { wch: 30 }, ...CONTACT_COLS, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }];
       wl['!autofilter'] = { ref: X.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: all.length - 1, c: head.length - 1 } }) };
       X.utils.book_append_sheet(wb, wl, 'Listado completo');
     }
     const used = new Set(['Resumen', 'Listado completo']);
     for (const d of list) {
       const rows = [[`${company} · Hoja de ruta y carga`], [`Repartidor: ${d.name}`, '', `Vehículo: ${d.vehicle || '—'}`], [`Fecha: ${fecha}`, '', `Pedidos: ${d.orders.length}`], [],
-        ['#', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Dirección', 'Colonia', 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
-      d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, o.telnor || '', o.phone || '', o.phone_alt || '', o.address || '', o.colonia || '', o.reference || '',
+        ['#', 'Guía', 'Cliente', ...CONTACT_HEAD, 'Referencias', 'Horario', 'Llegada estimada', 'Productos', 'Números de serie', 'Cobrar', 'Estado', 'Notas', 'Nombre y firma de quien recibe']];
+      d.orders.forEach((o, i) => rows.push([o.stop_seq && o.stop_seq < 999 ? o.stop_seq : i + 1, o.tracking_code, o.customer, ...contactCells(o), o.reference || '',
         o.appointment_time ? `${o.appointment_time} (acordada)` : o.window_start ? `${o.window_start}–${o.window_end}` : '', o.eta || '', o.items || '', o.serials || '', o.cod_amount ? Number(o.cod_amount) : '', STATUS[o.status] || o.status, o.notes || '', '']));
       if (!d.orders.length) rows.push(['', 'Sin pedidos asignados en esta fecha']);
       rows.push([], ['Inventario que trae'], ['Producto', 'Cantidad', 'Números de serie']);
@@ -3817,7 +3821,7 @@ async function exportAssignedExcel(date, driverId) {
       if (!d.inventory.length) rows.push(['Sin inventario asignado']);
       rows.push([], [], ['Entregó (almacén): ____________________', '', '', 'Recibió (repartidor): ____________________']);
       const ws = X.utils.aoa_to_sheet(rows);
-      ws['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 34 }, { wch: 18 }, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }, { wch: 30 }];
+      ws['!cols'] = [{ wch: 6 }, { wch: 16 }, { wch: 30 }, ...CONTACT_COLS, { wch: 20 }, { wch: 11 }, { wch: 10 }, { wch: 24 }, { wch: 26 }, { wch: 9 }, { wch: 12 }, { wch: 24 }, { wch: 30 }];
       let name = d.name.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || 'Repartidor';
       while (used.has(name)) name = name.slice(0, 26) + '_' + used.size;
       used.add(name);

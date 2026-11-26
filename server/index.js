@@ -2994,6 +2994,13 @@ app.get(
   })
 );
 const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'colonia', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp', 'priority'];
+// calle y número exterior a partir del domicilio ("CUAUHTEMOC 1771, Col. ZONA RIO" → CUAUHTEMOC · 1771)
+function splitStreet(address) {
+  const first = String(address || '').split(',')[0].replace(/#N\/A/gi, '').replace(/\s+/g, ' ').trim();
+  const m = first.match(/^(.*?)[\s#,]*(?:#|No\.?|N[úu]m\.?|N°|N[úu]mero)?\s*(\d+\s?[A-Za-z]?(?:\s?[-\/]\s?[A-Za-z0-9]+)?|S\/N|SN)$/i);
+  if (m && m[1].trim().length >= 2) return { street: m[1].trim().replace(/[#,.\s]+$/, ''), ext_num: m[2].replace(/\s+/g, '') };
+  return { street: first, ext_num: '' };
+}
 // teléfono siempre corrido: sin guiones, espacios, puntos ni paréntesis (si es un número)
 const flatPhone = (v) => { if (v == null || v === '') return null; const t = String(v).trim(); const d = t.replace(/[\s\-().\/]/g, ''); return /^\+?\d+$/.test(d) ? d : t; };
 const custVal = (b, f) => {
@@ -5135,13 +5142,14 @@ app.get(
     const custody = new Map(custodyOf(only).map((d) => [d.id, d.items]));
     const out = drivers.map((d) => {
       const orders = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.stop_seq, o.eta, o.scheduled_date, o.notes, o.cod_amount,
-          c.name customer, c.phone, c.phone_alt, c.external_id telnor, c.address, c.colonia, c.reference, c.window_start, c.window_end, r.name route_name,
+          c.name customer, c.phone, c.phone_alt, c.external_id telnor, c.address, c.colonia, c.city, c.zip, c.email, c.reference, c.window_start, c.window_end, r.name route_name,
           (SELECT name FROM accounts WHERE id = o.account_id) account,
           (SELECT GROUP_CONCAT(i.qty || ' × ' || p.name, ', ') FROM order_items i JOIN products p ON p.id = i.product_id WHERE i.order_id = o.id) items,
           (SELECT GROUP_CONCAT(s.serial, ', ') FROM serials s WHERE s.order_id = o.id) serials, o.appointment_time
         FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN routes r ON r.id = o.route_id
         WHERE o.driver_id = ? AND o.status <> 'cancelado' AND (o.scheduled_date = ? OR r.date = ? OR (o.status IN ('entregado','fallido') AND date(o.delivered_at,'localtime') = ?))
         ORDER BY COALESCE(o.stop_seq, 999), o.id`).all(d.id, date, date, date);
+      for (const o of orders) Object.assign(o, splitStreet(o.address), { telnor: flatPhone(o.telnor) || '', phone: flatPhone(o.phone) || '', phone_alt: flatPhone(o.phone_alt) || '', zip: String(o.zip || '').replace(/\D/g, '').slice(0, 5) });
       return { ...d, orders, inventory: custody.get(d.id) || [] };
     });
     res.json({ date, drivers: out });
@@ -5736,7 +5744,7 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
   const ymd = (d) => (d ? d.toLocaleDateString('en-CA') : '');
   const hm = (d) => (d ? d.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
   const routeOf = db.prepare('SELECT id, name, date FROM routes WHERE driver_id = ? AND date = ? ORDER BY id DESC LIMIT 1');
-  const SEL = `o.id oid, o.tracking_code, o.status, o.attempts, o.stop_seq, c.name customer, c.external_id telnor, c.phone, c.address, c.colonia, c.city, c.zip,
+  const SEL = `o.id oid, o.tracking_code, o.status, o.attempts, o.stop_seq, c.name customer, c.external_id telnor, c.phone, c.phone_alt, c.email, c.address, c.colonia, c.city, c.zip,
     (SELECT GROUP_CONCAT(s.serial, ' ') FROM serials s WHERE s.order_id = o.id) serials`;
   const visits = db.prepare(`SELECT ${SEL}, e.id eid, e.created_at at, e.result, e.kind, e.reason, e.notes, e.receiver_name, e.receiver_relation, e.distance_to_customer_m dist,
       e.driver_id, u.name driver
@@ -5754,13 +5762,13 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
     const d = localDT(v.at);
     const r = v.driver_id ? routeOf.get(v.driver_id, ymd(d)) : null;
     rows.push({ date: ymd(d), time: hm(d), route: r ? r.name || 'Ruta ' + r.id : '', driver: v.driver || '', stop: v.stop_seq ?? '', tracking_code: v.tracking_code,
-      customer: v.customer, telnor: v.telnor || '', phone: v.phone || '', address: [v.address, v.colonia].filter(Boolean).join(', '), city: v.city ? canonCity(v.city) : '', zip: v.zip || '',
+      customer: v.customer, telnor: flatPhone(v.telnor) || '', phone: flatPhone(v.phone) || '', phone_alt: flatPhone(v.phone_alt) || '', email: v.email || '', ...splitStreet(v.address), colonia: v.colonia || '', address: [v.address, v.colonia].filter(Boolean).join(', '), city: v.city ? canonCity(v.city) : '', zip: v.zip || '',
       visit: v.result === 'entregado' ? 'Entregado' : 'No entregado', recorded: KIND[v.kind] || v.kind || '', reason: v.reason || '', notes: v.notes || '',
       receiver: [v.receiver_name, v.receiver_relation ? '(' + v.receiver_relation + ')' : ''].filter(Boolean).join(' '), dist: v.dist ?? '',
       serials: v.serials || '', status: ST[v.status] || v.status, attempts: v.attempts || 0, oid: v.oid, st: v.status });
   }
   for (const o of open) rows.push({ date: o.rdate, time: '', route: o.rname || 'Ruta ' + o.rid, driver: o.driver || '', stop: o.stop_seq ?? '', tracking_code: o.tracking_code,
-    customer: o.customer, telnor: o.telnor || '', phone: o.phone || '', address: [o.address, o.colonia].filter(Boolean).join(', '), city: o.city ? canonCity(o.city) : '', zip: o.zip || '',
+    customer: o.customer, telnor: flatPhone(o.telnor) || '', phone: flatPhone(o.phone) || '', phone_alt: flatPhone(o.phone_alt) || '', email: o.email || '', ...splitStreet(o.address), colonia: o.colonia || '', address: [o.address, o.colonia].filter(Boolean).join(', '), city: o.city ? canonCity(o.city) : '', zip: o.zip || '',
     visit: 'Sin visita', recorded: '', reason: '', notes: '', receiver: '', dist: '', serials: o.serials || '', status: ST[o.status] || o.status, attempts: o.attempts || 0, oid: o.oid, st: o.status });
   rows.sort((a, b) => (a.date + a.driver + (a.time || '99')).localeCompare(b.date + b.driver + (b.time || '99')));
   const byDriver = {};
@@ -5781,8 +5789,9 @@ app.get('/api/reports/routes', auth(...STAFF), wrap((req, res) => {
   if (sts.length) { const keep = rows.filter((r) => sts.some((k) => FILT[k](r))); rows.length = 0; rows.push(...keep); }
   if (req.query.format === 'csv') {
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const head = ['Fecha', 'Hora', 'Ruta', 'Repartidor', 'Parada', 'Guía', 'Cliente', 'Teléfono Telnor', 'Teléfono', 'Dirección', 'Ciudad', 'C.P.', 'Resultado de la visita', 'Registrado', 'Motivo', 'Notas', 'Recibió', 'Distancia al domicilio (m)', 'S/N', 'Estatus actual del pedido', 'Intentos'];
-    const keys = ['date', 'time', 'route', 'driver', 'stop', 'tracking_code', 'customer', 'telnor', 'phone', 'address', 'city', 'zip', 'visit', 'recorded', 'reason', 'notes', 'receiver', 'dist', 'serials', 'status', 'attempts'];
+    // columnas pedidas por la oficina: TELEFONO (línea Telnor), CODIGO POSTAL, CALLE, NUMERO EXTERIOR, CORREO MAIL y CELULAR
+    const head = ['Fecha', 'Hora', 'Ruta', 'Repartidor', 'Parada', 'Guía', 'Cliente', 'TELEFONO', 'CODIGO POSTAL', 'CALLE', 'NUMERO EXTERIOR', 'CORREO MAIL', 'CELULAR', 'Teléfono adicional', 'Colonia', 'Ciudad', 'Dirección completa', 'Resultado de la visita', 'Registrado', 'Motivo', 'Notas', 'Recibió', 'Distancia al domicilio (m)', 'S/N', 'Estatus actual del pedido', 'Intentos'];
+    const keys = ['date', 'time', 'route', 'driver', 'stop', 'tracking_code', 'customer', 'telnor', 'zip', 'street', 'ext_num', 'email', 'phone', 'phone_alt', 'colonia', 'city', 'address', 'visit', 'recorded', 'reason', 'notes', 'receiver', 'dist', 'serials', 'status', 'attempts'];
     const lines = rows.map((r) => keys.map((k) => q(r[k])).join(','));
     lines.push('', [q('Resumen por repartidor'), q('Entregados'), q('No entregados'), q('Sin visita'), q('Registros manuales')].join(','));
     for (const s of summary) lines.push([q(s.driver), s.entregados, s.no_entregados, s.sin_visita, s.manual].join(','));
