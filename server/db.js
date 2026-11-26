@@ -351,6 +351,28 @@ addCols('routes', [['vehicle_id', 'INTEGER'], ['check_id', 'INTEGER']]);
 // usuario eliminado que tenía historial: la cuenta ya no existe para operar, su nombre se conserva en pedidos y entregas
 addCols('users', [['deleted_at', 'TEXT']]);
 addCols('customers', [['external_id', 'TEXT'], ['phone_alt', 'TEXT'], ['colonia', 'TEXT'], ['geo_quality', 'TEXT']]);
+// Cliente de alta prioridad: sus pedidos nacen con prioridad alta y se suman a la ruta cercana al armarla
+addCols('customers', [['priority', 'INTEGER DEFAULT 0']]);
+db.exec(`CREATE TRIGGER IF NOT EXISTS orders_prio_from_customer AFTER INSERT ON orders
+  WHEN (SELECT priority FROM customers WHERE id = NEW.customer_id) = 1 AND COALESCE(NEW.priority, '') <> 'alta'
+  BEGIN UPDATE orders SET priority = 'alta' WHERE id = NEW.id; END`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_orders_priority ON orders(priority, status)');
+// registro de la pestaña "Alta prioridad" en Google Sheets (qué fila ya se mandó)
+db.exec('CREATE TABLE IF NOT EXISTS prio_sheet (order_id INTEGER PRIMARY KEY, hash TEXT, sent_at TEXT)');
+// teléfonos siempre corridos (sin guiones, espacios ni paréntesis), una sola vez para lo que ya estaba
+{
+  const flat = (v) => { if (v == null) return v; const t = String(v).trim(); const d = t.replace(/[\s\-().\/]/g, ''); return /^\+?\d+$/.test(d) ? d : t; };
+  if (!db.prepare("SELECT 1 FROM settings WHERE key='phones_flat_done'").get()) {
+    for (const [tbl, cols] of [['customers', ['phone', 'phone_alt', 'external_id']], ['users', ['phone']]]) {
+      const have = db.prepare(`PRAGMA table_info(${tbl})`).all().map((c) => c.name);
+      for (const col of cols.filter((c) => have.includes(c))) {
+        const up = db.prepare(`UPDATE ${tbl} SET ${col} = ? WHERE id = ?`);
+        for (const r of db.prepare(`SELECT id, ${col} v FROM ${tbl} WHERE ${col} GLOB '*[^0-9+]*'`).all()) { const n = flat(r.v); if (n !== r.v) up.run(n, r.id); }
+      }
+    }
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('phones_flat_done', '1')").run();
+  }
+}
 db.exec('CREATE INDEX IF NOT EXISTS idx_customers_ext ON customers(external_id)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_orders_cust_date ON orders(customer_id, scheduled_date)');

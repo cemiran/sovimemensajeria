@@ -305,9 +305,11 @@ const SHEET_HEADERS = ['ID de Rastreo', 'Fecha y Hora', 'Cliente', 'Teléfono Te
   'Recibió', 'Parentesco', 'Identificación', 'Tipo de entrega', 'Motivo', 'Ruta', 'Latitud', 'Longitud', 'Distancia al domicilio (m)',
   'Escaneo verificado', 'Cobro', 'Foto', 'Firma', 'Comprobante',
   'Tipo de envío', 'Temperatura (°C)', 'En rango', 'Sello / precinto', 'Unidad (placas)', 'Checklist de unidad', 'Recurso confiable'];
+// teléfono siempre corrido (sin guiones ni espacios)
 function fmtPhone(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length === 10 ? `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}` : String(p || '');
+  const t = String(p || '').trim();
+  const d = t.replace(/[\s\-().\/]/g, '');
+  return /^\+?\d+$/.test(d) ? d : t;
 }
 // Zona respecto al almacén: Centro (< 3 km) o Norte/Sur/Oriente/Poniente según la dirección
 function zoneOf(s, lat, lng) {
@@ -590,6 +592,14 @@ async function pushResumen(rows) {
 }
 // Pestaña "Diario": un renglón por día y por oficina / ciudad (clave en la columna A, se reescribe)
 const DIARIO_HEADERS = ['Clave', 'Fecha', 'Tipo', 'Nombre', 'Entregados', 'No entregados', 'Visitas', 'Pedidos nuevos'];
+// filas a cualquier pestaña (upsert por la columna A)
+async function pushRows(sheet, headers, rows) {
+  const s = getSettings();
+  if (s.sheets_enabled !== '1' || !s.sheets_url) return { skipped: true };
+  let n = 0;
+  for (const row of rows) { await postSheet(s, { sheet, headers, row }); n++; }
+  return { sent: n };
+}
 async function pushDiario(rows) {
   const s = getSettings();
   if (s.sheets_enabled !== '1' || !s.sheets_url) return { skipped: true };
@@ -597,4 +607,4 @@ async function pushDiario(rows) {
   for (const row of rows) { await postSheet(s, { sheet: 'Diario', headers: DIARIO_HEADERS, row }); n++; }
   return { sent: n };
 }
-module.exports = { pushDiario, sendSMS, sendEmail, smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };
+module.exports = { pushRows, pushDiario, sendSMS, sendEmail, smsDeviceStats, EVENTS, CHANNELS, SECRET_KEYS, INTEGRATION_KEYS, SHEET_HEADERS, appsScript, queueEvent, queueSheet, processQueue, start, testChannel, phoneE164, trackLink, baseUrl, pushResumen };

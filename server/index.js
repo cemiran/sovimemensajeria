@@ -2257,6 +2257,83 @@ const adminOrder = (req) => {
   if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
   return o;
 };
+// ---------- Alta prioridad ----------
+function setCustomerPriority(req, c, on) {
+  db.prepare('UPDATE customers SET priority=? WHERE id=?').run(on ? 1 : 0, c.id);
+  // sus pedidos abiertos toman la prioridad del cliente
+  const n = on ? db.prepare("UPDATE orders SET priority='alta' WHERE customer_id=? AND status IN ('pendiente','asignado','cargado','fallido') AND priority <> 'alta'").run(c.id).changes : 0;
+  audit(req, 'clientes.prioridad', `${c.name}: ${on ? 'alta prioridad' : 'prioridad normal'}${n ? ` (${n} pedido(s) abiertos a alta prioridad)` : ''}`);
+  setTimeout(prioSheetSync, 2000);
+}
+app.post('/api/customers/:id/priority', auth(...STAFF), wrap((req, res) => {
+  const c = db.prepare('SELECT * FROM customers WHERE id=?').get(Number(req.params.id));
+  if (!c) throw new HttpError(404, 'Cliente no encontrado');
+  if (outOfScope(req, c.id)) throw new HttpError(403, 'Este cliente es de otra oficina o ciudad');
+  setCustomerPriority(req, c, !!req.body?.on);
+  res.json({ ok: true, priority: req.body?.on ? 1 : 0 });
+}));
+app.post('/api/orders/bulk-priority', auth(...STAFF), wrap((req, res) => {
+  const b = req.body || {};
+  let ids = (Array.isArray(b.order_ids) ? b.order_ids : []).map(Number).filter(Boolean);
+  if (Array.isArray(b.customer_ids) && b.customer_ids.length) {
+    const cids = b.customer_ids.map(Number).filter(Boolean).slice(0, 5000);
+    ids.push(...db.prepare(`SELECT id FROM orders WHERE customer_id IN (${cids.map(() => '?').join(',')}) AND status IN ('pendiente','asignado','cargado','fallido')`).all(...cids).map((r) => r.id));
+  }
+  ids = officeOrders(req, [...new Set(ids)].slice(0, 5000));
+  if (!ids.length) throw new HttpError(400, 'No hay pedidos en la selección');
+  const v = b.on ? 'alta' : 'normal';
+  const up = db.prepare('UPDATE orders SET priority=? WHERE id=? AND priority<>?');
+  let n = 0;
+  tx(() => { for (const id of ids) n += up.run(v, id, v).changes; });
+  audit(req, 'pedidos.prioridad', `${n} pedido(s) → ${b.on ? 'alta prioridad' : 'prioridad normal'}`);
+  setTimeout(prioSheetSync, 2000);
+  res.json({ changed: n });
+}));
+app.post('/api/orders/:id/priority', auth(...STAFF), wrap((req, res) => {
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(Number(req.params.id));
+  if (!o) throw new HttpError(404, 'Pedido no encontrado');
+  if (!officeOrders(req, [o.id]).length) throw new HttpError(403, 'Este pedido es de otra oficina');
+  const v = req.body?.on ? 'alta' : 'normal';
+  db.prepare('UPDATE orders SET priority=? WHERE id=?').run(v, o.id);
+  audit(req, 'pedidos.prioridad', `${o.tracking_code}: ${v === 'alta' ? 'alta prioridad' : 'prioridad normal'}`);
+  setTimeout(prioSheetSync, 2000);
+  res.json(loadOrder(o.id));
+}));
+// Pestaña "Alta prioridad" en Google Sheets: una fila por pedido prioritario (también si después se le quitó), se actualiza al cambiar
+const PRIO_ST = { pendiente: 'Pendiente', asignado: 'Asignado', cargado: 'En ruta', entregado: 'Entregado', fallido: 'No entregado', cancelado: 'Cancelado' };
+let prioBusy = false;
+async function prioSheetSync() {
+  if (prioBusy) return;
+  const s = getSettings();
+  if (s.sheets_enabled !== '1' || !s.sheets_url) return;
+  prioBusy = true;
+  try {
+    const rows = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.priority, o.scheduled_date, o.delivered_at, o.created_at, c.name, c.external_id, c.phone, c.phone_alt, c.address, c.colonia, c.city, c.priority cprio,
+        u.name dname, w.name office, ps.hash,
+        (SELECT e.reason FROM evidences e WHERE e.order_id = o.id ORDER BY e.id DESC LIMIT 1) last_reason,
+        (SELECT GROUP_CONCAT(serial, ', ') FROM serials WHERE order_id = o.id) sn
+      FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id LEFT JOIN warehouses w ON w.id = ${OFFICE_OF('c')}
+      LEFT JOIN prio_sheet ps ON ps.order_id = o.id
+      WHERE o.priority = 'alta' OR c.priority = 1 OR ps.order_id IS NOT NULL ORDER BY o.id`).all();
+    const mark = db.prepare("INSERT INTO prio_sheet (order_id, hash, sent_at) VALUES (?, ?, datetime('now')) ON CONFLICT(order_id) DO UPDATE SET hash=excluded.hash, sent_at=excluded.sent_at");
+    const ph = (p) => String(p || '').replace(/[^\d+]/g, '');
+    let n = 0;
+    for (const r of rows) {
+      const why = r.priority === 'alta' && r.cprio ? 'Pedido y cliente' : r.cprio ? 'Cliente' : r.priority === 'alta' ? 'Pedido' : 'Retirada';
+      const body = [r.name, ph(r.external_id), ph(r.phone), ph(r.phone_alt), r.sn || '', r.address || '', r.colonia || '', r.city || '', r.office || '', why, PRIO_ST[r.status] || r.status,
+        r.dname || '', r.scheduled_date || '', r.delivered_at ? new Date(String(r.delivered_at).replace(' ', 'T') + 'Z').toLocaleString('es-MX', { timeZone: 'America/Tijuana' }) : '', r.status === 'fallido' || r.status === 'pendiente' ? r.last_reason || '' : ''];
+      const hash = JSON.stringify(body);
+      if (hash === r.hash) continue;
+      await notify.pushRows('Alta prioridad', PRIO_HEADERS, [[r.tracking_code, new Date().toISOString(), ...body]]);
+      mark.run(r.id, hash);
+      n++;
+    }
+    if (n) console.log(`[Sheets] Alta prioridad: ${n} fila(s)`);
+  } catch (e) { console.error('prioridad sheet', e.message); }
+  finally { prioBusy = false; }
+}
+const PRIO_HEADERS = ['ID de Rastreo', 'Actualizado', 'Cliente', 'Teléfono Telnor', 'Teléfono móvil', 'Teléfono adicional', 'Números de serie', 'Dirección', 'Colonia', 'Ciudad', 'Oficina',
+  'Prioridad', 'Estatus', 'Repartidor', 'Fecha programada', 'Entregado', 'Último motivo'];
 const resendSheet = (orderId) => db.prepare("UPDATE sheet_sync SET status='pendiente', attempts=0, next_try_at=datetime('now') WHERE order_id=? AND status<>'desactivado'").run(orderId);
 app.put('/api/orders/:id/edit', auth('admin'), wrap((req, res) => {
   const o = adminOrder(req);
@@ -2415,7 +2492,7 @@ app.post('/api/my/orders/:id/reactivate', auth('repartidor'), wrap((req, res) =>
     db.prepare(`UPDATE orders SET status='pendiente', notes=TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'')='' THEN '' ELSE ' | ' END || ?) WHERE id=?`)
       .run(`Reactivado por ${me.name} para entrega inmediata (${before})`, o.id);
   });
-  const r = assignOrdersTo(req, { id: me.id, name: me.name }, [o.id], today());
+  const r = assignOrdersTo(req, { id: me.id, name: me.name }, [o.id], today(), { noPriority: true });
   if (!r.assigned) throw new HttpError(409, r.skipped[0]?.reason || 'No se pudo tomar el pedido');
   audit(req, 'pedidos.reactivar', `${o.tracking_code}: ${before} → entrega inmediata por ${me.name}`);
   res.json({ id: o.id, tracking_code: o.tracking_code });
@@ -2916,9 +2993,13 @@ app.get(
     sendList(req, res, { total, rows });
   })
 );
-const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'colonia', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp'];
+const customerFields = ['office_id', 'name', 'external_id', 'phone', 'phone_alt', 'email', 'address', 'colonia', 'reference', 'city', 'zip', 'lat', 'lng', 'window_start', 'window_end', 'notes', 'notify_sms', 'notify_email', 'notify_whatsapp', 'priority'];
+// teléfono siempre corrido: sin guiones, espacios, puntos ni paréntesis (si es un número)
+const flatPhone = (v) => { if (v == null || v === '') return null; const t = String(v).trim(); const d = t.replace(/[\s\-().\/]/g, ''); return /^\+?\d+$/.test(d) ? d : t; };
 const custVal = (b, f) => {
   if (f.startsWith('notify_')) return b[f] === undefined ? 1 : [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
+  if (f === 'priority') return [true, 1, '1', 'on', 'true'].includes(b[f]) ? 1 : 0;
+  if (f === 'phone' || f === 'phone_alt' || f === 'external_id') return flatPhone(b[f]);
   if (f === 'office_id') return b[f] === '' || b[f] == null ? officeForCity(b.city) : Number(b[f]);
   if (f === 'city') return b.city === '' || b.city == null ? null : canonCity(b.city);
   return b[f] === '' || b[f] === undefined ? null : f === 'lat' || f === 'lng' ? Number(b[f]) : b[f];
@@ -3328,6 +3409,8 @@ app.put(
     if (req.body.city !== undefined && normCity(req.body.city) !== normCity(c.city) && officeForCity(req.body.city)) b.office_id = officeForCity(req.body.city);
     const vals = customerFields.map((f) => custVal(b, f));
     db.prepare(`UPDATE customers SET ${customerFields.map((f) => f + '=?').join(',')} WHERE id=?`).run(...vals, c.id);
+    const nowPrio = custVal(b, 'priority');
+    if (nowPrio !== (c.priority ? 1 : 0)) setCustomerPriority(req, c, nowPrio);
     const moved = b.lat != null && b.lat !== '' && (Number(b.lat) !== c.lat || Number(b.lng) !== c.lng);
     if (moved) db.prepare('UPDATE customers SET geo_quality=? WHERE id=?').run(['exacta', 'calle', 'colonia'].includes(req.body.geo_quality) ? req.body.geo_quality : 'manual', c.id);
     res.json({ ok: true });
@@ -4154,7 +4237,7 @@ app.get(
 // ---------- Pedidos ----------
 const ORDER_SELECT = `
   SELECT o.*, c.name customer_name, c.phone customer_phone, c.phone_alt customer_phone_alt, c.external_id telnor_phone, c.address, c.reference address_reference, c.city customer_city, c.colonia customer_colonia, c.zip customer_zip,
-         c.lat, c.lng, c.geo_quality, c.window_start, c.window_end, u.name driver_name, oacc.name account_name
+         c.lat, c.lng, c.geo_quality, c.window_start, c.window_end, c.priority customer_priority, u.name driver_name, oacc.name account_name
   FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.driver_id LEFT JOIN accounts oacc ON oacc.id = o.account_id`;
 
 function loadOrder(id) {
@@ -4286,6 +4369,7 @@ app.get(
     }
     const zipQ = [].concat(req.query.zip || []).flatMap((x) => String(x).split(/[,\s]+/)).map(zipOf).filter(Boolean);
     if (zipQ.length) { where.push(`substr(replace(COALESCE(c.zip,''),' ',''),1,5) IN (${zipQ.map(() => '?').join(',')})`); args.push(...zipQ); }
+    if (req.query.priority === 'alta') where.push("(o.priority = 'alta' OR c.priority = 1)");
     if (account_id === 'none') where.push('o.account_id IS NULL');
     else if (account_id) { where.push('o.account_id = ?'); args.push(Number(account_id)); }
     if (q) {
@@ -5124,7 +5208,7 @@ function reactivateOrder(req, orderId, body) {
       appointment_time=CASE WHEN ? <> '' THEN ? ELSE appointment_time END, notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?`)
       .run(/^\d{2}:\d{2}$/.test(hora) ? hora : '', hora, ` | Reactivado ${today()} (${req.user.name}): ${why}${lastFail?.reason ? ' · antes: ' + lastFail.reason : ''}`, o.id);
     if (lastFail) db.prepare("UPDATE evidences SET notes=TRIM(COALESCE(notes,'') || ?) WHERE id=?").run(` [Reactivado: ${why}]`, lastFail.id);
-    return assignOrdersTo(req, { id: drv.id, name: drv.name }, [o.id], today());
+    return assignOrdersTo(req, { id: drv.id, name: drv.name }, [o.id], today(), { noPriority: true });
   });
   if (!out.assigned) throw new HttpError(409, out.skipped?.[0]?.reason || 'No se pudo regresar a la ruta');
   audit(req, 'pedido.reactivar', `${o.tracking_code}: el cliente sí lo quiere → ruta de ${drv.name} (${today()})${lastFail?.reason ? ' · antes: ' + lastFail.reason : ''}`);
@@ -5166,6 +5250,36 @@ function assignOrdersTo(req, drv, ids, date, opts = {}) {
     }
     if (!take.length) return { assigned: 0, skipped, route_id: null, driver: drv.name, date };
     const s = getSettings();
+    // Alta prioridad: pedidos marcados (o de clientes prioritarios) sin ruta y cerca de esta ruta entran aunque no se hayan elegido.
+    // Si quedan más cerca de otra ruta del mismo día que aún no sale, van a esa.
+    const prioAdded = [];
+    const prioElsewhere = new Map();
+    if (!opts.noPriority && s.priority_pull !== '0') {
+      try {
+        const radius = Number(s.priority_radius_km) || 3;
+        const cur = db.prepare("SELECT id FROM routes WHERE driver_id=? AND date=? AND status IN ('planificada','en_curso') ORDER BY id DESC LIMIT 1").get(drv.id, date);
+        const takeIds = take.map((o) => o.id);
+        const refs = db.prepare(`SELECT c.lat, c.lng FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.lat IS NOT NULL AND (o.id IN (${takeIds.map(() => '?').join(',')})${cur ? " OR (o.route_id = ? AND o.status IN ('asignado','cargado'))" : ''})`).all(...takeIds, ...(cur ? [cur.id] : []));
+        if (refs.length) {
+          const cand = db.prepare(`SELECT o.id, o.tracking_code, o.status, o.route_id, o.driver_id, o.scheduled_date, c.lat, c.lng FROM orders o JOIN customers c ON c.id = o.customer_id
+            WHERE (o.priority = 'alta' OR c.priority = 1) AND o.status IN ('pendiente','fallido') AND o.route_id IS NULL AND ${FOLLOW_OPEN}
+              AND c.lat IS NOT NULL AND (o.scheduled_date IS NULL OR o.scheduled_date <= ?)`).all(date).filter((o) => !takeIds.includes(o.id));
+          const mineP = new Set(officeOrders(req, cand.map((o) => o.id)));
+          // paradas de las otras rutas del día que aún no salen
+          const others = db.prepare(`SELECT r.id, r.driver_id, u.name dname, c.lat, c.lng FROM routes r JOIN users u ON u.id = r.driver_id JOIN orders o ON o.route_id = r.id JOIN customers c ON c.id = o.customer_id
+            WHERE r.date = ? AND r.status = 'planificada' AND r.driver_id <> ? AND o.status IN ('asignado','cargado') AND c.lat IS NOT NULL AND u.suspended_reason IS NULL`).all(date, drv.id);
+          const near = (p, pts) => pts.reduce((m, q) => Math.min(m, haversine(p, q)), Infinity);
+          for (const o of cand) {
+            if (!mineP.has(o.id)) continue;
+            const dMe = near(o, refs);
+            let best = null;
+            for (const x of others) { const d = haversine(o, x); if (d < dMe && d <= radius && (!best || d < best.d)) best = { d, x }; }
+            if (best) { const g = prioElsewhere.get(best.x.id) || { drv: { id: best.x.driver_id, name: best.x.dname }, ids: [], codes: [] }; g.ids.push(o.id); g.codes.push(o.tracking_code); prioElsewhere.set(best.x.id, g); }
+            else if (dMe <= radius) { take.push(o); prioAdded.push({ tracking_code: o.tracking_code, driver: drv.name, km: Math.round(dMe * 10) / 10 }); }
+          }
+        }
+      } catch (e) { console.error('prioridad cercana', e.message); }
+    }
     const fromRoutes = [...new Set(take.map((o) => o.route_id).filter(Boolean))];
     const result = tx(() => {
       // se sueltan de su ruta anterior
@@ -5189,10 +5303,17 @@ function assignOrdersTo(req, drv, ids, date, opts = {}) {
       }
       return out;
     });
-    audit(req, 'pedidos.asignar', `${take.length} pedidos → ${drv.name} (${date})`);
+    audit(req, 'pedidos.asignar', `${take.length} pedidos → ${drv.name} (${date})${prioAdded.length ? ` · incluye ${prioAdded.length} de alta prioridad cercano(s): ${prioAdded.map((x) => x.tracking_code).join(', ')}` : ''}`);
+    for (const g of prioElsewhere.values()) {
+      try {
+        const x = assignOrdersTo(req, g.drv, g.ids, date, { noPriority: true });
+        if (x.assigned) prioAdded.push(...g.codes.map((tc) => ({ tracking_code: tc, driver: g.drv.name })));
+      } catch (e) { console.error('prioridad otra ruta', e.message); }
+    }
+    if (prioAdded.length) setTimeout(prioSheetSync, 3000);
     const rt = db.prepare('SELECT est_minutes FROM routes WHERE id=?').get(result.route_id);
     const wd = Number(getSettings().workday_minutes) || 540;
-    return { assigned: take.length, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0, est_minutes: rt?.est_minutes || 0, over_workday: (rt?.est_minutes || 0) > wd ? Math.round(((rt.est_minutes - wd) / 60) * 10) / 10 : 0 };
+    return { assigned: take.length, priority_added: prioAdded, skipped, route_id: result.route_id, driver: drv.name, date, unlocated: result.unlocated?.length || 0, est_minutes: rt?.est_minutes || 0, over_workday: (rt?.est_minutes || 0) > wd ? Math.round(((rt.est_minutes - wd) / 60) * 10) / 10 : 0 };
   }
 }
 // Programar fecha en bloque: sin repartidor solo cambia la fecha; con repartidor pasan a su ruta de ese día
@@ -6552,6 +6673,8 @@ if (require.main === module) {
   setInterval(neighborRefine, 6 * 3600000).unref();
   setTimeout(() => pinCheck(), 300000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
+  setTimeout(prioSheetSync, 45000);
+  setInterval(prioSheetSync, 5 * 60000).unref();
   setTimeout(localityFix, 30000);
   setInterval(localityFix, 6 * 3600000).unref();
   setTimeout(() => destackRefine(), 150000);
