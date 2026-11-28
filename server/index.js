@@ -4143,12 +4143,14 @@ function presencePin(c) {
   return { lat: near.reduce((a, p) => a + p.lat, 0) / near.length, lng: near.reduce((a, p) => a + p.lng, 0) / near.length, n: near.length };
 }
 // clientes con pedido abierto y pin aproximado que ya fueron visitados en su puerta: ese GPS pasa a ser su ubicación
-function presenceFix() {
+async function presenceFix() {
   const rows = db.prepare(`SELECT DISTINCT c.id, c.name, c.lat, c.lng, c.geo_quality FROM customers c JOIN orders o ON o.customer_id = c.id
     WHERE o.status IN ('pendiente','asignado','cargado','fallido') AND c.geo_quality IN ('calle','colonia','cp','ciudad')`).all();
   const up = db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='repartidor' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')");
   const prev = []; const routes = new Set();
+  let i = 0;
   for (const c of rows) {
+    if (++i % 25 === 0) await new Promise((r) => setImmediate(r));
     const p = presencePin(c);
     if (!p || (c.lat != null && haversine(c, p) < 0.02)) continue;
     if (up.run(p.lat, p.lng, c.id).changes) {
@@ -4169,11 +4171,13 @@ async function reviewScheduledRoutes({ all = false } = {}) {
   reviewJob.running = true;
   const out = { puerta: 0, mismo_domicilio: 0, rutas_replaneadas: 0, rutas: 0, paradas: 0, aproximadas: 0 };
   try {
-    const pf = presenceFix(); out.puerta = pf.fixed;
+    const pf = await presenceFix(); out.puerta = pf.fixed;
     const touched = new Set(pf.routes);
     const rows = db.prepare(`SELECT DISTINCT c.*, o.route_id rid FROM orders o JOIN routes r ON r.id = o.route_id JOIN customers c ON c.id = o.customer_id
       WHERE r.date >= date('now','localtime') AND r.status IN ('planificada','en_curso') AND o.status IN ('asignado','cargado') AND c.geo_quality IN ('calle','colonia','cp','ciudad')`).all();
+    let k = 0;
     for (const c of rows) {
+      if (++k % 10 === 0) await new Promise((r) => setImmediate(r));
       const same = sameAddressPin(c);
       if (same && db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='exacta' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(same.lat, same.lng, c.id).changes) { out.mismo_domicilio++; touched.add(c.rid); }
     }
@@ -6756,19 +6760,20 @@ if (require.main === module) {
   setTimeout(diarioTick, 75000);
   setInterval(diarioTick, 15 * 60000).unref();
   setTimeout(geocodePending, 5000);
-  setTimeout(() => routedRefine(), 90000);
+  // trabajos de mantenimiento escalonados después del arranque: la app atiende primero a los usuarios
+  setTimeout(() => routedRefine(), 10 * 60000);
   setInterval(() => routedRefine(), 10 * 60000).unref();
-  setTimeout(neighborRefine, 120000);
+  setTimeout(neighborRefine, 70 * 60000);
   setInterval(neighborRefine, 6 * 3600000).unref();
-  setTimeout(() => pinCheck(), 300000);
+  setTimeout(() => pinCheck(), 100 * 60000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
-  setTimeout(() => { const v = getSettings().route_review_v1; reviewScheduledRoutes({ all: !v }).then(() => { if (!v) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('route_review_v1', datetime('now'))").run(); }); }, 60000);
+  setTimeout(() => { const v = getSettings().route_review_v1; reviewScheduledRoutes({ all: !v }).then(() => { if (!v) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('route_review_v1', datetime('now'))").run(); }); }, 40 * 60000);
   setInterval(() => reviewScheduledRoutes(), 6 * 3600000).unref();
-  setTimeout(prioSheetSync, 45000);
+  setTimeout(prioSheetSync, 6 * 60000);
   setInterval(prioSheetSync, 5 * 60000).unref();
-  setTimeout(localityFix, 30000);
+  setTimeout(localityFix, 20 * 60000);
   setInterval(localityFix, 6 * 3600000).unref();
-  setTimeout(() => destackRefine(), 150000);
+  setTimeout(() => destackRefine(), 55 * 60000);
   setInterval(() => destackRefine(), 6 * 3600000).unref();
   setTimeout(() => docExpiryJob().catch((e) => console.error('vencimientos', e.message)), 240000);
   setTimeout(() => { try { settleJob(); } catch (e) { console.error('corte', e.message); } }, 180000);
