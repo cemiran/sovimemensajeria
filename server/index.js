@@ -4133,6 +4133,63 @@ function sameAddressPin(c) {
     AND lower(TRIM(city)) = lower(TRIM(?)) AND substr(lower(TRIM(address)), 1, 6) = substr(lower(TRIM(?)), 1, 6)`).all(c.id, c.city || '', c.address || '');
   return peers.find((p) => addrKey(p) === k && (!c.colonia || !p.colonia || colKey(p.colonia) === colKey(c.colonia))) || null;
 }
+const DOOR_REASONS = ['Cliente ausente', 'Rechazado por cliente', 'No es cliente Telnor'];
+function presencePin(c) {
+  const ev = db.prepare(`SELECT e.lat, e.lng FROM evidences e JOIN orders o ON o.id = e.order_id
+    WHERE o.customer_id = ? AND e.result = 'fallido' AND e.lat IS NOT NULL AND e.reason IN (${DOOR_REASONS.map(() => '?').join(',')}) ORDER BY e.id DESC LIMIT 3`).all(c.id, ...DOOR_REASONS);
+  if (!ev.length) return null;
+  // varias visitas: se usan las que coinciden entre sí (a menos de 150 m de la más reciente)
+  const near = ev.filter((p) => haversine(p, ev[0]) < 0.15);
+  return { lat: near.reduce((a, p) => a + p.lat, 0) / near.length, lng: near.reduce((a, p) => a + p.lng, 0) / near.length, n: near.length };
+}
+// clientes con pedido abierto y pin aproximado que ya fueron visitados en su puerta: ese GPS pasa a ser su ubicación
+function presenceFix() {
+  const rows = db.prepare(`SELECT DISTINCT c.id, c.name, c.lat, c.lng, c.geo_quality FROM customers c JOIN orders o ON o.customer_id = c.id
+    WHERE o.status IN ('pendiente','asignado','cargado','fallido') AND c.geo_quality IN ('calle','colonia','cp','ciudad')`).all();
+  const up = db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='repartidor' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')");
+  const prev = []; const routes = new Set();
+  for (const c of rows) {
+    const p = presencePin(c);
+    if (!p || (c.lat != null && haversine(c, p) < 0.02)) continue;
+    if (up.run(p.lat, p.lng, c.id).changes) {
+      prev.push({ id: c.id, lat: c.lat, lng: c.lng, q: c.geo_quality });
+      for (const r of db.prepare("SELECT DISTINCT route_id FROM orders WHERE customer_id=? AND route_id IS NOT NULL AND status IN ('asignado','cargado')").all(c.id)) routes.add(r.route_id);
+    }
+  }
+  if (prev.length) {
+    fs.writeFileSync(path.join(DATA_DIR, `puerta_prev_${Date.now()}.json`), JSON.stringify(prev));
+    db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('clientes.ubicacion', `Ubicación por visita previa en el domicilio (GPS del repartidor en la puerta): ${prev.length} clientes`);
+  }
+  return { fixed: prev.length, routes: [...routes] };
+}
+// Revisión de rutas programadas (que aún no salen): ubicaciones por la puerta, mismo domicilio ya confirmado y re-planeación
+const reviewJob = { running: false, last: null };
+async function reviewScheduledRoutes({ all = false } = {}) {
+  if (reviewJob.running) return { busy: true };
+  reviewJob.running = true;
+  const out = { puerta: 0, mismo_domicilio: 0, rutas_replaneadas: 0, rutas: 0, paradas: 0, aproximadas: 0 };
+  try {
+    const pf = presenceFix(); out.puerta = pf.fixed;
+    const touched = new Set(pf.routes);
+    const rows = db.prepare(`SELECT DISTINCT c.*, o.route_id rid FROM orders o JOIN routes r ON r.id = o.route_id JOIN customers c ON c.id = o.customer_id
+      WHERE r.date >= date('now','localtime') AND r.status IN ('planificada','en_curso') AND o.status IN ('asignado','cargado') AND c.geo_quality IN ('calle','colonia','cp','ciudad')`).all();
+    for (const c of rows) {
+      const same = sameAddressPin(c);
+      if (same && db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='exacta' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(same.lat, same.lng, c.id).changes) { out.mismo_domicilio++; touched.add(c.rid); }
+    }
+    const routes = db.prepare("SELECT id FROM routes WHERE date >= date('now','localtime') AND status = 'planificada'").all().map((r) => r.id);
+    out.rutas = routes.length;
+    const st = db.prepare(`SELECT COUNT(*) n, SUM(c.geo_quality IN ('calle','colonia','cp','ciudad')) a FROM orders o JOIN routes r ON r.id=o.route_id JOIN customers c ON c.id=o.customer_id
+      WHERE r.date >= date('now','localtime') AND r.status IN ('planificada','en_curso') AND o.status IN ('asignado','cargado')`).get();
+    out.paradas = st.n; out.aproximadas = st.a || 0;
+    // re-planea con calles reales: todas las que no han salido (revisión completa) o solo las que cambiaron
+    for (const rid of routes) if (all || touched.has(rid)) { googleRefine(rid); out.rutas_replaneadas++; await new Promise((r) => setTimeout(r, 2500)); }
+    db.prepare('INSERT INTO audit_log (user_id, action, detail) VALUES (NULL, ?, ?)').run('rutas.revision', `Revisión de rutas programadas: ${out.rutas} rutas sin salir, ${out.paradas} paradas abiertas (${out.aproximadas} con ubicación aproximada); ${out.puerta} ubicadas por visita previa en la puerta, ${out.mismo_domicilio} por domicilio ya confirmado; ${out.rutas_replaneadas} rutas re-planeadas`);
+  } catch (e) { console.error('reviewScheduledRoutes', e.message); }
+  finally { reviewJob.running = false; reviewJob.last = { at: new Date().toISOString(), ...out }; }
+  return out;
+}
+app.post('/api/routes/review', auth('admin'), wrap(async (req, res) => { res.json(await reviewScheduledRoutes({ all: true })); }));
 const routedGeo = { running: false, last: null };
 // paradas con pin aproximado en rutas de hoy y mañana: primero las más próximas en la ruta
 async function routedRefine({ routeId = null, force = false } = {}) {
@@ -4149,6 +4206,11 @@ async function routedRefine({ routeId = null, force = false } = {}) {
     for (const c of rows) {
       out.revisadas++;
       db.prepare("UPDATE customers SET geo_tried = datetime('now') WHERE id = ?").run(c.id);
+      const door = presencePin(c);
+      if (door) {
+        db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='repartidor' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(door.lat, door.lng, c.id);
+        out.mejoradas++; out.rutas.add(c.rid); continue;
+      }
       const same = sameAddressPin(c);
       if (same) {
         db.prepare("UPDATE customers SET lat=?, lng=?, geo_quality='exacta' WHERE id=? AND geo_quality IN ('calle','colonia','cp','ciudad')").run(same.lat, same.lng, c.id);
@@ -5042,10 +5104,28 @@ function googleRefine(rid) {
     } catch (e) { console.error('googleRefine', e.message); } finally { gmPending.delete(rid); }
   }, 1500);
 }
+// paradas seguidas en el mismo punto (pin de su calle o colonia): se ordenan por calle y número exterior
+function stackedOrder(seq, stops) {
+  if (!seq?.length) return seq;
+  const at = new Map(stops.map((s) => [s.id, s.lat == null ? null : `${(+s.lat).toFixed(5)},${(+s.lng).toFixed(5)}`]));
+  const runs = [];
+  for (let i = 0; i < seq.length; ) { let j = i + 1; const k = at.get(seq[i].id); while (k && j < seq.length && at.get(seq[j].id) === k) j++; if (j - i > 1) runs.push([i, j]); i = j; }
+  if (!runs.length) return seq;
+  const ids = runs.flatMap(([i, j]) => seq.slice(i, j).map((x) => x.id));
+  const addr = new Map(db.prepare(`SELECT o.id, c.address FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id IN (${ids.map(() => '?').join(',')})`).all(...ids).map((r) => [r.id, splitStreet(r.address)]));
+  const key = (id) => { const a = addr.get(id) || { street: '', ext_num: '' }; return [a.street.toUpperCase(), parseInt(a.ext_num, 10) || 0]; };
+  const out = seq.map((x) => ({ ...x }));
+  for (const [i, j] of runs) {
+    const sorted = seq.slice(i, j).map((x) => x.id).sort((p, q) => { const [sp, np] = key(p), [sq, nq] = key(q); return sp.localeCompare(sq, 'es') || np - nq; });
+    sorted.forEach((id, n) => { out[i + n].id = id; });
+  }
+  return out;
+}
 function persistRoute({ routeId, name, driverId, date, depot, orderIds, settings, startTime, noRefine, matrix: given }) {
   const stops = stopsFor(orderIds);
   const matrix = given || googleMatrix(depot, stops);
   const opt = optimizeRoute(depot, stops, settings, { startTime, matrix });
+  try { opt.sequence = stackedOrder(opt.sequence, stops); } catch (e) { console.error('orden encimadas', e.message); }
   if (!matrix && !noRefine && orderIds.length && (gmaps.enabled() || osrm.enabled())) setImmediate(() => { const id = routeId || db.prepare('SELECT route_id FROM orders WHERE id=?').get(orderIds[0])?.route_id; if (id) googleRefine(id); });
   return tx(() => {
     let rid = routeId;
@@ -6682,6 +6762,8 @@ if (require.main === module) {
   setInterval(neighborRefine, 6 * 3600000).unref();
   setTimeout(() => pinCheck(), 300000);
   setInterval(() => pinCheck(), 6 * 3600000).unref();
+  setTimeout(() => { const v = getSettings().route_review_v1; reviewScheduledRoutes({ all: !v }).then(() => { if (!v) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('route_review_v1', datetime('now'))").run(); }); }, 60000);
+  setInterval(() => reviewScheduledRoutes(), 6 * 3600000).unref();
   setTimeout(prioSheetSync, 45000);
   setInterval(prioSheetSync, 5 * 60000).unref();
   setTimeout(localityFix, 30000);
@@ -6709,5 +6791,5 @@ if (require.main === module) {
 })();
 app.releaseOverdue = releaseOverdue;
 app.internal = { telmexSerial, diarioRows, persistRoute, depotOf, routedRefine, reactivateOrder, canonCity, neighborRefine, neighborPin, pinCheck, sendTestContract, docExpiryJob, settleClose, settleJob };
-app.locals.geoJobs = { localityFix, falseExactFix, destackRefine, localityOf };
+app.locals.geoJobs = { localityFix, falseExactFix, destackRefine, localityOf, presenceFix, reviewScheduledRoutes, stackedOrder };
 module.exports = app;
